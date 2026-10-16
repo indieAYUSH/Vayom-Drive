@@ -4,22 +4,37 @@ import { Button } from '../common/Button'
 import { Input } from '../common/Input'
 import { Checkbox } from '../common/Checkbox'
 import { useVaultStore } from '../../store/useVaultStore'
+import { api } from '../../services/api'
 import { Copy, Check, Link, Clock, Lock } from 'lucide-react'
 
 export const ShareLinkModal: React.FC = () => {
-  const { isShareModalOpen, closeShareModal, shareTargetFile, createShareLink } = useVaultStore()
+  const { isShareModalOpen, closeShareModal, shareTargetFile, fetchShares } = useVaultStore()
   const [expiryHours, setExpiryHours] = useState(24)
   const [hasPassword, setHasPassword] = useState(false)
+  const [password, setPassword] = useState('')
+  const [isGenerating, setIsGenerating] = useState(false)
   const [createdUrl, setCreatedUrl] = useState<string | null>(null)
   const [copied, setCopied] = useState(false)
 
   if (!shareTargetFile) return null
 
-  const handleGenerate = () => {
-    createShareLink(shareTargetFile.id, expiryHours, hasPassword)
-    const mockToken = Math.random().toString(36).substring(2, 10)
-    const url = `${window.location.origin}/s/${mockToken}`
-    setCreatedUrl(url)
+  const handleGenerate = async () => {
+    setIsGenerating(true)
+    try {
+      const res = await api.createShare(
+        shareTargetFile.id,
+        expiryHours,
+        hasPassword,
+        hasPassword ? password : undefined
+      )
+      const url = `${window.location.origin}/api/v1/s/${res.token}`
+      setCreatedUrl(url)
+      await fetchShares()
+    } catch (err: any) {
+      alert(err.message || 'Failed to create share link')
+    } finally {
+      setIsGenerating(false)
+    }
   }
 
   const handleCopy = () => {
@@ -31,6 +46,8 @@ export const ShareLinkModal: React.FC = () => {
 
   const handleClose = () => {
     setCreatedUrl(null)
+    setPassword('')
+    setHasPassword(false)
     closeShareModal()
   }
 
@@ -84,6 +101,8 @@ export const ShareLinkModal: React.FC = () => {
                   <Input
                     placeholder="Enter link password..."
                     type="password"
+                    value={password}
+                    onChange={(e) => setPassword(e.target.value)}
                   />
                 </div>
               )}
@@ -93,8 +112,14 @@ export const ShareLinkModal: React.FC = () => {
               <Button variant="ghost" size="sm" onClick={handleClose}>
                 Cancel
               </Button>
-              <Button variant="primary" size="sm" onClick={handleGenerate} icon={<Link size={12} />}>
-                Generate Secure Link
+              <Button
+                variant="primary"
+                size="sm"
+                onClick={handleGenerate}
+                disabled={isGenerating}
+                icon={<Link size={12} />}
+              >
+                {isGenerating ? 'Generating...' : 'Generate Secure Link'}
               </Button>
             </div>
           </>

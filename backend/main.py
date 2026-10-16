@@ -65,12 +65,20 @@ app = FastAPI(
 # Include REST API endpoints
 app.include_router(api_router)
 
+@app.get("/s/{token}")
+async def redirect_share(token: str):
+    from fastapi.responses import RedirectResponse
+    return RedirectResponse(url=f"/api/v1/s/{token}")
+
 # Mount Frontend static assets and SPA fallback
 if FRONTEND_DIST.exists():
     app.mount("/assets", StaticFiles(directory=FRONTEND_DIST / "assets"), name="assets")
 
     @app.api_route("/{full_path:path}", methods=["GET", "HEAD"])
     async def serve_spa(full_path: str):
+        if full_path.startswith("api/"):
+            from fastapi import HTTPException
+            raise HTTPException(status_code=404, detail="API route not found")
         # Serve static file if exists (e.g. manifest.webmanifest, sw.js), else fallback to index.html
         potential_file = FRONTEND_DIST / full_path
         if potential_file.is_file():

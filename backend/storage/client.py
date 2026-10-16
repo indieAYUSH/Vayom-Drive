@@ -132,6 +132,7 @@ class TelegramStorageClient:
         """
         Scans channel message history backward from HEAD.
         Extracts VAYOM:v1: JSON envelopes from captions for zero-loss recovery.
+        Uses ephemeral probe message to identify channel HEAD, then fetches by ID chunks.
         """
         if not self._is_connected or not self.client:
             mock_dir = settings.DATA_DIR / "mock_blobs"
@@ -151,15 +152,41 @@ class TelegramStorageClient:
 
         envelopes = []
         channel = int(settings.TELEGRAM_CHANNEL_ID)
-        async for message in self.client.iter_messages(channel, limit=limit):
-            if message.text and message.text.startswith("VAYOM:v1:"):
-                try:
-                    payload = message.text[len("VAYOM:v1:"):]
-                    data = json.loads(payload)
-                    data["telegram_message_id"] = message.id
-                    envelopes.append(data)
-                except Exception as err:
-                    logger.warning(f"Failed to parse caption envelope in message {message.id}: {err}")
+
+        # 1. Ephemeral probe to discover channel HEAD ID
+        head_id = 1
+        try:
+            probe = await self.client.send_message(channel, "VAYOM:DISASTER_RECOVERY_HEAD_PROBE")
+            head_id = probe.id
+            await self.client.delete_messages(channel, [head_id])
+        except Exception as e:
+            logger.warning(f"Could not probe channel HEAD, falling back to scanning range: {e}")
+            head_id = 500
+
+        # 2. Scan message IDs backwards from HEAD in batches of 100
+        start_id = max(1, head_id - limit)
+        for chunk_start in range(head_id - 1, start_id - 1, -100):
+            chunk_end = max(start_id, chunk_start - 99)
+            batch_ids = list(range(chunk_end, chunk_start + 1))
+            if not batch_ids:
+                continue
+
+            try:
+                messages = await self.client.get_messages(channel, ids=batch_ids)
+                for message in messages:
+                    if not message:
+                        continue
+                    text = message.text or message.message or ""
+                    if text.startswith("VAYOM:v1:"):
+                        try:
+                            payload = text[len("VAYOM:v1:"):]
+                            data = json.loads(payload)
+                            data["telegram_message_id"] = message.id
+                            envelopes.append(data)
+                        except Exception as err:
+                            logger.warning(f"Failed to parse caption envelope in message {message.id}: {err}")
+            except Exception as e:
+                logger.error(f"Error fetching message batch {batch_ids[0]}-{batch_ids[-1]}: {e}")
 
         return envelopes
 

@@ -9,13 +9,21 @@ export const CreateAlbumModal: React.FC = () => {
   const { isCreateAlbumModalOpen, setCreateAlbumModalOpen, createAlbum } = useVaultStore()
   const [name, setName] = useState('')
   const [description, setDescription] = useState('')
+  const [isSubmitting, setIsSubmitting] = useState(false)
 
-  const handleCreate = (e: React.FormEvent) => {
+  const handleCreate = async (e: React.FormEvent) => {
     e.preventDefault()
-    if (!name.trim()) return
-    createAlbum(name.trim(), description.trim() || undefined)
-    setName('')
-    setDescription('')
+    if (!name.trim() || isSubmitting) return
+    setIsSubmitting(true)
+    try {
+      await createAlbum(name.trim(), description.trim() || undefined)
+      setName('')
+      setDescription('')
+    } catch (err: any) {
+      alert(err.message || 'Failed to create album')
+    } finally {
+      setIsSubmitting(false)
+    }
   }
 
   return (
@@ -28,7 +36,7 @@ export const CreateAlbumModal: React.FC = () => {
       <form onSubmit={handleCreate} className="space-y-4 font-mono text-xs">
         <Input
           label="Album Name"
-          placeholder="e.g. Iceland Drone 4K"
+          placeholder="e.g. System Backups, 4K Footage"
           value={name}
           onChange={(e) => setName(e.target.value)}
           required
@@ -61,10 +69,10 @@ export const CreateAlbumModal: React.FC = () => {
             type="submit"
             variant="primary"
             size="sm"
-            disabled={!name.trim()}
+            disabled={!name.trim() || isSubmitting}
             icon={<FolderPlus size={12} />}
           >
-            Create Album
+            {isSubmitting ? 'Creating...' : 'Create Album'}
           </Button>
         </div>
       </form>

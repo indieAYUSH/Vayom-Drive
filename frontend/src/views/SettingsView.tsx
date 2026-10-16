@@ -5,40 +5,43 @@ import { Button } from '../components/common/Button'
 import { Badge } from '../components/common/Badge'
 
 export const SettingsView: React.FC = () => {
-  const { metrics } = useVaultStore()
+  const { metrics, rebuildIndex } = useVaultStore()
   const [isRebuilding, setIsRebuilding] = useState(false)
   const [rebuildLogs, setRebuildLogs] = useState<string[]>([])
   const [rebuildDone, setRebuildDone] = useState(false)
 
-  const handleRebuildIndex = () => {
+  const handleRebuildIndex = async () => {
     setIsRebuilding(true)
-    setRebuildLogs([])
+    setRebuildLogs([
+      `[${new Date().toLocaleTimeString()}] Connecting to Telegram channel: ${metrics.channel_id}`,
+      `[${new Date().toLocaleTimeString()}] Scanning channel message history backward from HEAD...`,
+      `[${new Date().toLocaleTimeString()}] Parsing VAYOM:v1 metadata envelopes from document captions...`,
+    ])
     setRebuildDone(false)
 
-    const steps = [
-      'Connecting to Telegram channel: ' + metrics.channel_id,
-      'Scanning channel message history backward from HEAD...',
-      'Found 2,180 total Telegram messages.',
-      'Parsing VAYOM:v1 metadata envelopes from document captions...',
-      'Reconstructing file_parts table: 1,420 extents mapped.',
-      'Re-indexing ViT-B/32 vector embeddings into sqlite-vec...',
-      'Committing atomic transaction to SQLite WAL database...',
-      'Complete: 1,420 files successfully recovered with exact SHA-256 parity.'
-    ]
-
-    steps.forEach((step, idx) => {
-      setTimeout(() => {
-        setRebuildLogs((prev) => [...prev, `[${new Date().toLocaleTimeString()}] ${step}`])
-        if (idx === steps.length - 1) {
-          setIsRebuilding(false)
-          setRebuildDone(true)
-        }
-      }, (idx + 1) * 350)
-    })
+    try {
+      const res = await rebuildIndex()
+      setRebuildLogs((prev) => [
+        ...prev,
+        `[${new Date().toLocaleTimeString()}] Reconstructing file_parts and SQLite catalog...`,
+        `[${new Date().toLocaleTimeString()}] Scanned and processed ${res.restored_envelopes} envelopes.`,
+        `[${new Date().toLocaleTimeString()}] Complete: Catalog successfully synchronized with Telegram storage channel.`,
+      ])
+      setRebuildDone(true)
+    } catch (err: any) {
+      setRebuildLogs((prev) => [
+        ...prev,
+        `[${new Date().toLocaleTimeString()}] ERROR: ${err.message || 'Failed to rebuild index'}`,
+      ])
+    } finally {
+      setIsRebuilding(false)
+    }
   }
 
   const formatBytes = (bytes: number) => {
-    return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`
+    if (bytes >= 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`
+    if (bytes >= 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
+    return `${(bytes / 1024).toFixed(1)} KB`
   }
 
   return (
@@ -60,7 +63,9 @@ export const SettingsView: React.FC = () => {
             <span className="text-xs font-semibold text-[#f0f0f0] uppercase tracking-wider">
               Telegram Backend Status
             </span>
-            <Badge variant="success">Online • Direct MTProto</Badge>
+            <Badge variant={metrics.online_status === 'online' ? 'success' : 'warning'}>
+              {metrics.online_status === 'online' ? 'Online • Direct MTProto' : 'Connecting'}
+            </Badge>
           </div>
 
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs pt-2 border-t border-[#1a1a1a]">
@@ -106,7 +111,7 @@ export const SettingsView: React.FC = () => {
             {isRebuilding ? 'Rebuilding Index...' : 'Rebuild Index from Channel'}
           </Button>
 
-          {/* Simulated Terminal Output */}
+          {/* Terminal Output */}
           {rebuildLogs.length > 0 && (
             <div className="p-3 bg-[#050505] border border-[#1f1f1f] text-[11px] space-y-1 font-mono text-[#aaaaaa] max-h-48 overflow-y-auto">
               <div className="text-[10px] text-[#555555] uppercase pb-1 flex items-center gap-1.5 border-b border-[#181818]">
@@ -126,7 +131,7 @@ export const SettingsView: React.FC = () => {
           )}
         </div>
 
-        {/* Free Cloud Hosting Checklist */}
+        {/* Free Cloud Deployment Checklist */}
         <div className="p-4 bg-[#0a0a0a] border border-[#222222] space-y-3">
           <span className="text-xs font-semibold text-[#f0f0f0] uppercase tracking-wider block">
             Free Cloud Deployment Checklist

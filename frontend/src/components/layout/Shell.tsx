@@ -1,4 +1,4 @@
-import React from 'react'
+import React, { useEffect } from 'react'
 import { Header } from './Header'
 import { Sidebar } from './Sidebar'
 import { MobileNav } from './MobileNav'
@@ -24,8 +24,13 @@ export const Shell: React.FC = () => {
     nextLightbox, 
     prevLightbox,
     openShareModal,
-    moveToTrash
+    moveToTrash,
+    init
   } = useVaultStore()
+
+  useEffect(() => {
+    init()
+  }, [init])
 
   const renderActiveView = () => {
     switch (activeTab) {

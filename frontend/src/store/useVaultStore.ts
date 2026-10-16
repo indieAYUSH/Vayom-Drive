@@ -1,6 +1,6 @@
 import { create } from 'zustand'
 import { FileItem, AlbumItem, ShareLinkItem, StorageMetrics, FileCategory } from '../types/vault'
-import { INITIAL_FILES, INITIAL_ALBUMS, INITIAL_SHARES, INITIAL_STORAGE_METRICS } from '../services/mockData'
+import { api } from '../services/api'
 
 interface VaultState {
   // Data
@@ -8,6 +8,8 @@ interface VaultState {
   albums: AlbumItem[]
   shares: ShareLinkItem[]
   metrics: StorageMetrics
+  isLoading: boolean
+  error: string | null
 
   // Navigation & Filtering
   activeTab: 'all' | 'images' | 'videos' | 'documents' | 'archives' | 'albums' | 'trash' | 'shares' | 'settings'
@@ -27,7 +29,14 @@ interface VaultState {
   isShareModalOpen: boolean
   shareTargetFile: FileItem | null
 
-  // Actions
+  // Data Actions
+  fetchFiles: () => Promise<void>
+  fetchMetrics: () => Promise<void>
+  fetchAlbums: () => Promise<void>
+  fetchShares: () => Promise<void>
+  init: () => Promise<void>
+
+  // Navigation Actions
   setActiveTab: (tab: VaultState['activeTab']) => void
   setSelectedAlbumId: (id: string | null) => void
   setSelectedTag: (tag: string | null) => void
@@ -50,20 +59,28 @@ interface VaultState {
   closeShareModal: () => void
 
   // File mutations
-  moveToTrash: (ids: string[]) => void
-  restoreFromTrash: (ids: string[]) => void
-  purgeFiles: (ids: string[]) => void
-  addFiles: (newFiles: FileItem[]) => void
-  createAlbum: (name: string, description?: string) => void
-  createShareLink: (fileId: string, hours: number, hasPassword?: boolean) => void
-  revokeShareLink: (shareId: string) => void
+  moveToTrash: (ids: string[]) => Promise<void>
+  restoreFromTrash: (ids: string[]) => Promise<void>
+  purgeFiles: (ids: string[]) => Promise<void>
+  createAlbum: (name: string, description?: string) => Promise<void>
+  createShareLink: (fileId: string, hours: number, hasPassword?: boolean, password?: string) => Promise<void>
+  revokeShareLink: (shareId: string) => Promise<void>
+  rebuildIndex: () => Promise<{ status: string; restored_envelopes: number }>
 }
 
 export const useVaultStore = create<VaultState>((set, get) => ({
-  files: INITIAL_FILES,
-  albums: INITIAL_ALBUMS,
-  shares: INITIAL_SHARES,
-  metrics: INITIAL_STORAGE_METRICS,
+  files: [],
+  albums: [],
+  shares: [],
+  metrics: {
+    total_bytes: 0,
+    total_files: 0,
+    channel_id: 'Loading...',
+    telegram_messages: 0,
+    online_status: 'online',
+  },
+  isLoading: false,
+  error: null,
 
   activeTab: 'all',
   selectedAlbumId: null,
@@ -79,11 +96,96 @@ export const useVaultStore = create<VaultState>((set, get) => ({
   isShareModalOpen: false,
   shareTargetFile: null,
 
-  setActiveTab: (tab) => set({ activeTab: tab, selectedAlbumId: null, selectedTag: null, selectedIds: [] }),
-  setSelectedAlbumId: (id) => set({ selectedAlbumId: id, activeTab: 'albums', selectedIds: [] }),
-  setSelectedTag: (tag) => set({ selectedTag: tag, selectedIds: [] }),
-  setSearchQuery: (query) => set({ searchQuery: query }),
-  setCategoryFilter: (category) => set({ activeCategoryFilter: category }),
+  fetchFiles: async () => {
+    try {
+      const { activeTab, selectedAlbumId, selectedTag, searchQuery, activeCategoryFilter } = get()
+      const isTrash = activeTab === 'trash'
+
+      let cat: string | undefined = undefined
+      if (activeCategoryFilter !== 'all') {
+        cat = activeCategoryFilter
+      } else if (activeTab === 'images') cat = 'image'
+      else if (activeTab === 'videos') cat = 'video'
+      else if (activeTab === 'documents') cat = 'document'
+      else if (activeTab === 'archives') cat = 'archive'
+
+      const files = await api.listFiles({
+        category: cat,
+        tag: selectedTag || undefined,
+        album_id: activeTab === 'albums' && selectedAlbumId ? selectedAlbumId : undefined,
+        q: searchQuery.trim() || undefined,
+        is_deleted: isTrash,
+        limit: 500,
+      })
+
+      set({ files, error: null })
+    } catch (err: any) {
+      set({ error: err.message || 'Failed to fetch files' })
+    }
+  },
+
+  fetchMetrics: async () => {
+    try {
+      const metrics = await api.getMetrics()
+      set({ metrics })
+    } catch (err) {
+      console.error('Failed to fetch storage metrics', err)
+    }
+  },
+
+  fetchAlbums: async () => {
+    try {
+      const albums = await api.listAlbums()
+      set({ albums })
+    } catch (err) {
+      console.error('Failed to fetch albums', err)
+    }
+  },
+
+  fetchShares: async () => {
+    try {
+      const shares = await api.listShares()
+      set({ shares })
+    } catch (err) {
+      console.error('Failed to fetch shares', err)
+    }
+  },
+
+  init: async () => {
+    set({ isLoading: true })
+    await Promise.allSettled([
+      get().fetchFiles(),
+      get().fetchMetrics(),
+      get().fetchAlbums(),
+      get().fetchShares(),
+    ])
+    set({ isLoading: false })
+  },
+
+  setActiveTab: (tab) => {
+    set({ activeTab: tab, selectedAlbumId: null, selectedTag: null, selectedIds: [] })
+    get().fetchFiles()
+  },
+
+  setSelectedAlbumId: (id) => {
+    set({ selectedAlbumId: id, activeTab: 'albums', selectedIds: [] })
+    get().fetchFiles()
+  },
+
+  setSelectedTag: (tag) => {
+    set({ selectedTag: tag, selectedIds: [] })
+    get().fetchFiles()
+  },
+
+  setSearchQuery: (query) => {
+    set({ searchQuery: query })
+    get().fetchFiles()
+  },
+
+  setCategoryFilter: (category) => {
+    set({ activeCategoryFilter: category })
+    get().fetchFiles()
+  },
 
   toggleSelect: (id) => set((state) => {
     const exists = state.selectedIds.includes(id)
@@ -91,10 +193,12 @@ export const useVaultStore = create<VaultState>((set, get) => ({
       selectedIds: exists ? state.selectedIds.filter((item) => item !== id) : [...state.selectedIds, id]
     }
   }),
+
   selectAll: () => {
     const visibleFiles = get().files.filter((f) => !f.is_deleted)
     set({ selectedIds: visibleFiles.map((f) => f.id) })
   },
+
   clearSelection: () => set({ selectedIds: [] }),
 
   openLightbox: (item) => set({ lightboxItem: item }),
@@ -124,69 +228,44 @@ export const useVaultStore = create<VaultState>((set, get) => ({
   openShareModal: (file) => set({ isShareModalOpen: true, shareTargetFile: file }),
   closeShareModal: () => set({ isShareModalOpen: false, shareTargetFile: null }),
 
-  moveToTrash: (ids) => set((state) => {
-    const now = new Date().toISOString()
-    return {
-      files: state.files.map((f) => ids.includes(f.id) ? { ...f, is_deleted: true, deleted_at: now } : f),
-      selectedIds: []
-    }
-  }),
-  restoreFromTrash: (ids) => set((state) => ({
-    files: state.files.map((f) => ids.includes(f.id) ? { ...f, is_deleted: false, deleted_at: undefined } : f),
-    selectedIds: []
-  })),
-  purgeFiles: (ids) => set((state) => ({
-    files: state.files.filter((f) => !ids.includes(f.id)),
-    selectedIds: []
-  })),
+  moveToTrash: async (ids) => {
+    await api.batchTrash(ids)
+    set({ selectedIds: [] })
+    await Promise.all([get().fetchFiles(), get().fetchMetrics()])
+  },
 
-  addFiles: (newFiles) => set((state) => ({
-    files: [...newFiles, ...state.files],
-    metrics: {
-      ...state.metrics,
-      total_files: state.metrics.total_files + newFiles.length,
-      total_bytes: state.metrics.total_bytes + newFiles.reduce((acc, f) => acc + f.size_bytes, 0)
-    }
-  })),
+  restoreFromTrash: async (ids) => {
+    await api.batchRestore(ids)
+    set({ selectedIds: [] })
+    await Promise.all([get().fetchFiles(), get().fetchMetrics()])
+  },
 
-  createAlbum: (name, description) => set((state) => {
-    const newAlbum: AlbumItem = {
-      id: `alb-${Date.now()}`,
-      name,
-      description,
-      file_count: 0,
-      created_at: new Date().toISOString()
-    }
-    return {
-      albums: [...state.albums, newAlbum],
-      isCreateAlbumModalOpen: false
-    }
-  }),
+  purgeFiles: async (ids) => {
+    await api.batchPurge(ids)
+    set({ selectedIds: [] })
+    await Promise.all([get().fetchFiles(), get().fetchMetrics()])
+  },
 
-  createShareLink: (fileId, hours, hasPassword = false) => set((state) => {
-    const target = state.files.find((f) => f.id === fileId)
-    if (!target) return state
-    const expires = new Date(Date.now() + hours * 3600 * 1000).toISOString()
-    const newShare: ShareLinkItem = {
-      id: `shr-${Date.now()}`,
-      token: Math.random().toString(36).substring(2, 10) + Math.random().toString(36).substring(2, 10),
-      file_id: fileId,
-      filename: target.filename,
-      file_size: target.size_bytes,
-      expires_at: expires,
-      view_count: 0,
-      has_password: hasPassword,
-      is_revoked: false,
-      created_at: new Date().toISOString()
-    }
-    return {
-      shares: [newShare, ...state.shares],
-      isShareModalOpen: false,
-      shareTargetFile: null
-    }
-  }),
+  createAlbum: async (name, description) => {
+    await api.createAlbum(name, description)
+    set({ isCreateAlbumModalOpen: false })
+    await get().fetchAlbums()
+  },
 
-  revokeShareLink: (shareId) => set((state) => ({
-    shares: state.shares.map((s) => s.id === shareId ? { ...s, is_revoked: true } : s)
-  }))
+  createShareLink: async (fileId, hours, hasPassword = false, password?: string) => {
+    await api.createShare(fileId, hours, hasPassword, password)
+    set({ isShareModalOpen: false, shareTargetFile: null })
+    await get().fetchShares()
+  },
+
+  revokeShareLink: async (shareId) => {
+    await api.revokeShare(shareId)
+    await get().fetchShares()
+  },
+
+  rebuildIndex: async () => {
+    const result = await api.rebuildIndex()
+    await Promise.all([get().fetchFiles(), get().fetchMetrics(), get().fetchAlbums(), get().fetchShares()])
+    return result
+  },
 }))
