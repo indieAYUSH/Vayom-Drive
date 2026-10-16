@@ -367,16 +367,29 @@ async def download_file(
 
 @router.delete("/files/{file_id}")
 async def delete_file(file_id: str, purge: bool = False):
-    """Soft deletes file to 30-day trash, or purges permanently."""
+    """Soft deletes file to 30-day trash, or purges permanently from disk and Telegram."""
     async with get_db() as db:
         if purge:
-            await db.execute("DELETE FROM files WHERE id = ?", (file_id,))
+            # 1. Fetch parts before cascade deletion deletes them from file_parts
+            p_cur = await db.execute(
+                "SELECT telegram_message_id, telegram_channel_id FROM file_parts WHERE file_id = ?",
+                (file_id,)
+            )
+            parts = [dict(r) for r in await p_cur.fetchall()]
+
+            # 2. Permanently delete parts from Telegram channel
+            await storage_client.delete_parts(parts)
+
+            # 3. Remove local thumbnail preview
             thumb = settings.THUMBNAIL_DIR / f"{file_id}.webp"
             if thumb.exists():
                 try:
                     os.remove(thumb)
                 except Exception:
                     pass
+
+            # 4. Remove database record (cascades to file_parts, file_albums, file_tags, share_links)
+            await db.execute("DELETE FROM files WHERE id = ?", (file_id,))
         else:
             await db.execute(
                 "UPDATE files SET is_deleted = 1, deleted_at = CURRENT_TIMESTAMP WHERE id = ?",
@@ -431,16 +444,30 @@ async def batch_restore(body: BatchFileRequest):
 
 @router.post("/files/batch-purge")
 async def batch_purge(body: BatchFileRequest):
-    """Batch permanently purges files."""
+    """Batch permanently purges files from database, local disk, and Telegram channel."""
     if not body.file_ids:
-        return {"count": 0}
+        return {"count": 0, "messages_purged": 0}
+
     placeholders = ",".join(["?"] * len(body.file_ids))
     async with get_db() as db:
+        # 1. Fetch parts before cascading deletion
+        p_cur = await db.execute(
+            f"SELECT telegram_message_id, telegram_channel_id FROM file_parts WHERE file_id IN ({placeholders})",
+            body.file_ids
+        )
+        parts = [dict(r) for r in await p_cur.fetchall()]
+
+        # 2. Delete messages from Telegram channel
+        messages_purged = await storage_client.delete_parts(parts)
+
+        # 3. Delete database records
         await db.execute(
             f"DELETE FROM files WHERE id IN ({placeholders})",
             body.file_ids
         )
         await db.commit()
+
+        # 4. Remove local thumbnails
         for fid in body.file_ids:
             thumb = settings.THUMBNAIL_DIR / f"{fid}.webp"
             if thumb.exists():
@@ -448,7 +475,54 @@ async def batch_purge(body: BatchFileRequest):
                     os.remove(thumb)
                 except Exception:
                     pass
-    return {"count": len(body.file_ids)}
+
+    return {"count": len(body.file_ids), "messages_purged": messages_purged}
+
+
+@router.post("/files/empty-trash")
+async def empty_trash():
+    """
+    Permanently purges ALL items currently in trash (is_deleted = 1)
+    from SQLite, disk thumbnails, and the Telegram storage channel.
+    """
+    async with get_db() as db:
+        # 1. Get all soft-deleted file IDs
+        cur = await db.execute("SELECT id FROM files WHERE is_deleted = 1")
+        rows = await cur.fetchall()
+        deleted_ids = [r[0] for r in rows]
+
+        if not deleted_ids:
+            return {"count": 0, "messages_purged": 0}
+
+        placeholders = ",".join(["?"] * len(deleted_ids))
+
+        # 2. Get all message parts for these files
+        p_cur = await db.execute(
+            f"SELECT telegram_message_id, telegram_channel_id FROM file_parts WHERE file_id IN ({placeholders})",
+            deleted_ids
+        )
+        parts = [dict(r) for r in await p_cur.fetchall()]
+
+        # 3. Delete from Telegram channel
+        messages_purged = await storage_client.delete_parts(parts)
+
+        # 4. Delete files from DB
+        await db.execute(
+            f"DELETE FROM files WHERE id IN ({placeholders})",
+            deleted_ids
+        )
+        await db.commit()
+
+        # 5. Delete thumbnails
+        for fid in deleted_ids:
+            thumb = settings.THUMBNAIL_DIR / f"{fid}.webp"
+            if thumb.exists():
+                try:
+                    os.remove(thumb)
+                except Exception:
+                    pass
+
+    return {"count": len(deleted_ids), "messages_purged": messages_purged}
 
 
 # --- Albums Endpoints ---

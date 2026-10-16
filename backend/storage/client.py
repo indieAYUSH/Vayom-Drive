@@ -2,7 +2,7 @@ import os
 import asyncio
 import json
 import logging
-from typing import Optional, Callable, AsyncIterator
+from typing import Optional, Callable, AsyncIterator, Any, Union
 from telethon import TelegramClient, events
 from telethon.errors import FloodWaitError
 from telethon.tl.types import MessageMediaDocument
@@ -215,6 +215,98 @@ class TelegramStorageClient:
                 logger.error(f"Error fetching message batch {batch_ids[0]}-{batch_ids[-1]}: {e}")
 
         return envelopes
+
+    async def delete_messages(
+        self,
+        message_ids: list[int],
+        channel_id: Optional[Union[str, int]] = None
+    ) -> int:
+        """
+        Permanently deletes message(s) from Telegram channel.
+        Also clears them from in-memory media reference cache.
+        Returns the number of messages deleted.
+        """
+        if not message_ids:
+            return 0
+
+        target_channel_str = str(channel_id or settings.TELEGRAM_CHANNEL_ID or "")
+
+        # 1. Clear from in-memory media reference cache
+        for mid in message_ids:
+            self._media_cache.pop((target_channel_str, mid), None)
+            if settings.TELEGRAM_CHANNEL_ID:
+                self._media_cache.pop((str(settings.TELEGRAM_CHANNEL_ID), mid), None)
+
+        # 2. Offline mock mode handling
+        if not self._is_connected or not self.client:
+            mock_dir = settings.DATA_DIR / "mock_blobs"
+            deleted_count = 0
+            for mid in message_ids:
+                bin_file = mock_dir / f"{mid}.bin"
+                cap_file = mock_dir / f"{mid}.caption"
+                if bin_file.exists():
+                    try:
+                        bin_file.unlink()
+                        deleted_count += 1
+                    except Exception:
+                        pass
+                if cap_file.exists():
+                    try:
+                        cap_file.unlink()
+                    except Exception:
+                        pass
+            logger.info(f"Offline mock mode: purged {deleted_count} message blobs")
+            return deleted_count
+
+        # 3. Live Telegram MTProto deletion
+        try:
+            channel = int(target_channel_str)
+        except Exception:
+            channel = target_channel_str
+
+        deleted_count = 0
+        # Telegram API allows deleting up to 100 messages per request
+        for i in range(0, len(message_ids), 100):
+            batch = message_ids[i:i + 100]
+            try:
+                await self.client.delete_messages(channel, batch)
+                deleted_count += len(batch)
+            except FloodWaitError as e:
+                logger.warning(f"Telegram FloodWait during delete: sleeping {e.seconds}s")
+                await asyncio.sleep(e.seconds + 1)
+                try:
+                    await self.client.delete_messages(channel, batch)
+                    deleted_count += len(batch)
+                except Exception as err:
+                    logger.error(f"Failed to delete message batch {batch} after floodwait: {err}")
+            except Exception as e:
+                logger.error(f"Error deleting message batch {batch} from channel {target_channel_str}: {e}")
+
+        logger.info(f"Permanently deleted {deleted_count} messages from channel {target_channel_str}")
+        return deleted_count
+
+    async def delete_parts(self, parts: list[dict]) -> int:
+        """
+        Groups parts by channel ID and deletes them from Telegram MTProto.
+        Each part dict should contain 'telegram_message_id' and optional 'telegram_channel_id'.
+        """
+        if not parts:
+            return 0
+
+        channel_groups: dict[str, list[int]] = {}
+        for p in parts:
+            chan_id = str(p.get("telegram_channel_id") or settings.TELEGRAM_CHANNEL_ID or "")
+            msg_id = p.get("telegram_message_id")
+            if msg_id:
+                try:
+                    channel_groups.setdefault(chan_id, []).append(int(msg_id))
+                except (ValueError, TypeError):
+                    continue
+
+        total_deleted = 0
+        for chan_id, msg_ids in channel_groups.items():
+            total_deleted += await self.delete_messages(msg_ids, channel_id=chan_id)
+        return total_deleted
 
 # Global Singleton storage client
 storage_client = TelegramStorageClient()

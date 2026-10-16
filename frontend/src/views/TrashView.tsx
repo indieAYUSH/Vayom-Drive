@@ -5,7 +5,7 @@ import { Button } from '../components/common/Button'
 import { Badge } from '../components/common/Badge'
 
 export const TrashView: React.FC = () => {
-  const { files, restoreFromTrash, purgeFiles } = useVaultStore()
+  const { files, restoreFromTrash, purgeFiles, emptyTrash } = useVaultStore()
 
   const deletedFiles = files.filter((f) => f.is_deleted)
 
@@ -13,9 +13,9 @@ export const TrashView: React.FC = () => {
     restoreFromTrash(deletedFiles.map((f) => f.id))
   }
 
-  const handleEmptyTrash = () => {
-    if (window.confirm('Permanently purge all items from trash? This cannot be undone.')) {
-      purgeFiles(deletedFiles.map((f) => f.id))
+  const handleEmptyTrash = async () => {
+    if (window.confirm('Permanently purge all items from trash and Telegram? This cannot be undone.')) {
+      await emptyTrash()
     }
   }
 

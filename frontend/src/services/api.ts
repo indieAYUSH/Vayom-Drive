@@ -64,13 +64,21 @@ export const api = {
     return res.json()
   },
 
-  async batchPurge(file_ids: string[]): Promise<{ count: number }> {
+  async batchPurge(file_ids: string[]): Promise<{ count: number; messages_purged: number }> {
     const res = await fetch(`${API_BASE}/files/batch-purge`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ file_ids }),
     })
     if (!res.ok) throw new Error(`Failed to batch purge: ${res.statusText}`)
+    return res.json()
+  },
+
+  async emptyTrash(): Promise<{ count: number; messages_purged: number }> {
+    const res = await fetch(`${API_BASE}/files/empty-trash`, {
+      method: 'POST',
+    })
+    if (!res.ok) throw new Error(`Failed to empty trash: ${res.statusText}`)
     return res.json()
   },
 

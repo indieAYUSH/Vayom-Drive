@@ -62,6 +62,7 @@ interface VaultState {
   moveToTrash: (ids: string[]) => Promise<void>
   restoreFromTrash: (ids: string[]) => Promise<void>
   purgeFiles: (ids: string[]) => Promise<void>
+  emptyTrash: () => Promise<void>
   createAlbum: (name: string, description?: string) => Promise<void>
   createShareLink: (fileId: string, hours: number, hasPassword?: boolean, password?: string) => Promise<void>
   revokeShareLink: (shareId: string) => Promise<void>
@@ -242,6 +243,12 @@ export const useVaultStore = create<VaultState>((set, get) => ({
 
   purgeFiles: async (ids) => {
     await api.batchPurge(ids)
+    set({ selectedIds: [] })
+    await Promise.all([get().fetchFiles(), get().fetchMetrics()])
+  },
+
+  emptyTrash: async () => {
+    await api.emptyTrash()
     set({ selectedIds: [] })
     await Promise.all([get().fetchFiles(), get().fetchMetrics()])
   },
