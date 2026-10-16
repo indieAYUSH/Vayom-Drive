@@ -41,7 +41,7 @@ export const Header: React.FC = () => {
             <div className="w-2.5 h-2.5 bg-[#000000]" />
           </div>
           <span className="font-mono text-sm font-bold tracking-widest text-[#ffffff] uppercase group-hover:text-[#e5e5e5]">
-            TELEVAULT
+            VAYOM DRIVE
           </span>
         </div>
 

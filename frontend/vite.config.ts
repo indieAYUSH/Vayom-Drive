@@ -9,8 +9,8 @@ export default defineConfig({
       registerType: 'autoUpdate',
       includeAssets: ['favicon.ico', 'apple-touch-icon.png'],
       manifest: {
-        name: 'TeleVault',
-        short_name: 'TeleVault',
+        name: 'Vayom Drive',
+        short_name: 'VayomDrive',
         description: 'Personal cloud storage powered by Telegram',
         theme_color: '#000000',
         background_color: '#000000',

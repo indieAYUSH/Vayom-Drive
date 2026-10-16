@@ -19,7 +19,7 @@ export const SettingsView: React.FC = () => {
       'Connecting to Telegram channel: ' + metrics.channel_id,
       'Scanning channel message history backward from HEAD...',
       'Found 2,180 total Telegram messages.',
-      'Parsing TELEVAULT:v1 metadata envelopes from document captions...',
+      'Parsing VAYOM:v1 metadata envelopes from document captions...',
       'Reconstructing file_parts table: 1,420 extents mapped.',
       'Re-indexing ViT-B/32 vector embeddings into sqlite-vec...',
       'Committing atomic transaction to SQLite WAL database...',
@@ -46,7 +46,7 @@ export const SettingsView: React.FC = () => {
       {/* Top Header */}
       <div className="pb-6 border-b border-[#282828] mb-6">
         <h1 className="text-base font-bold uppercase tracking-wider text-[#ffffff] flex items-center gap-2">
-          <Database size={16} /> TeleVault Node Configuration
+          <Database size={16} /> Vayom Drive Node Configuration
         </h1>
         <p className="text-xs text-[#777777] mt-1">
           Telegram backend parameters, pointer-offset policies, and disaster recovery tools
@@ -91,7 +91,7 @@ export const SettingsView: React.FC = () => {
             </span>
             <p className="text-[11px] text-[#777777] mt-1">
               If your host filesystem or SQLite database is lost or running on an ephemeral free cloud dyno, 
-              TeleVault will read the metadata envelopes from every Telegram channel message 
+              Vayom Drive will read the metadata envelopes from every Telegram channel message 
               and restore the full catalog with zero data loss.
             </p>
           </div>
