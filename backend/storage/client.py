@@ -15,6 +15,7 @@ class TelegramStorageClient:
         self.client: Optional[TelegramClient] = None
         self._is_connected = False
         self._lock = asyncio.Lock()
+        self._media_cache: dict[tuple[str, int], Any] = {}
 
     async def connect(self):
         """Initializes and authenticates the Telethon bot client."""
@@ -42,11 +43,11 @@ class TelegramStorageClient:
         file_path: str,
         caption: str,
         progress_callback: Optional[Callable[[int, int], None]] = None
-    ) -> int:
+    ) -> dict:
         """
         Uploads a single file part (up to 2000 MB) to the private channel.
         Automatically catches and respects FloodWait rate limits.
-        Returns the confirmed Telegram message_id.
+        Returns dict with message_id, channel_id, file_id, access_hash.
         """
         if not self._is_connected or not self.client:
             # Full-fidelity offline mock mode: persists part to mock_blobs
@@ -58,7 +59,12 @@ class TelegramStorageClient:
             with open(mock_dir / f"{msg_id}.caption", "w", encoding="utf-8") as cf:
                 cf.write(caption)
             logger.info(f"Offline mock upload: stored part {msg_id}")
-            return msg_id
+            return {
+                "message_id": msg_id,
+                "channel_id": str(settings.TELEGRAM_CHANNEL_ID or "mock"),
+                "file_id": f"mock-{msg_id}",
+                "access_hash": "0"
+            }
 
         channel = int(settings.TELEGRAM_CHANNEL_ID)
 
@@ -71,7 +77,14 @@ class TelegramStorageClient:
                     progress_callback=progress_callback,
                     force_document=True  # Preserve exact original bytes and MIME type
                 )
-                return message.id
+                doc = getattr(message.media, "document", None) if message and message.media else None
+                self._media_cache[(str(channel), message.id)] = message.media
+                return {
+                    "message_id": message.id,
+                    "channel_id": str(channel),
+                    "file_id": str(doc.id) if doc else None,
+                    "access_hash": str(doc.access_hash) if doc else None
+                }
             except FloodWaitError as e:
                 logger.warning(f"Telegram FloodWait encountered: sleeping for {e.seconds}s...")
                 await asyncio.sleep(e.seconds + 1)
@@ -82,13 +95,16 @@ class TelegramStorageClient:
     async def stream_part_bytes(
         self,
         message_id: int,
+        channel_id: Optional[str] = None,
+        file_id: Optional[str] = None,
+        access_hash: Optional[str] = None,
         offset: int = 0,
         limit: Optional[int] = None,
         chunk_size: int = 64 * 1024
     ) -> AsyncIterator[bytes]:
         """
         Streams a byte slice of a document from Telegram without loading the whole file into RAM.
-        Enables instant HTTP Range requests (video scrubbing).
+        Uses in-memory media reference cache to prevent rate limits during rapid video scrubbing.
         """
         if not self._is_connected or not self.client:
             mock_dir = settings.DATA_DIR / "mock_blobs"
@@ -108,15 +124,25 @@ class TelegramStorageClient:
             yield b"\x00" * (limit or 1024)
             return
 
-        channel = int(settings.TELEGRAM_CHANNEL_ID)
-        message = await self.client.get_messages(channel, ids=message_id)
-        if not message or not message.media:
-            raise FileNotFoundError(f"Message {message_id} not found in channel")
+        target_channel_str = str(channel_id or settings.TELEGRAM_CHANNEL_ID)
+        cache_key = (target_channel_str, message_id)
 
-        # Telethon iter_download streams chunks directly from Telegram DC sockets
+        # 1. Check in-memory media cache (avoids repeated Telegram RPC calls on Range requests)
+        media = self._media_cache.get(cache_key)
+        if not media:
+            channel = int(target_channel_str)
+            message = await self.client.get_messages(channel, ids=message_id)
+            if not message or not message.media:
+                raise FileNotFoundError(f"Message {message_id} not found in channel {channel}")
+            media = message.media
+            if len(self._media_cache) > 500:
+                self._media_cache.pop(next(iter(self._media_cache)))
+            self._media_cache[cache_key] = media
+
+        # 2. Telethon iter_download streams chunks directly from Telegram DC sockets
         bytes_sent = 0
         async for chunk in self.client.iter_download(
-            message.media,
+            media,
             offset=offset,
             request_size=chunk_size
         ):

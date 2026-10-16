@@ -38,13 +38,16 @@ CREATE TABLE IF NOT EXISTS file_parts (
     part_size_bytes INTEGER NOT NULL,          -- Size of this slice in bytes
     part_sha256 TEXT NOT NULL,
     telegram_message_id INTEGER NOT NULL,      -- Channel message ID pointer
+    telegram_channel_id TEXT NOT NULL DEFAULT '', -- Channel ID for multi-channel sharding
+    telegram_file_id TEXT,                     -- MTProto unique document ID
+    telegram_access_hash TEXT,                 -- MTProto document access hash
     upload_status TEXT NOT NULL DEFAULT 'confirmed',
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     UNIQUE(file_id, part_index)
 );
 
-CREATE INDEX IF NOT EXISTS idx_file_parts_file ON file_parts(file_id);
-CREATE INDEX IF NOT EXISTS idx_file_parts_offset ON file_parts(file_id, byte_offset);
+-- High-performance covering index for range streaming & timeline seeking (eliminates table rowid scans)
+CREATE INDEX IF NOT EXISTS idx_file_parts_covering ON file_parts(file_id, byte_offset, part_size_bytes, telegram_message_id, part_index);
 CREATE INDEX IF NOT EXISTS idx_file_parts_tg ON file_parts(telegram_message_id);
 
 -- Albums and Collections
@@ -61,6 +64,7 @@ CREATE TABLE IF NOT EXISTS file_albums (
     album_id TEXT NOT NULL REFERENCES albums(id) ON DELETE CASCADE,
     PRIMARY KEY(file_id, album_id)
 );
+CREATE INDEX IF NOT EXISTS idx_file_albums_reverse ON file_albums(album_id, file_id);
 
 -- Tags
 CREATE TABLE IF NOT EXISTS tags (
@@ -73,6 +77,7 @@ CREATE TABLE IF NOT EXISTS file_tags (
     tag_id TEXT NOT NULL REFERENCES tags(id) ON DELETE CASCADE,
     PRIMARY KEY(file_id, tag_id)
 );
+CREATE INDEX IF NOT EXISTS idx_file_tags_reverse ON file_tags(tag_id, file_id);
 
 -- Expiring Share Links
 CREATE TABLE IF NOT EXISTS share_links (

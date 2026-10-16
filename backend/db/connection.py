@@ -15,6 +15,7 @@ async def get_db():
         await conn.execute("PRAGMA journal_mode=WAL;")
         await conn.execute("PRAGMA synchronous=NORMAL;")
         await conn.execute("PRAGMA foreign_keys=ON;")
+        await conn.execute("PRAGMA busy_timeout=5000;")
         yield conn
     finally:
         await conn.close()

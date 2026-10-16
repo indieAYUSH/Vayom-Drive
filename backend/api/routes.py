@@ -111,7 +111,7 @@ async def list_files(
 
             # Fetch parts for this file
             p_cursor = await db.execute(
-                "SELECT part_index, byte_offset AS offset, part_size_bytes AS size, part_sha256 AS sha256, telegram_message_id "
+                "SELECT part_index, byte_offset AS offset, part_size_bytes AS size, part_sha256 AS sha256, telegram_message_id, telegram_channel_id, telegram_file_id "
                 "FROM file_parts WHERE file_id = ? ORDER BY part_index ASC",
                 (file_id,)
             )
@@ -201,11 +201,23 @@ async def upload_file(
         caption = (
             f"VAYOM:v1:{json.dumps({'id': file_id, 'name': file.filename, 'part': part['part_index'], 'total': len(parts), 'offset': part['byte_offset'], 'size': part['part_size_bytes'], 'sha256': part['part_sha256'], 'cat': category})}"
         )
-        msg_id = await storage_client.upload_part(part["file_path"], caption=caption)
-        uploaded_parts.append({
-            **part,
-            "telegram_message_id": msg_id
-        })
+        res = await storage_client.upload_part(part["file_path"], caption=caption)
+        if isinstance(res, dict):
+            uploaded_parts.append({
+                **part,
+                "telegram_message_id": res["message_id"],
+                "telegram_channel_id": res.get("channel_id", str(settings.TELEGRAM_CHANNEL_ID)),
+                "telegram_file_id": res.get("file_id"),
+                "telegram_access_hash": res.get("access_hash")
+            })
+        else:
+            uploaded_parts.append({
+                **part,
+                "telegram_message_id": res,
+                "telegram_channel_id": str(settings.TELEGRAM_CHANNEL_ID),
+                "telegram_file_id": None,
+                "telegram_access_hash": None
+            })
 
     # 5. Commit atomic transaction to SQLite
     async with get_db() as db:
@@ -231,12 +243,15 @@ async def upload_file(
                 """
                 INSERT INTO file_parts (
                     id, file_id, part_index, byte_offset, part_size_bytes,
-                    part_sha256, telegram_message_id
-                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    part_sha256, telegram_message_id, telegram_channel_id,
+                    telegram_file_id, telegram_access_hash
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     part_id, file_id, p["part_index"], p["byte_offset"],
-                    p["part_size_bytes"], p["part_sha256"], p["telegram_message_id"]
+                    p["part_size_bytes"], p["part_sha256"], p["telegram_message_id"],
+                    p.get("telegram_channel_id", str(settings.TELEGRAM_CHANNEL_ID)),
+                    p.get("telegram_file_id"), p.get("telegram_access_hash")
                 )
             )
 
@@ -263,7 +278,7 @@ async def upload_file(
     }
 
 
-@router.get("/files/{file_id}/thumbnail")
+@router.api_route("/files/{file_id}/thumbnail", methods=["GET", "HEAD"])
 async def get_thumbnail(file_id: str):
     """Serves the ultra-compact WebP thumbnail preview."""
     thumb = settings.THUMBNAIL_DIR / f"{file_id}.webp"
@@ -272,7 +287,7 @@ async def get_thumbnail(file_id: str):
     raise HTTPException(status_code=404, detail="Thumbnail not found")
 
 
-@router.get("/files/{file_id}/download")
+@router.api_route("/files/{file_id}/download", methods=["GET", "HEAD"])
 async def download_file(
     file_id: str,
     range_header: Optional[str] = Header(None, alias="Range")
@@ -325,6 +340,9 @@ async def download_file(
 
             async for chunk in storage_client.stream_part_bytes(
                 message_id=p["telegram_message_id"],
+                channel_id=p.get("telegram_channel_id"),
+                file_id=p.get("telegram_file_id"),
+                access_hash=p.get("telegram_access_hash"),
                 offset=slice_start,
                 limit=slice_len
             ):
@@ -637,12 +655,15 @@ async def rebuild_index_from_channel():
             part_id = str(uuid.uuid4())
             await db.execute(
                 """
-                INSERT OR IGNORE INTO file_parts (id, file_id, part_index, byte_offset, part_size_bytes, part_sha256, telegram_message_id)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                INSERT OR IGNORE INTO file_parts (
+                    id, file_id, part_index, byte_offset, part_size_bytes, 
+                    part_sha256, telegram_message_id, telegram_channel_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     part_id, file_id, env.get("part", 0), env.get("offset", 0),
-                    env.get("size", 0), env.get("sha256", ""), env.get("telegram_message_id")
+                    env.get("size", 0), env.get("sha256", ""), env.get("telegram_message_id"),
+                    str(settings.TELEGRAM_CHANNEL_ID)
                 )
             )
             restored_count += 1
