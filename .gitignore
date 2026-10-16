@@ -1,0 +1,60 @@
+# Environment & Secrets
+.env
+*.env
+.env.*
+!.env.example
+
+# Markdown files (per user requirement)
+*.md
+**/*.md
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.venv/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Node / Frontend
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# Database & Local Storage
+*.db
+*.sqlite
+*.sqlite3
+*.db-wal
+*.db-shm
+data/
+uploads/
+thumbnails/
+cache/
+
+# OS / Editor artifacts
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo

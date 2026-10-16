@@ -1,0 +1,49 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --surface-bg: #000000;
+  --surface-base: #080808;
+  --surface-panel: #111111;
+  --surface-elevated: #181818;
+  --surface-pressed: #222222;
+  --border-subtle: #1c1c1c;
+  --border-default: #282828;
+  --border-focus: #555555;
+  --border-contrast: #ffffff;
+  --text-primary: #f0f0f0;
+  --text-secondary: #999999;
+  --text-muted: #555555;
+  --accent-active: #ffffff;
+  --status-info: #3b82f6;
+  --status-warning: #eab308;
+  --status-danger: #ef4444;
+  --status-success: #22c55e;
+}
+
+/* Strict Zero-Radius & Zero Box-Shadow Directive */
+*, *::before, *::after {
+  border-radius: 0px !important;
+}
+
+/* Custom Sharp Monochromatic Scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: #080808;
+}
+::-webkit-scrollbar-thumb {
+  background: #282828;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #444444;
+}
+
+/* Selection Color */
+::selection {
+  background: #ffffff;
+  color: #000000;
+}
