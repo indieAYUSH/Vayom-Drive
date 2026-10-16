@@ -16,13 +16,37 @@ def detect_file_category(mime_type: str, filename: str) -> str:
         return "document"
     return "other"
 
-def generate_webp_thumbnail(image_path: Path, output_path: Path, size: Tuple[int, int] = (240, 240), quality: int = 70) -> bool:
-    """Generates an ultra-compact WebP thumbnail (~12 KB) for instant grid browsing."""
+def generate_webp_thumbnail(
+    image_path: Path, 
+    output_path: Path, 
+    size: Tuple[int, int] = (480, 480), 
+    quality: int = 85
+) -> bool:
+    """
+    Generates a crisp, high-definition WebP thumbnail for instant grid browsing.
+    Enhanced quality by ~20% (quality=85, 480x480 max bounds, LANCZOS resampling, method=6).
+    """
     try:
+        from PIL import ImageOps
         with Image.open(image_path) as img:
+            # Handle phone/camera EXIF orientation tags automatically
+            img = ImageOps.exif_transpose(img)
+
+            # Convert unsupported color modes (e.g. CMYK, palette) to RGB/RGBA
+            if img.mode in ("CMYK", "P", "1"):
+                img = img.convert("RGB")
+            elif img.mode == "LA":
+                img = img.convert("RGBA")
+
             img.thumbnail(size, Image.Resampling.LANCZOS)
             output_path.parent.mkdir(parents=True, exist_ok=True)
-            img.save(output_path, "WEBP", quality=quality, optimize=True)
+            img.save(
+                output_path, 
+                "WEBP", 
+                quality=quality, 
+                method=6,  # Maximum compression quality search in libwebp
+                optimize=True
+            )
             return True
     except Exception:
         return False
