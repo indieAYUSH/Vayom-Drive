@@ -175,8 +175,10 @@ export const LightboxModal: React.FC<LightboxModalProps> = ({
               <img
                 src={item.preview_url || item.thumbnail_url}
                 alt={item.filename}
+                draggable={false}
+                onDragStart={(e) => e.preventDefault()}
                 style={{ transform: `scale(${zoomLevel})` }}
-                className="max-h-[85vh] max-w-[85vw] object-contain transition-transform duration-150 border border-[#1a1a1a]"
+                className="max-h-[85vh] max-w-[85vw] object-contain transition-transform duration-150 border border-[#1a1a1a] select-none"
               />
             </div>
           ) : (

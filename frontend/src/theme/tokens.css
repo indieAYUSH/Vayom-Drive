@@ -47,3 +47,13 @@
   background: #ffffff;
   color: #000000;
 }
+
+/* Prevent accidental dragging of UI images, media, and links */
+img, svg, video, a {
+  -webkit-user-drag: none;
+  -khtml-user-drag: none;
+  -moz-user-drag: none;
+  -o-user-drag: none;
+  user-drag: none;
+}
+

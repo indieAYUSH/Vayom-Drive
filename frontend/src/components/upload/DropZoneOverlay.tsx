@@ -8,42 +8,82 @@ export const DropZoneOverlay: React.FC = () => {
 
   useEffect(() => {
     let dragCounter = 0
+    let isInternalDrag = false
+
+    const handleDragStart = () => {
+      // User is dragging an element already inside the browser window (e.g. thumbnail, text)
+      isInternalDrag = true
+    }
+
+    const handleDragEnd = () => {
+      isInternalDrag = false
+      dragCounter = 0
+      setIsDragging(false)
+    }
+
+    const isExternalFilesDrag = (e: DragEvent) => {
+      if (isInternalDrag || !e.dataTransfer) return false
+      const types = Array.from(e.dataTransfer.types || [])
+      return types.includes('Files')
+    }
 
     const handleDragEnter = (e: DragEvent) => {
       e.preventDefault()
+      if (!isExternalFilesDrag(e)) return
+
       dragCounter++
-      if (e.dataTransfer?.items && e.dataTransfer.items.length > 0) {
-        setIsDragging(true)
-      }
+      setIsDragging(true)
     }
 
     const handleDragLeave = (e: DragEvent) => {
       e.preventDefault()
+      if (isInternalDrag) return
+
       dragCounter--
-      if (dragCounter === 0) {
+      if (dragCounter <= 0) {
+        dragCounter = 0
         setIsDragging(false)
       }
     }
 
     const handleDragOver = (e: DragEvent) => {
       e.preventDefault()
+      if (!isExternalFilesDrag(e)) {
+        if (e.dataTransfer) {
+          e.dataTransfer.dropEffect = 'none'
+        }
+        return
+      }
+      if (e.dataTransfer) {
+        e.dataTransfer.dropEffect = 'copy'
+      }
     }
 
     const handleDrop = (e: DragEvent) => {
       e.preventDefault()
+      const wasInternal = isInternalDrag
+      isInternalDrag = false
       dragCounter = 0
       setIsDragging(false)
-      if (e.dataTransfer?.files && e.dataTransfer.files.length > 0) {
-        addFilesToUpload(e.dataTransfer.files)
+
+      if (wasInternal) return
+
+      const files = e.dataTransfer?.files
+      if (files && files.length > 0) {
+        addFilesToUpload(files)
       }
     }
 
+    window.addEventListener('dragstart', handleDragStart)
+    window.addEventListener('dragend', handleDragEnd)
     window.addEventListener('dragenter', handleDragEnter)
     window.addEventListener('dragleave', handleDragLeave)
     window.addEventListener('dragover', handleDragOver)
     window.addEventListener('drop', handleDrop)
 
     return () => {
+      window.removeEventListener('dragstart', handleDragStart)
+      window.removeEventListener('dragend', handleDragEnd)
       window.removeEventListener('dragenter', handleDragEnter)
       window.removeEventListener('dragleave', handleDragLeave)
       window.removeEventListener('dragover', handleDragOver)

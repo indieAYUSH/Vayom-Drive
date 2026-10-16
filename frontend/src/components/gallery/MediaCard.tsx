@@ -84,7 +84,9 @@ export const MediaCard: React.FC<MediaCardProps> = ({
             src={item.thumbnail_url}
             alt={item.filename}
             loading="lazy"
-            className="w-full h-full object-cover transition-transform duration-200 group-hover:scale-[1.02]"
+            draggable={false}
+            onDragStart={(e) => e.preventDefault()}
+            className="w-full h-full object-cover transition-transform duration-200 group-hover:scale-[1.02] select-none"
           />
         ) : item.file_category === 'video' ? (
           <div className="flex flex-col items-center justify-center text-[#555555] gap-2">

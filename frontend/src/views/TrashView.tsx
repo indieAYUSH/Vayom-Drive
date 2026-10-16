@@ -79,7 +79,9 @@ export const TrashView: React.FC = () => {
                   <img
                     src={item.thumbnail_url}
                     alt={item.filename}
-                    className="w-10 h-10 object-cover border border-[#222222] flex-shrink-0 grayscale opacity-60"
+                    draggable={false}
+                    onDragStart={(e) => e.preventDefault()}
+                    className="w-10 h-10 object-cover border border-[#222222] flex-shrink-0 grayscale opacity-60 select-none"
                   />
                 ) : (
                   <div className="w-10 h-10 bg-[#141414] border border-[#222222] flex items-center justify-center text-[#555555] flex-shrink-0">

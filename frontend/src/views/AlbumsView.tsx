@@ -43,7 +43,9 @@ export const AlbumsView: React.FC = () => {
                 <img
                   src={album.cover_url}
                   alt={album.name}
-                  className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-200"
+                  draggable={false}
+                  onDragStart={(e) => e.preventDefault()}
+                  className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-200 select-none"
                 />
               ) : (
                 <div className="w-full h-full flex items-center justify-center text-[#444444]">
