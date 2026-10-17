@@ -30,13 +30,13 @@ export const CreateAlbumModal: React.FC = () => {
     <Modal
       isOpen={isCreateAlbumModalOpen}
       onClose={() => setCreateAlbumModalOpen(false)}
-      title="Create New Album"
+      title="Create New Folder"
       maxWidth="sm"
     >
       <form onSubmit={handleCreate} className="space-y-4 font-mono text-xs">
         <Input
-          label="Album Name"
-          placeholder="e.g. System Backups, 4K Footage"
+          label="Folder Name"
+          placeholder="e.g. Work Documents, Camera Captures, Projects"
           value={name}
           onChange={(e) => setName(e.target.value)}
           required
@@ -49,7 +49,7 @@ export const CreateAlbumModal: React.FC = () => {
           </label>
           <textarea
             rows={3}
-            placeholder="Notes or tags for this collection..."
+            placeholder="Notes or tags for this folder..."
             value={description}
             onChange={(e) => setDescription(e.target.value)}
             className="w-full bg-[#080808] text-[#f0f0f0] border border-[#282828] focus:border-[#666666] focus:outline-none p-2 text-xs placeholder:text-[#444444]"
@@ -72,7 +72,7 @@ export const CreateAlbumModal: React.FC = () => {
             disabled={!name.trim() || isSubmitting}
             icon={<FolderPlus size={12} />}
           >
-            {isSubmitting ? 'Creating...' : 'Create Album'}
+            {isSubmitting ? 'Creating...' : 'Create Folder'}
           </Button>
         </div>
       </form>

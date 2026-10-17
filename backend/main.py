@@ -11,6 +11,7 @@ from .config import settings
 from .db.connection import init_db, get_db
 from .storage.client import storage_client
 from .api.routes import router as api_router, perform_rebuild_index
+from .api.auth import router as auth_router
 
 logging.basicConfig(
     level=logging.INFO,
@@ -51,7 +52,7 @@ async def lifespan(app: FastAPI):
             cur = await db.execute("SELECT COUNT(*) FROM files")
             count = (await cur.fetchone())[0]
 
-        if count == 0 and storage_client._is_connected:
+        if count == 0 and storage_client._is_connected and settings.TELEGRAM_CHANNEL_ID:
             logger.info("SQLite catalog index is empty. Automatically rebuilding index from Telegram storage channel...")
             restored = await perform_rebuild_index(limit=5000)
             logger.info(f"Auto-index rebuild complete: restored {restored} envelope(s) from Telegram channel.")
@@ -87,6 +88,7 @@ app.add_middleware(
 
 # Include REST API endpoints
 app.include_router(api_router)
+app.include_router(auth_router)
 
 @app.get("/s/{token}")
 async def redirect_share(token: str):

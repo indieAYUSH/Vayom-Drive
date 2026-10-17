@@ -56,8 +56,8 @@ export const BulkActionBar: React.FC = () => {
           onClick={() => setCreateAlbumModalOpen(true)}
           icon={<FolderPlus size={12} />}
         >
-          <span className="hidden sm:inline">Add to Album</span>
-          <span className="sm:hidden">Album</span>
+          <span className="hidden sm:inline">Add to Folder</span>
+          <span className="sm:hidden">Folder</span>
         </Button>
 
         <Button

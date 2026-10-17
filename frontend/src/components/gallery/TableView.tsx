@@ -35,17 +35,17 @@ export const TableView: React.FC<TableViewProps> = ({
   }
 
   return (
-    <div className="flex-1 overflow-auto border-t border-[#1c1c1c] font-mono text-xs select-none">
-      <table className="w-full text-left border-collapse">
+    <div className="flex-1 overflow-x-auto overflow-y-auto border-t border-[#1c1c1c] font-mono text-xs select-none">
+      <table className="w-full min-w-[340px] text-left border-collapse">
         <thead>
           <tr className="bg-[#0c0c0c] border-b border-[#222222] text-[#666666] text-[10px] uppercase tracking-wider sticky top-0 z-10">
             <th className="py-2.5 px-3 w-8"></th>
             <th className="py-2.5 px-3">Filename</th>
-            <th className="py-2.5 px-3">Category</th>
+            <th className="py-2.5 px-3 hidden sm:table-cell">Category</th>
             <th className="py-2.5 px-3">Size</th>
-            <th className="py-2.5 px-3">TG Parts</th>
-            <th className="py-2.5 px-3">SHA-256 Checksum</th>
-            <th className="py-2.5 px-3">Date</th>
+            <th className="py-2.5 px-3 hidden md:table-cell">TG Parts</th>
+            <th className="py-2.5 px-3 hidden lg:table-cell">SHA-256 Checksum</th>
+            <th className="py-2.5 px-3 hidden sm:table-cell">Date</th>
             <th className="py-2.5 px-3 text-right">Actions</th>
           </tr>
         </thead>
@@ -68,25 +68,25 @@ export const TableView: React.FC<TableViewProps> = ({
                 <td className="py-2 px-3 font-medium text-[#f0f0f0]">
                   <span 
                     onClick={() => onOpenLightbox(item)}
-                    className="cursor-pointer hover:underline truncate max-w-xs block"
+                    className="cursor-pointer hover:underline truncate max-w-[160px] sm:max-w-xs block"
                   >
                     {item.filename}
                   </span>
                 </td>
-                <td className="py-2 px-3">
+                <td className="py-2 px-3 hidden sm:table-cell">
                   <Badge variant="default">{item.file_category}</Badge>
                 </td>
                 <td className="py-2 px-3 text-[#aaaaaa]">
                   {formatBytes(item.size_bytes)}
                 </td>
-                <td className="py-2 px-3">
+                <td className="py-2 px-3 hidden md:table-cell">
                   {item.is_split ? (
                     <Badge variant="warning">{item.total_parts} Parts</Badge>
                   ) : (
                     <span className="text-[#666666]">1 Msg</span>
                   )}
                 </td>
-                <td className="py-2 px-3 text-[#777777] font-mono text-[11px]">
+                <td className="py-2 px-3 text-[#777777] font-mono text-[11px] hidden lg:table-cell">
                   <button
                     onClick={() => copyToClipboard(item.sha256)}
                     className="flex items-center gap-1.5 hover:text-[#ffffff] transition-colors"
@@ -100,7 +100,7 @@ export const TableView: React.FC<TableViewProps> = ({
                     )}
                   </button>
                 </td>
-                <td className="py-2 px-3 text-[#777777] text-[11px]">
+                <td className="py-2 px-3 text-[#777777] text-[11px] hidden sm:table-cell">
                   {new Date(item.created_at).toLocaleDateString()}
                 </td>
                 <td className="py-2 px-3 text-right">

@@ -1,14 +1,22 @@
 import React, { useState } from 'react'
 import { useVaultStore } from '../store/useVaultStore'
-import { Database, RefreshCw, Terminal, CheckCircle } from 'lucide-react'
+import { useAuthStore } from '../store/useAuthStore'
+import { Database, RefreshCw, Terminal, CheckCircle, LogOut, User, Shield } from 'lucide-react'
 import { Button } from '../components/common/Button'
 import { Badge } from '../components/common/Badge'
 
 export const SettingsView: React.FC = () => {
   const { metrics, rebuildIndex } = useVaultStore()
+  const { user, authMode, logout } = useAuthStore()
   const [isRebuilding, setIsRebuilding] = useState(false)
   const [rebuildLogs, setRebuildLogs] = useState<string[]>([])
   const [rebuildDone, setRebuildDone] = useState(false)
+
+  const handleDisconnect = async () => {
+    if (window.confirm('Disconnect from this Telegram account / node? You will return to the login screen.')) {
+      await logout()
+    }
+  }
 
   const handleRebuildIndex = async () => {
     setIsRebuilding(true)
@@ -47,16 +55,55 @@ export const SettingsView: React.FC = () => {
   return (
     <div className="flex-1 overflow-y-auto p-6 bg-[#000000] select-none font-mono">
       {/* Top Header */}
-      <div className="pb-6 border-b border-[#282828] mb-6">
-        <h1 className="text-base font-bold uppercase tracking-wider text-[#ffffff] flex items-center gap-2">
-          <Database size={16} /> Vayom Drive Node Configuration
-        </h1>
-        <p className="text-xs text-[#777777] mt-1">
-          Telegram backend parameters, pointer-offset policies, and disaster recovery tools
-        </p>
+      <div className="pb-6 border-b border-[#282828] mb-6 flex items-center justify-between">
+        <div>
+          <h1 className="text-base font-bold uppercase tracking-wider text-[#ffffff] flex items-center gap-2">
+            <Database size={16} /> Vayom Drive Node Configuration
+          </h1>
+          <p className="text-xs text-[#777777] mt-1">
+            Telegram backend parameters, pointer-offset policies, and disaster recovery tools
+          </p>
+        </div>
+        <Button
+          variant="danger"
+          size="sm"
+          onClick={handleDisconnect}
+          icon={<LogOut size={12} />}
+        >
+          Disconnect Node
+        </Button>
       </div>
 
       <div className="max-w-3xl space-y-6">
+        {/* Active Node Account Profile */}
+        <div className="p-4 bg-[#0a0a0a] border border-[#222222] space-y-3">
+          <div className="flex items-center justify-between">
+            <span className="text-xs font-semibold text-[#f0f0f0] uppercase tracking-wider flex items-center gap-2">
+              <User size={13} /> Active Node Account
+            </span>
+            <Badge variant="default">
+              {authMode === 'qr' ? 'Telegram User Session' : authMode === 'bot' ? 'Dedicated Bot' : 'Sovereign Node'}
+            </Badge>
+          </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs pt-2 border-t border-[#1a1a1a]">
+            <div>
+              <span className="text-[10px] text-[#666666] uppercase block">Display Name</span>
+              <span className="text-[#e5e5e5] font-semibold">{user?.display_name || 'Vault User'}</span>
+            </div>
+            <div>
+              <span className="text-[10px] text-[#666666] uppercase block">Telegram Username</span>
+              <span className="text-[#e5e5e5]">{user?.username ? `@${user.username}` : 'Direct MTProto'}</span>
+            </div>
+            <div>
+              <span className="text-[10px] text-[#666666] uppercase block">Chunk Ceiling</span>
+              <span className="text-[#22c55e] font-semibold">
+                {user?.is_premium ? '4.00 GB (Premium)' : '1.90 GB (Standard)'}
+              </span>
+            </div>
+          </div>
+        </div>
+
         {/* Telegram Storage Channel Status */}
         <div className="p-4 bg-[#0a0a0a] border border-[#222222] space-y-3">
           <div className="flex items-center justify-between">
@@ -79,7 +126,7 @@ export const SettingsView: React.FC = () => {
             </div>
             <div>
               <span className="text-[10px] text-[#666666] uppercase block">Max Part Size Ceiling</span>
-              <span className="text-[#e5e5e5]">1.90 GB (1,900,000,000 bytes)</span>
+              <span className="text-[#e5e5e5]">{user?.is_premium ? '3.90 GB (Telegram Premium)' : '1.90 GB (1,900,000,000 bytes)'}</span>
             </div>
             <div>
               <span className="text-[10px] text-[#666666] uppercase block">Current Stored Bytes</span>

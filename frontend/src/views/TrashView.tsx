@@ -27,7 +27,7 @@ export const TrashView: React.FC = () => {
   return (
     <div className="flex-1 overflow-y-auto p-6 bg-[#000000] select-none font-mono">
       {/* Top Header */}
-      <div className="flex items-center justify-between pb-6 border-b border-[#282828] mb-6">
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-6 border-b border-[#282828] mb-6">
         <div>
           <h1 className="text-base font-bold uppercase tracking-wider text-[#ef4444] flex items-center gap-2">
             <Trash2 size={16} /> Trash & 30-Day Retention
@@ -38,7 +38,7 @@ export const TrashView: React.FC = () => {
         </div>
 
         {deletedFiles.length > 0 && (
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 flex-wrap">
             <Button
               variant="outline"
               size="sm"
@@ -72,9 +72,9 @@ export const TrashView: React.FC = () => {
           {deletedFiles.map((item) => (
             <div
               key={item.id}
-              className="p-3 bg-[#0c0c0c] border border-[#282828] hover:border-[#383838] flex items-center justify-between transition-colors text-xs"
+              className="p-3 bg-[#0c0c0c] border border-[#282828] hover:border-[#383838] flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 transition-colors text-xs"
             >
-              <div className="flex items-center gap-3 truncate max-w-lg">
+              <div className="flex items-center gap-3 truncate min-w-0 flex-1">
                 {item.thumbnail_url ? (
                   <img
                     src={item.thumbnail_url}
@@ -89,7 +89,7 @@ export const TrashView: React.FC = () => {
                   </div>
                 )}
 
-                <div className="truncate">
+                <div className="truncate min-w-0 flex-1">
                   <div className="font-semibold text-[#cccccc] truncate">{item.filename}</div>
                   <div className="text-[10px] text-[#666666] flex items-center gap-2 mt-0.5">
                     <span>{formatBytes(item.size_bytes)}</span>
@@ -99,7 +99,7 @@ export const TrashView: React.FC = () => {
                 </div>
               </div>
 
-              <div className="flex items-center gap-2">
+              <div className="flex items-center gap-2 self-end sm:self-center flex-shrink-0">
                 <Button
                   variant="secondary"
                   size="sm"

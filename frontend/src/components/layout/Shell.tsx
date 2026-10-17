@@ -35,6 +35,7 @@ export const Shell: React.FC = () => {
 
   const renderActiveView = () => {
     switch (activeTab) {
+      case 'folders':
       case 'albums':
         return selectedAlbumId ? <GalleryView /> : <AlbumsView />
       case 'trash':
@@ -43,6 +44,7 @@ export const Shell: React.FC = () => {
         return <SharesView />
       case 'settings':
         return <SettingsView />
+      case 'screenshots':
       case 'all':
       case 'images':
       case 'videos':

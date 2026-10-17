@@ -2,7 +2,8 @@ import React from 'react'
 import { FileItem } from '../../types/vault'
 import { Checkbox } from '../common/Checkbox'
 import { Badge } from '../common/Badge'
-import { Play, FileText, Archive, Film } from 'lucide-react'
+import { Play, FileText, Archive, Film, Star, Music } from 'lucide-react'
+import { useVaultStore } from '../../store/useVaultStore'
 
 interface MediaCardProps {
   item: FileItem
@@ -17,6 +18,14 @@ export const MediaCard: React.FC<MediaCardProps> = ({
   onToggleSelect,
   onOpenLightbox,
 }) => {
+  const { starredIds, toggleStar, setActiveAudioItem } = useVaultStore()
+  const isStarred = starredIds.includes(item.id)
+
+  const isAudio =
+    item.file_category === 'audio' ||
+    item.mime_type.startsWith('audio/') ||
+    /\.(mp3|wav|flac|ogg|m4a|aac)$/i.test(item.filename)
+
   const formatBytes = (bytes: number) => {
     if (bytes >= 1024 * 1024 * 1024) {
       return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} GB`
@@ -29,6 +38,14 @@ export const MediaCard: React.FC<MediaCardProps> = ({
     const m = Math.floor(secs / 60)
     const s = Math.floor(secs % 60)
     return `${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`
+  }
+
+  const handleCardClick = () => {
+    if (isAudio) {
+      setActiveAudioItem(item)
+    } else {
+      onOpenLightbox(item)
+    }
   }
 
   return (
@@ -55,8 +72,20 @@ export const MediaCard: React.FC<MediaCardProps> = ({
         </div>
       )}
 
-      {/* Badges in Top Right */}
+      {/* Top Right: Badges & Star Button */}
       <div className="absolute top-2 right-2 z-10 flex flex-col items-end gap-1">
+        <button
+          onClick={(e) => {
+            e.stopPropagation()
+            toggleStar(item.id)
+          }}
+          className={`p-1 border border-[#282828] bg-[#080808] transition-opacity ${
+            isStarred ? 'text-[#ffffff] opacity-100' : 'text-[#666666] opacity-0 group-hover:opacity-100 hover:text-[#ffffff]'
+          }`}
+          title={isStarred ? 'Remove from Starred' : 'Star file'}
+        >
+          <Star size={12} fill={isStarred ? 'white' : 'none'} />
+        </button>
         {item.is_split && (
           <Badge variant="warning">
             {item.total_parts} Parts
@@ -76,7 +105,7 @@ export const MediaCard: React.FC<MediaCardProps> = ({
 
       {/* Main Thumbnail / Preview Container */}
       <div 
-        onClick={() => onOpenLightbox(item)}
+        onClick={handleCardClick}
         className="w-full aspect-square bg-[#080808] overflow-hidden flex items-center justify-center cursor-pointer relative"
       >
         {item.thumbnail_url ? (

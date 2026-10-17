@@ -1,5 +1,5 @@
 import React from 'react'
-import { Clock, Image as ImageIcon, Folder, Trash2, Settings } from 'lucide-react'
+import { Clock, Image as ImageIcon, Folder, Trash2, Crop } from 'lucide-react'
 import { useVaultStore } from '../../store/useVaultStore'
 
 export const MobileNav: React.FC = () => {
@@ -29,11 +29,19 @@ export const MobileNav: React.FC = () => {
       </div>
 
       <div 
-        onClick={() => setActiveTab('albums')} 
-        className={navItemClass(activeTab === 'albums')}
+        onClick={() => setActiveTab('screenshots')} 
+        className={navItemClass(activeTab === 'screenshots')}
+      >
+        <Crop size={16} />
+        <span className="mt-1">Screenshots</span>
+      </div>
+
+      <div 
+        onClick={() => setActiveTab('folders')} 
+        className={navItemClass(activeTab === 'folders' || activeTab === 'albums')}
       >
         <Folder size={16} />
-        <span className="mt-1">Albums</span>
+        <span className="mt-1">Folders</span>
       </div>
 
       <div 
@@ -42,14 +50,6 @@ export const MobileNav: React.FC = () => {
       >
         <Trash2 size={16} />
         <span className="mt-1">Trash</span>
-      </div>
-
-      <div 
-        onClick={() => setActiveTab('settings')} 
-        className={navItemClass(activeTab === 'settings')}
-      >
-        <Settings size={16} />
-        <span className="mt-1">Config</span>
       </div>
     </nav>
   )

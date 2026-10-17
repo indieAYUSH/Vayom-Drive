@@ -12,11 +12,18 @@ interface VaultState {
   error: string | null
 
   // Navigation & Filtering
-  activeTab: 'all' | 'images' | 'videos' | 'documents' | 'archives' | 'albums' | 'trash' | 'shares' | 'settings'
+  activeTab: 'all' | 'images' | 'videos' | 'screenshots' | 'documents' | 'archives' | 'audio' | 'starred' | 'folders' | 'albums' | 'trash' | 'shares' | 'settings'
+  primaryMode: 'photos' | 'drive'
   selectedAlbumId: string | null
   selectedTag: string | null
   searchQuery: string
   activeCategoryFilter: FileCategory | 'all'
+  timelineGroupByDate: boolean
+  driveViewMode: 'grid' | 'table'
+
+  // Starred / Favorites & Audio Player
+  starredIds: string[]
+  activeAudioItem: FileItem | null
 
   // Selection
   selectedIds: string[]
@@ -38,10 +45,16 @@ interface VaultState {
 
   // Navigation Actions
   setActiveTab: (tab: VaultState['activeTab']) => void
+  setPrimaryMode: (mode: 'photos' | 'drive') => void
   setSelectedAlbumId: (id: string | null) => void
   setSelectedTag: (tag: string | null) => void
   setSearchQuery: (query: string) => void
   setCategoryFilter: (category: FileCategory | 'all') => void
+  setTimelineGroupByDate: (group: boolean) => void
+  setDriveViewMode: (mode: 'grid' | 'table') => void
+
+  toggleStar: (id: string) => void
+  setActiveAudioItem: (item: FileItem | null) => void
 
   toggleSelect: (id: string) => void
   selectAll: () => void
@@ -69,6 +82,15 @@ interface VaultState {
   rebuildIndex: () => Promise<{ status: string; restored_envelopes: number }>
 }
 
+const getInitialStarred = (): string[] => {
+  try {
+    const raw = localStorage.getItem('televault_starred')
+    return raw ? JSON.parse(raw) : []
+  } catch {
+    return []
+  }
+}
+
 export const useVaultStore = create<VaultState>((set, get) => ({
   files: [],
   albums: [],
@@ -84,10 +106,16 @@ export const useVaultStore = create<VaultState>((set, get) => ({
   error: null,
 
   activeTab: 'all',
+  primaryMode: 'photos',
   selectedAlbumId: null,
   selectedTag: null,
   searchQuery: '',
   activeCategoryFilter: 'all',
+  timelineGroupByDate: true,
+  driveViewMode: 'grid',
+
+  starredIds: getInitialStarred(),
+  activeAudioItem: null,
 
   selectedIds: [],
   lightboxItem: null,
@@ -96,6 +124,20 @@ export const useVaultStore = create<VaultState>((set, get) => ({
   isCreateAlbumModalOpen: false,
   isShareModalOpen: false,
   shareTargetFile: null,
+
+  setPrimaryMode: (mode) => set({ primaryMode: mode }),
+  setTimelineGroupByDate: (group) => set({ timelineGroupByDate: group }),
+  setDriveViewMode: (mode) => set({ driveViewMode: mode }),
+  toggleStar: (id) =>
+    set((state) => {
+      const exists = state.starredIds.includes(id)
+      const updated = exists ? state.starredIds.filter((item) => item !== id) : [...state.starredIds, id]
+      try {
+        localStorage.setItem('televault_starred', JSON.stringify(updated))
+      } catch {}
+      return { starredIds: updated }
+    }),
+  setActiveAudioItem: (item) => set({ activeAudioItem: item }),
 
   fetchFiles: async () => {
     try {
@@ -110,10 +152,11 @@ export const useVaultStore = create<VaultState>((set, get) => ({
       else if (activeTab === 'documents') cat = 'document'
       else if (activeTab === 'archives') cat = 'archive'
 
+      const isFolderTab = activeTab === 'folders' || activeTab === 'albums'
       const files = await api.listFiles({
         category: cat,
         tag: selectedTag || undefined,
-        album_id: activeTab === 'albums' && selectedAlbumId ? selectedAlbumId : undefined,
+        album_id: isFolderTab && selectedAlbumId ? selectedAlbumId : undefined,
         q: searchQuery.trim() || undefined,
         is_deleted: isTrash,
         limit: 500,
@@ -169,7 +212,7 @@ export const useVaultStore = create<VaultState>((set, get) => ({
   },
 
   setSelectedAlbumId: (id) => {
-    set({ selectedAlbumId: id, activeTab: 'albums', selectedIds: [] })
+    set({ selectedAlbumId: id, activeTab: 'folders', selectedIds: [] })
     get().fetchFiles()
   },
 

@@ -2,11 +2,13 @@ import React from 'react'
 import { Search, Upload, HardDrive, Settings, ShieldCheck, Share2 } from 'lucide-react'
 import { useVaultStore } from '../../store/useVaultStore'
 import { useUploadStore } from '../../store/useUploadStore'
+import { useAuthStore } from '../../store/useAuthStore'
 import { Button } from '../common/Button'
 
 export const Header: React.FC = () => {
   const { metrics, setCommandBarOpen, setActiveTab, activeTab } = useVaultStore()
   const { addFilesToUpload } = useUploadStore()
+  const { user } = useAuthStore()
   const fileInputRef = React.useRef<HTMLInputElement>(null)
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -107,6 +109,18 @@ export const Header: React.FC = () => {
         >
           <span className="hidden sm:inline">Settings</span>
         </Button>
+
+        {/* User Account Chip */}
+        {user && (
+          <div 
+            onClick={() => setActiveTab('settings')}
+            title="Active Telegram Node (Click to Manage)"
+            className="hidden lg:flex items-center gap-1.5 px-2 py-1 bg-[#141414] border border-[#282828] text-[11px] font-mono text-[#e5e5e5] cursor-pointer hover:border-[#444444]"
+          >
+            <span className="w-1.5 h-1.5 rounded-full bg-[#22c55e]" />
+            <span className="truncate max-w-[100px]">{user.display_name || user.first_name || 'Node'}</span>
+          </div>
+        )}
       </div>
     </header>
   )

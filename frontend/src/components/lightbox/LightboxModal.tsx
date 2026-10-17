@@ -65,8 +65,8 @@ export const LightboxModal: React.FC<LightboxModalProps> = ({
   return (
     <div className="fixed inset-0 z-50 flex flex-col bg-[#000000] text-[#f0f0f0] select-none">
       {/* Top Header Bar */}
-      <div className="h-12 bg-[#080808] border-b border-[#222222] px-4 flex items-center justify-between z-20 flex-shrink-0">
-        <div className="flex items-center gap-3 truncate max-w-md">
+      <div className="h-12 bg-[#080808] border-b border-[#222222] px-2 sm:px-4 flex items-center justify-between z-20 flex-shrink-0">
+        <div className="flex items-center gap-2 sm:gap-3 truncate max-w-[160px] sm:max-w-md">
           <span className="font-mono text-xs font-semibold text-[#f0f0f0] truncate">
             {item.filename}
           </span>
@@ -76,7 +76,7 @@ export const LightboxModal: React.FC<LightboxModalProps> = ({
         </div>
 
         {/* Action Controls */}
-        <div className="flex items-center gap-1.5">
+        <div className="flex items-center gap-1 sm:gap-1.5">
           {item.file_category === 'image' && (
             <div className="hidden sm:flex items-center gap-1 mr-2 border-r border-[#222222] pr-2">
               <button
@@ -143,7 +143,7 @@ export const LightboxModal: React.FC<LightboxModalProps> = ({
 
           <button
             onClick={onClose}
-            className="p-1.5 ml-2 text-[#888888] hover:text-[#ffffff] border border-transparent hover:border-[#333333]"
+            className="p-1.5 ml-1 sm:ml-2 text-[#888888] hover:text-[#ffffff] border border-transparent hover:border-[#333333]"
             title="Close (Esc)"
           >
             <X size={16} />
@@ -156,14 +156,14 @@ export const LightboxModal: React.FC<LightboxModalProps> = ({
         {/* Left Arrow Button */}
         <button
           onClick={onPrev}
-          className="absolute left-4 top-1/2 -translate-y-1/2 z-20 w-10 h-10 bg-[#080808] border border-[#282828] hover:border-[#ffffff] flex items-center justify-center text-[#cccccc] hover:text-[#ffffff] transition-colors"
+          className="absolute left-2 sm:left-4 top-1/2 -translate-y-1/2 z-20 w-8 h-8 sm:w-10 sm:h-10 bg-[#080808] border border-[#282828] hover:border-[#ffffff] flex items-center justify-center text-[#cccccc] hover:text-[#ffffff] transition-colors"
           title="Previous (Left Arrow)"
         >
-          <ChevronLeft size={20} />
+          <ChevronLeft size={18} />
         </button>
 
         {/* Center Media Viewport */}
-        <div className="flex-1 flex items-center justify-center p-4 overflow-hidden relative">
+        <div className="flex-1 flex items-center justify-center p-2 sm:p-4 overflow-hidden relative">
           {item.file_category === 'video' ? (
             <VideoPlayer
               src={item.preview_url || 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4'}
@@ -202,10 +202,10 @@ export const LightboxModal: React.FC<LightboxModalProps> = ({
         {/* Right Arrow Button */}
         <button
           onClick={onNext}
-          className="absolute right-4 top-1/2 -translate-y-1/2 z-20 w-10 h-10 bg-[#080808] border border-[#282828] hover:border-[#ffffff] flex items-center justify-center text-[#cccccc] hover:text-[#ffffff] transition-colors"
+          className="absolute right-2 sm:right-4 top-1/2 -translate-y-1/2 z-20 w-8 h-8 sm:w-10 sm:h-10 bg-[#080808] border border-[#282828] hover:border-[#ffffff] flex items-center justify-center text-[#cccccc] hover:text-[#ffffff] transition-colors"
           title="Next (Right Arrow)"
         >
-          <ChevronRight size={20} />
+          <ChevronRight size={18} />
         </button>
 
         {/* Collapsible Metadata Drawer */}

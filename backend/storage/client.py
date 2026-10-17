@@ -18,25 +18,59 @@ class TelegramStorageClient:
         self._media_cache: dict[tuple[str, int], Any] = {}
 
     async def connect(self):
-        """Initializes and authenticates the Telethon bot client."""
+        """Initializes and authenticates the Telethon client (User MTProto or Bot MTProto)."""
         async with self._lock:
             if self._is_connected and self.client:
                 return
 
-            if not settings.TELEGRAM_API_ID or not settings.TELEGRAM_API_HASH or not settings.TELEGRAM_BOT_TOKEN:
-                logger.warning("Telegram credentials not fully configured. Operating in mock/offline mode.")
+            settings.load_auth_config()
+
+            if not settings.TELEGRAM_API_ID or not settings.TELEGRAM_API_HASH:
+                logger.warning("Telegram API ID/Hash not configured. Operating in mock/offline mode.")
                 return
 
-            session_file = str(settings.DATA_DIR / "vayom_bot")
+            session_file = str(settings.DATA_DIR / settings.SESSION_NAME)
             self.client = TelegramClient(
                 session_file,
                 settings.TELEGRAM_API_ID,
                 settings.TELEGRAM_API_HASH
             )
 
-            await self.client.start(bot_token=settings.TELEGRAM_BOT_TOKEN)
-            self._is_connected = True
-            logger.info("Successfully connected to Telegram MTProto as Bot!")
+            if settings.AUTH_MODE == "qr":
+                # User MTProto Session
+                await self.client.connect()
+                if not await self.client.is_user_authorized():
+                    logger.warning("User MTProto session not authorized. Waiting for QR login.")
+                    self._is_connected = False
+                    return
+                self._is_connected = True
+                logger.info("Successfully connected to Telegram MTProto as User (QR Session)!")
+            elif settings.TELEGRAM_BOT_TOKEN:
+                # Bot MTProto Session
+                await self.client.start(bot_token=settings.TELEGRAM_BOT_TOKEN)
+                self._is_connected = True
+                logger.info("Successfully connected to Telegram MTProto as Bot!")
+            else:
+                logger.info("No active auth session. Awaiting user login.")
+                self._is_connected = False
+
+    async def disconnect(self):
+        """Cleanly disconnects the Telegram MTProto client."""
+        async with self._lock:
+            if self.client:
+                try:
+                    await self.client.disconnect()
+                except Exception:
+                    pass
+                self.client = None
+            self._is_connected = False
+            self._media_cache.clear()
+            logger.info("Disconnected from Telegram MTProto.")
+
+    async def reconnect(self):
+        """Disconnects and reconnects with fresh settings."""
+        await self.disconnect()
+        await self.connect()
 
     async def upload_part(
         self,

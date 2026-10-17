@@ -1,4 +1,4 @@
-export type FileCategory = 'image' | 'video' | 'document' | 'archive' | 'audio' | 'other'
+export type FileCategory = 'image' | 'video' | 'screenshot' | 'document' | 'archive' | 'audio' | 'other'
 
 export interface TelegramPartManifest {
   part_index: number
@@ -49,6 +49,10 @@ export interface FileItem {
   duration_seconds?: number
   tags: string[]
   albums: string[]
+  folders?: string[]
+  is_screenshot?: boolean
+  is_starred?: boolean
+  relative_path?: string
   taken_at?: string
   created_at: string
   is_deleted: boolean
@@ -63,6 +67,8 @@ export interface AlbumItem {
   file_count: number
   created_at: string
 }
+
+export type FolderItem = AlbumItem
 
 export interface ShareLinkItem {
   id: string

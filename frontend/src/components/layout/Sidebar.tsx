@@ -11,7 +11,8 @@ import {
   Plus, 
   Database,
   Lock,
-  Share2
+  Share2,
+  Crop
 } from 'lucide-react'
 import { useVaultStore } from '../../store/useVaultStore'
 
@@ -30,6 +31,20 @@ export const Sidebar: React.FC = () => {
 
   const trashCount = files.filter((f) => f.is_deleted).length
   const allTags = Array.from(new Set(files.flatMap((f) => f.tags)))
+
+  const isScreenshotFile = (f: any): boolean => {
+    if (f.file_category === 'screenshot' || f.is_screenshot) return true
+    const name = (f.filename || '').toLowerCase()
+    return (
+      name.includes('screenshot') ||
+      name.includes('screen_shot') ||
+      name.includes('screen shot') ||
+      name.includes('screencap') ||
+      name.includes('capture') ||
+      name.includes('scrn') ||
+      (f.tags && f.tags.some((t: string) => t.toLowerCase() === 'screenshot' || t.toLowerCase() === 'screen'))
+    )
+  }
 
   const navItemClass = (isActive: boolean) => `
     flex items-center justify-between px-3 py-2 text-xs font-mono select-none cursor-pointer border-l-2 transition-colors
@@ -70,7 +85,7 @@ export const Sidebar: React.FC = () => {
                 <span>Photos</span>
               </div>
               <span className="text-[10px] text-[#555555]">
-                {files.filter(f => !f.is_deleted && f.file_category === 'image').length}
+                {files.filter(f => !f.is_deleted && f.file_category === 'image' && !isScreenshotFile(f)).length}
               </span>
             </div>
 
@@ -84,6 +99,19 @@ export const Sidebar: React.FC = () => {
               </div>
               <span className="text-[10px] text-[#555555]">
                 {files.filter(f => !f.is_deleted && f.file_category === 'video').length}
+              </span>
+            </div>
+
+            <div 
+              onClick={() => setActiveTab('screenshots')}
+              className={navItemClass(activeTab === 'screenshots')}
+            >
+              <div className="flex items-center gap-2.5">
+                <Crop size={14} />
+                <span>Screenshots</span>
+              </div>
+              <span className="text-[10px] text-[#555555]">
+                {files.filter(f => !f.is_deleted && isScreenshotFile(f)).length}
               </span>
             </div>
 
@@ -112,33 +140,52 @@ export const Sidebar: React.FC = () => {
                 {files.filter(f => !f.is_deleted && (f.file_category === 'archive' || f.is_split)).length}
               </span>
             </div>
+
+            <div 
+              onClick={() => { setActiveTab('folders'); setSelectedAlbumId(null); }}
+              className={navItemClass((activeTab === 'folders' || activeTab === 'albums') && !selectedAlbumId)}
+            >
+              <div className="flex items-center gap-2.5">
+                <Folder size={14} />
+                <span>Folders</span>
+              </div>
+              <span className="text-[10px] text-[#555555]">
+                {albums.length}
+              </span>
+            </div>
           </div>
         </div>
 
-        {/* Albums Section */}
+        {/* Folders Section */}
         <div>
           <div className="px-3 pb-1 flex items-center justify-between text-[10px] font-mono uppercase tracking-widest text-[#555555]">
-            <span>Albums</span>
+            <span 
+              onClick={() => { setActiveTab('folders'); setSelectedAlbumId(null); }}
+              className="cursor-pointer hover:text-[#ffffff] transition-colors"
+              title="View All Folders"
+            >
+              Folders
+            </span>
             <button 
               onClick={() => setCreateAlbumModalOpen(true)}
               className="text-[#888888] hover:text-[#ffffff] transition-colors p-0.5"
-              title="Create Album"
+              title="Create Folder"
             >
               <Plus size={12} />
             </button>
           </div>
           <div className="space-y-0.5">
-            {albums.map((album) => (
+            {albums.map((folder) => (
               <div
-                key={album.id}
-                onClick={() => setSelectedAlbumId(album.id)}
-                className={navItemClass(selectedAlbumId === album.id)}
+                key={folder.id}
+                onClick={() => setSelectedAlbumId(folder.id)}
+                className={navItemClass(selectedAlbumId === folder.id)}
               >
                 <div className="flex items-center gap-2.5 truncate">
                   <Folder size={14} />
-                  <span className="truncate">{album.name}</span>
+                  <span className="truncate">{folder.name}</span>
                 </div>
-                <span className="text-[10px] text-[#555555]">{album.file_count}</span>
+                <span className="text-[10px] text-[#555555]">{folder.file_count}</span>
               </div>
             ))}
           </div>

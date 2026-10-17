@@ -11,11 +11,12 @@ export const AlbumsView: React.FC = () => {
       {/* Top Header */}
       <div className="flex items-center justify-between pb-6 border-b border-[#282828] mb-6">
         <div>
-          <h1 className="text-base font-bold uppercase tracking-wider text-[#ffffff]">
-            Albums & Collections
+          <h1 className="text-base font-bold uppercase tracking-wider text-[#ffffff] flex items-center gap-2">
+            <Folder size={18} />
+            <span>Folders & Directories</span>
           </h1>
           <p className="text-xs text-[#666666] mt-1">
-            Group related photos, RAW captures, and archives into curated folders
+            Group and organize uploaded files, photos, and archives into structured folders
           </p>
         </div>
 
@@ -25,12 +26,21 @@ export const AlbumsView: React.FC = () => {
           onClick={() => setCreateAlbumModalOpen(true)}
           icon={<Plus size={13} />}
         >
-          New Album
+          New Folder
         </Button>
       </div>
 
-      {/* Album Grid */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
+      {/* Folders Grid */}
+      {albums.length === 0 ? (
+        <div className="flex flex-col items-center justify-center p-16 text-center text-[#555555]">
+          <div className="w-12 h-12 border border-[#222222] flex items-center justify-center mb-3 text-[#444444]">
+            <Folder size={24} />
+          </div>
+          <p className="text-sm uppercase tracking-wider text-[#888888]">No folders created yet</p>
+          <p className="text-xs text-[#444444] mt-1">Click "New Folder" to create your first organized folder</p>
+        </div>
+      ) : (
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
         {albums.map((album) => (
           <div
             key={album.id}
@@ -73,7 +83,8 @@ export const AlbumsView: React.FC = () => {
             </div>
           </div>
         ))}
-      </div>
+        </div>
+      )}
     </div>
   )
 }

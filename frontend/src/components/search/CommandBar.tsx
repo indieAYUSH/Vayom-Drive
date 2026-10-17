@@ -79,7 +79,7 @@ export const CommandBar: React.FC = () => {
   if (!isCommandBarOpen) return null
 
   return (
-    <div className="fixed inset-0 z-50 flex items-start justify-center pt-20 px-4">
+    <div className="fixed inset-0 z-50 flex items-start justify-center pt-6 sm:pt-20 px-2 sm:px-4">
       {/* Opaque backdrop with zero blur */}
       <div 
         className="fixed inset-0 bg-[#000000] bg-opacity-80"
@@ -146,7 +146,7 @@ export const CommandBar: React.FC = () => {
                   selectedIndex === idx ? 'bg-[#1a1a1a] text-[#ffffff]' : 'text-[#cccccc] hover:bg-[#141414]'
                 }`}
               >
-                <div className="flex items-center gap-3 truncate max-w-lg">
+                <div className="flex items-center gap-2 sm:gap-3 truncate min-w-0 flex-1 mr-2">
                   {item.thumbnail_url ? (
                     <img
                       src={item.thumbnail_url}
@@ -163,7 +163,7 @@ export const CommandBar: React.FC = () => {
                     </div>
                   )}
 
-                  <div className="truncate">
+                  <div className="truncate min-w-0 flex-1">
                     <div className="font-medium truncate text-xs">{item.filename}</div>
                     <div className="text-[10px] text-[#777777] flex items-center gap-2 mt-0.5">
                       <span>{(item.size_bytes / (1024 * 1024)).toFixed(1)} MB</span>
@@ -179,7 +179,7 @@ export const CommandBar: React.FC = () => {
                   </div>
                 </div>
 
-                <div className="flex items-center gap-2">
+                <div className="flex items-center gap-1.5 sm:gap-2 flex-shrink-0">
                   {item.is_split && <Badge variant="warning">{item.total_parts} Parts</Badge>}
                   <ArrowRight size={14} className="text-[#555555]" />
                 </div>

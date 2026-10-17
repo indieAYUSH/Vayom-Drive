@@ -26,16 +26,38 @@ export const GalleryView: React.FC = () => {
 
   const activeAlbum = albums.find((a) => a.id === selectedAlbumId)
 
+  const isScreenshot = (item: any): boolean => {
+    if (item.file_category === 'screenshot' || item.is_screenshot) return true
+    const name = (item.filename || '').toLowerCase()
+    return (
+      name.includes('screenshot') ||
+      name.includes('screen_shot') ||
+      name.includes('screen shot') ||
+      name.includes('screencap') ||
+      name.includes('capture') ||
+      name.includes('scrn') ||
+      (item.tags && item.tags.some((t: string) => t.toLowerCase() === 'screenshot' || t.toLowerCase() === 'screen'))
+    )
+  }
+
   // Filter items
   const displayItems = React.useMemo(() => {
     return files.filter((item) => {
       if (item.is_deleted) return false
-      if (selectedAlbumId && !item.albums.includes(selectedAlbumId)) return false
+      if (selectedAlbumId) {
+        const inAlbum = item.albums?.includes(selectedAlbumId) || (item.folders && item.folders.includes(selectedAlbumId))
+        if (!inAlbum) return false
+      }
       if (selectedTag && !item.tags.includes(selectedTag)) return false
-      if (activeTab === 'images' && item.file_category !== 'image') return false
-      if (activeTab === 'videos' && item.file_category !== 'video') return false
-      if (activeTab === 'documents' && item.file_category !== 'document') return false
-      if (activeTab === 'archives' && item.file_category !== 'archive' && !item.is_split) return false
+      if (activeTab === 'screenshots') {
+        return item.file_category === 'image' && isScreenshot(item)
+      }
+      if (activeTab === 'images') {
+        return item.file_category === 'image' && !isScreenshot(item)
+      }
+      if (activeTab === 'videos') return item.file_category === 'video'
+      if (activeTab === 'documents') return item.file_category === 'document'
+      if (activeTab === 'archives') return item.file_category === 'archive' || item.is_split
       return true
     })
   }, [files, activeTab, selectedAlbumId, selectedTag])
@@ -50,18 +72,23 @@ export const GalleryView: React.FC = () => {
             <button
               onClick={() => setSelectedAlbumId(null)}
               className="p-1 hover:text-[#ffffff] text-[#888888] flex items-center gap-1 border border-transparent hover:border-[#333333] mr-1"
+              title="Back to Folders"
             >
               <ArrowLeft size={13} />
-              <span className="text-[11px]">All</span>
+              <span className="text-[11px]">Folders</span>
             </button>
           )}
 
           <span className="font-semibold text-[#f0f0f0] uppercase tracking-wider">
             {activeAlbum 
-              ? activeAlbum.name 
+              ? `Folder: ${activeAlbum.name}` 
               : activeTab === 'all' 
                 ? 'All Media Timeline' 
-                : `${activeTab} Index`}
+                : activeTab === 'screenshots'
+                  ? 'Screenshots'
+                  : activeTab === 'folders'
+                    ? 'Folder Contents'
+                    : `${activeTab} Index`}
           </span>
 
           <span className="text-[11px] text-[#555555]">
