@@ -127,6 +127,11 @@ export const MediaCard: React.FC<MediaCardProps> = ({
             <Archive size={36} strokeWidth={1.5} />
             <span className="text-[10px] font-mono text-[#888888]">ARCHIVE</span>
           </div>
+        ) : isAudio ? (
+          <div className="flex flex-col items-center justify-center text-[#555555] gap-2">
+            <Music size={36} strokeWidth={1.5} />
+            <span className="text-[10px] font-mono text-[#888888]">AUDIO</span>
+          </div>
         ) : (
           <div className="flex flex-col items-center justify-center text-[#555555] gap-2">
             <FileText size={36} strokeWidth={1.5} />

@@ -57,6 +57,8 @@ interface VaultState {
   setActiveAudioItem: (item: FileItem | null) => void
 
   toggleSelect: (id: string) => void
+  selectIds: (ids: string[]) => void
+  deselectIds: (ids: string[]) => void
   selectAll: () => void
   clearSelection: () => void
 
@@ -201,7 +203,6 @@ export const useVaultStore = create<VaultState>((set, get) => ({
       get().fetchFiles(),
       get().fetchMetrics(),
       get().fetchAlbums(),
-      get().fetchShares(),
     ])
     set({ isLoading: false })
   },
@@ -237,6 +238,16 @@ export const useVaultStore = create<VaultState>((set, get) => ({
       selectedIds: exists ? state.selectedIds.filter((item) => item !== id) : [...state.selectedIds, id]
     }
   }),
+
+  selectIds: (ids) =>
+    set((state) => ({
+      selectedIds: Array.from(new Set([...state.selectedIds, ...ids])),
+    })),
+
+  deselectIds: (ids) =>
+    set((state) => ({
+      selectedIds: state.selectedIds.filter((id) => !ids.includes(id)),
+    })),
 
   selectAll: () => {
     const visibleFiles = get().files.filter((f) => !f.is_deleted)
@@ -315,7 +326,7 @@ export const useVaultStore = create<VaultState>((set, get) => ({
 
   rebuildIndex: async () => {
     const result = await api.rebuildIndex()
-    await Promise.all([get().fetchFiles(), get().fetchMetrics(), get().fetchAlbums(), get().fetchShares()])
+    await Promise.all([get().fetchFiles(), get().fetchMetrics(), get().fetchAlbums()])
     return result
   },
 }))

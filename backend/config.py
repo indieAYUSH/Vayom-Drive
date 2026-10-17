@@ -9,11 +9,11 @@ load_dotenv(ROOT_DIR / ".env")
 class Settings:
     ROOT_DIR: Path = ROOT_DIR
 
-    # Telegram Credentials
+    # Telegram Base Application Credentials (for MTProto handshake)
     TELEGRAM_API_ID: int = int(os.getenv("TELEGRAM_API_ID", "0") or 0)
     TELEGRAM_API_HASH: str = os.getenv("TELEGRAM_API_HASH", "")
-    TELEGRAM_BOT_TOKEN: str = os.getenv("TELEGRAM_BOT_TOKEN", "")
-    TELEGRAM_CHANNEL_ID: str = os.getenv("TELEGRAM_CHANNEL_ID", "")
+    TELEGRAM_BOT_TOKEN: str = ""
+    TELEGRAM_CHANNEL_ID: str = ""
 
     # Security & Admin
     ADMIN_PASSWORD: str = os.getenv("ADMIN_PASSWORD", "vayom123")
@@ -72,10 +72,12 @@ class Settings:
             except Exception as e:
                 pass
 
-        # Fallback to .env if credentials are provided
-        if self.TELEGRAM_BOT_TOKEN and self.TELEGRAM_CHANNEL_ID:
-            self.AUTH_MODE = "bot"
-            self.SESSION_NAME = "vayom_bot"
+        # Strictly require explicit login! No auto-login from .env
+        self.AUTH_MODE = ""
+        self.USER_PROFILE = {}
+        self.TELEGRAM_BOT_TOKEN = ""
+        self.TELEGRAM_CHANNEL_ID = ""
+        self.SESSION_NAME = "vayom_bot"
 
     def save_auth_config(self, data: dict):
         """Persists runtime authentication configuration to data/auth_config.json."""

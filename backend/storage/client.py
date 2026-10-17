@@ -45,7 +45,7 @@ class TelegramStorageClient:
                     return
                 self._is_connected = True
                 logger.info("Successfully connected to Telegram MTProto as User (QR Session)!")
-            elif settings.TELEGRAM_BOT_TOKEN:
+            elif settings.AUTH_MODE in ("bot", "developer") and settings.TELEGRAM_BOT_TOKEN:
                 # Bot MTProto Session
                 await self.client.start(bot_token=settings.TELEGRAM_BOT_TOKEN)
                 self._is_connected = True

@@ -11,8 +11,10 @@ import {
   Plus, 
   Database,
   Lock,
-  Share2,
-  Crop
+  Crop,
+  Star,
+  Music,
+  Share2
 } from 'lucide-react'
 import { useVaultStore } from '../../store/useVaultStore'
 
@@ -26,7 +28,8 @@ export const Sidebar: React.FC = () => {
     setSelectedAlbumId,
     selectedTag,
     setSelectedTag,
-    setCreateAlbumModalOpen
+    setCreateAlbumModalOpen,
+    starredIds
   } = useVaultStore()
 
   const trashCount = files.filter((f) => f.is_deleted).length
@@ -46,6 +49,14 @@ export const Sidebar: React.FC = () => {
     )
   }
 
+  const isAudioFile = (f: any): boolean => {
+    return (
+      f.file_category === 'audio' ||
+      (f.mime_type && f.mime_type.startsWith('audio/')) ||
+      /\.(mp3|wav|flac|ogg|m4a|aac)$/i.test(f.filename || '')
+    )
+  }
+
   const navItemClass = (isActive: boolean) => `
     flex items-center justify-between px-3 py-2 text-xs font-mono select-none cursor-pointer border-l-2 transition-colors
     ${isActive 
@@ -57,10 +68,10 @@ export const Sidebar: React.FC = () => {
     <aside className="w-60 bg-[#080808] border-r border-[#282828] flex flex-col justify-between h-[calc(100vh-3.5rem)] flex-shrink-0 select-none">
       {/* Top Nav Tree */}
       <div className="overflow-y-auto py-3 space-y-6">
-        {/* Core Timeline & Categories */}
+        {/* Google Photos Section */}
         <div>
           <div className="px-3 pb-1 text-[10px] font-mono uppercase tracking-widest text-[#555555]">
-            Library
+            Photos & Media
           </div>
           <div className="space-y-0.5">
             <div 
@@ -69,7 +80,7 @@ export const Sidebar: React.FC = () => {
             >
               <div className="flex items-center gap-2.5">
                 <Clock size={14} />
-                <span>All Media</span>
+                <span>Timeline</span>
               </div>
               <span className="text-[10px] text-[#555555]">
                 {files.filter(f => !f.is_deleted).length}
@@ -90,19 +101,6 @@ export const Sidebar: React.FC = () => {
             </div>
 
             <div 
-              onClick={() => setActiveTab('videos')}
-              className={navItemClass(activeTab === 'videos')}
-            >
-              <div className="flex items-center gap-2.5">
-                <Video size={14} />
-                <span>Videos</span>
-              </div>
-              <span className="text-[10px] text-[#555555]">
-                {files.filter(f => !f.is_deleted && f.file_category === 'video').length}
-              </span>
-            </div>
-
-            <div 
               onClick={() => setActiveTab('screenshots')}
               className={navItemClass(activeTab === 'screenshots')}
             >
@@ -116,15 +114,75 @@ export const Sidebar: React.FC = () => {
             </div>
 
             <div 
+              onClick={() => setActiveTab('videos')}
+              className={navItemClass(activeTab === 'videos')}
+            >
+              <div className="flex items-center gap-2.5">
+                <Video size={14} />
+                <span>Videos</span>
+              </div>
+              <span className="text-[10px] text-[#555555]">
+                {files.filter(f => !f.is_deleted && f.file_category === 'video').length}
+              </span>
+            </div>
+
+            <div 
+              onClick={() => setActiveTab('starred')}
+              className={navItemClass(activeTab === 'starred')}
+            >
+              <div className="flex items-center gap-2.5">
+                <Star size={14} />
+                <span>Starred</span>
+              </div>
+              <span className="text-[10px] text-[#555555]">
+                {files.filter(f => !f.is_deleted && starredIds.includes(f.id)).length}
+              </span>
+            </div>
+          </div>
+        </div>
+
+        {/* Google Drive Section */}
+        <div>
+          <div className="px-3 pb-1 text-[10px] font-mono uppercase tracking-widest text-[#555555]">
+            Drive & Files
+          </div>
+          <div className="space-y-0.5">
+            <div 
+              onClick={() => { setActiveTab('folders'); setSelectedAlbumId(null); }}
+              className={navItemClass((activeTab === 'folders' || activeTab === 'albums') && !selectedAlbumId)}
+            >
+              <div className="flex items-center gap-2.5">
+                <Folder size={14} />
+                <span>Folders</span>
+              </div>
+              <span className="text-[10px] text-[#555555]">
+                {albums.length}
+              </span>
+            </div>
+
+            <div 
               onClick={() => setActiveTab('documents')}
               className={navItemClass(activeTab === 'documents')}
             >
               <div className="flex items-center gap-2.5">
                 <FileText size={14} />
-                <span>Documents</span>
+                <span>Documents & Code</span>
               </div>
               <span className="text-[10px] text-[#555555]">
                 {files.filter(f => !f.is_deleted && f.file_category === 'document').length}
+              </span>
+            </div>
+
+            <div 
+              onClick={() => setActiveTab('audio')}
+              className={navItemClass(activeTab === 'audio')}
+            >
+              <div className="flex items-center gap-2.5">
+                <Music size={14} />
+                <span>Audio Tracks</span>
+              </div>
+              <span className="text-[10px] text-[#555555]">
+                {files.filter(f => !f.is_deleted && isAudioFile(f)).length}
               </span>
             </div>
 
@@ -140,23 +198,10 @@ export const Sidebar: React.FC = () => {
                 {files.filter(f => !f.is_deleted && (f.file_category === 'archive' || f.is_split)).length}
               </span>
             </div>
-
-            <div 
-              onClick={() => { setActiveTab('folders'); setSelectedAlbumId(null); }}
-              className={navItemClass((activeTab === 'folders' || activeTab === 'albums') && !selectedAlbumId)}
-            >
-              <div className="flex items-center gap-2.5">
-                <Folder size={14} />
-                <span>Folders</span>
-              </div>
-              <span className="text-[10px] text-[#555555]">
-                {albums.length}
-              </span>
-            </div>
           </div>
         </div>
 
-        {/* Folders Section */}
+        {/* Folders List Section */}
         <div>
           <div className="px-3 pb-1 flex items-center justify-between text-[10px] font-mono uppercase tracking-widest text-[#555555]">
             <span 
@@ -215,7 +260,7 @@ export const Sidebar: React.FC = () => {
           </div>
         )}
 
-        {/* Retention & Trash */}
+        {/* Retention & System */}
         <div>
           <div className="px-3 pb-1 text-[10px] font-mono uppercase tracking-widest text-[#555555]">
             System
@@ -227,7 +272,7 @@ export const Sidebar: React.FC = () => {
             >
               <div className="flex items-center gap-2.5">
                 <Share2 size={14} />
-                <span>Expiring Shares</span>
+                <span>Shared Links</span>
               </div>
             </div>
 

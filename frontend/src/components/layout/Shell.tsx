@@ -8,13 +8,13 @@ import { CommandBar } from '../search/CommandBar'
 import { BulkActionBar } from '../actions/BulkActionBar'
 import { LightboxModal } from '../lightbox/LightboxModal'
 import { CreateAlbumModal } from '../modals/CreateAlbumModal'
-import { ShareLinkModal } from '../modals/ShareLinkModal'
 import { GalleryView } from '../../views/GalleryView'
 import { AlbumsView } from '../../views/AlbumsView'
 import { TrashView } from '../../views/TrashView'
-import { SharesView } from '../../views/SharesView'
 import { SettingsView } from '../../views/SettingsView'
 import { useVaultStore } from '../../store/useVaultStore'
+
+import { AudioPlayerBar } from '../drive/AudioPlayerBar'
 
 export const Shell: React.FC = () => {
   const { 
@@ -24,7 +24,6 @@ export const Shell: React.FC = () => {
     closeLightbox, 
     nextLightbox, 
     prevLightbox,
-    openShareModal,
     moveToTrash,
     init
   } = useVaultStore()
@@ -40,10 +39,10 @@ export const Shell: React.FC = () => {
         return selectedAlbumId ? <GalleryView /> : <AlbumsView />
       case 'trash':
         return <TrashView />
-      case 'shares':
-        return <SharesView />
       case 'settings':
         return <SettingsView />
+      case 'starred':
+      case 'audio':
       case 'screenshots':
       case 'all':
       case 'images':
@@ -82,7 +81,6 @@ export const Shell: React.FC = () => {
       <CommandBar />
       <BulkActionBar />
       <CreateAlbumModal />
-      <ShareLinkModal />
 
       {/* Fullscreen Lightbox / Video Player */}
       <LightboxModal
@@ -90,9 +88,11 @@ export const Shell: React.FC = () => {
         onClose={closeLightbox}
         onNext={nextLightbox}
         onPrev={prevLightbox}
-        onOpenShare={openShareModal}
         onMoveToTrash={(id) => moveToTrash([id])}
       />
+
+      {/* Floating Audio Player Bar */}
+      <AudioPlayerBar />
     </div>
   )
 }

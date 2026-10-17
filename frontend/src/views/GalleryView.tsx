@@ -2,8 +2,9 @@ import React, { useState } from 'react'
 import { useVaultStore } from '../store/useVaultStore'
 import { VirtualizedGrid } from '../components/gallery/VirtualizedGrid'
 import { TableView } from '../components/gallery/TableView'
-import { LayoutGrid, List, X, ArrowLeft } from 'lucide-react'
+import { LayoutGrid, List, X, ArrowLeft, Calendar } from 'lucide-react'
 import { Badge } from '../components/common/Badge'
+import { BreadcrumbNav } from '../components/drive/BreadcrumbNav'
 
 export const GalleryView: React.FC = () => {
   const { 
@@ -19,10 +20,13 @@ export const GalleryView: React.FC = () => {
     clearSelection,
     openLightbox,
     moveToTrash,
-    albums
+    albums,
+    starredIds,
+    timelineGroupByDate,
+    setTimelineGroupByDate,
+    driveViewMode,
+    setDriveViewMode,
   } = useVaultStore()
-
-  const [viewMode, setViewMode] = useState<'grid' | 'table'>('grid')
 
   const activeAlbum = albums.find((a) => a.id === selectedAlbumId)
 
@@ -40,6 +44,14 @@ export const GalleryView: React.FC = () => {
     )
   }
 
+  const isAudio = (item: any): boolean => {
+    return (
+      item.file_category === 'audio' ||
+      (item.mime_type && item.mime_type.startsWith('audio/')) ||
+      /\.(mp3|wav|flac|ogg|m4a|aac)$/i.test(item.filename || '')
+    )
+  }
+
   // Filter items
   const displayItems = React.useMemo(() => {
     return files.filter((item) => {
@@ -49,6 +61,8 @@ export const GalleryView: React.FC = () => {
         if (!inAlbum) return false
       }
       if (selectedTag && !item.tags.includes(selectedTag)) return false
+      if (activeTab === 'starred') return starredIds.includes(item.id)
+      if (activeTab === 'audio') return isAudio(item)
       if (activeTab === 'screenshots') {
         return item.file_category === 'image' && isScreenshot(item)
       }
@@ -60,10 +74,15 @@ export const GalleryView: React.FC = () => {
       if (activeTab === 'archives') return item.file_category === 'archive' || item.is_split
       return true
     })
-  }, [files, activeTab, selectedAlbumId, selectedTag])
+  }, [files, activeTab, selectedAlbumId, selectedTag, starredIds])
 
   return (
     <div className="flex-1 flex flex-col h-full bg-[#000000] overflow-hidden">
+      {/* Drive Breadcrumb Navigation when viewing folder */}
+      {selectedAlbumId && (
+        <BreadcrumbNav currentFolderName={activeAlbum?.name} />
+      )}
+
       {/* Gallery Header Bar */}
       <div className="h-12 border-b border-[#282828] bg-[#080808] px-4 flex items-center justify-between flex-shrink-0 font-mono text-xs select-none">
         {/* Left: Section Title or Filter Indicator */}
@@ -86,9 +105,13 @@ export const GalleryView: React.FC = () => {
                 ? 'All Media Timeline' 
                 : activeTab === 'screenshots'
                   ? 'Screenshots'
-                  : activeTab === 'folders'
-                    ? 'Folder Contents'
-                    : `${activeTab} Index`}
+                  : activeTab === 'starred'
+                    ? 'Starred & Favorites'
+                    : activeTab === 'audio'
+                      ? 'Audio & Voice Tracks'
+                      : activeTab === 'folders'
+                        ? 'Folder Contents'
+                        : `${activeTab} Index`}
           </span>
 
           <span className="text-[11px] text-[#555555]">
@@ -128,9 +151,20 @@ export const GalleryView: React.FC = () => {
 
           <div className="flex border border-[#282828] bg-[#111111]">
             <button
-              onClick={() => setViewMode('grid')}
+              onClick={() => setTimelineGroupByDate(!timelineGroupByDate)}
+              className={`p-1.5 transition-colors border-r border-[#282828] ${
+                timelineGroupByDate
+                  ? 'bg-[#ffffff] text-[#000000]'
+                  : 'text-[#888888] hover:text-[#f0f0f0]'
+              }`}
+              title={timelineGroupByDate ? 'Date Grouping: Active' : 'Date Grouping: Disabled'}
+            >
+              <Calendar size={13} />
+            </button>
+            <button
+              onClick={() => setDriveViewMode('grid')}
               className={`p-1.5 transition-colors ${
-                viewMode === 'grid' 
+                driveViewMode === 'grid' 
                   ? 'bg-[#ffffff] text-[#000000]' 
                   : 'text-[#888888] hover:text-[#f0f0f0]'
               }`}
@@ -139,9 +173,9 @@ export const GalleryView: React.FC = () => {
               <LayoutGrid size={13} />
             </button>
             <button
-              onClick={() => setViewMode('table')}
+              onClick={() => setDriveViewMode('table')}
               className={`p-1.5 transition-colors ${
-                viewMode === 'table' 
+                driveViewMode === 'table' 
                   ? 'bg-[#ffffff] text-[#000000]' 
                   : 'text-[#888888] hover:text-[#f0f0f0]'
               }`}
@@ -154,12 +188,13 @@ export const GalleryView: React.FC = () => {
       </div>
 
       {/* Main Virtualized Grid or Table */}
-      {viewMode === 'grid' ? (
+      {driveViewMode === 'grid' ? (
         <VirtualizedGrid
           items={displayItems}
           selectedIds={selectedIds}
           onToggleSelect={toggleSelect}
           onOpenLightbox={openLightbox}
+          groupByDate={timelineGroupByDate}
         />
       ) : (
         <TableView

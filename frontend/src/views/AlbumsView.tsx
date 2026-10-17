@@ -2,13 +2,16 @@ import React from 'react'
 import { useVaultStore } from '../store/useVaultStore'
 import { Folder, Plus } from 'lucide-react'
 import { Button } from '../components/common/Button'
+import { BreadcrumbNav } from '../components/drive/BreadcrumbNav'
 
 export const AlbumsView: React.FC = () => {
   const { albums, setSelectedAlbumId, setCreateAlbumModalOpen } = useVaultStore()
 
   return (
-    <div className="flex-1 overflow-y-auto p-6 bg-[#000000] select-none font-mono">
-      {/* Top Header */}
+    <div className="flex-1 flex flex-col h-full bg-[#000000] select-none font-mono overflow-hidden">
+      <BreadcrumbNav currentFolderName={null} onNewFolder={() => setCreateAlbumModalOpen(true)} />
+      <div className="flex-1 overflow-y-auto p-6">
+        {/* Top Header */}
       <div className="flex items-center justify-between pb-6 border-b border-[#282828] mb-6">
         <div>
           <h1 className="text-base font-bold uppercase tracking-wider text-[#ffffff] flex items-center gap-2">
@@ -85,6 +88,7 @@ export const AlbumsView: React.FC = () => {
         ))}
         </div>
       )}
+      </div>
     </div>
   )
 }

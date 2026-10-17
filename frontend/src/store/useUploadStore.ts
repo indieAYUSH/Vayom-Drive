@@ -1,6 +1,7 @@
 import { create } from 'zustand'
 import { UploadTask } from '../types/upload'
 import { useVaultStore } from './useVaultStore'
+import { api } from '../services/api'
 
 interface UploadState {
   tasks: UploadTask[]
@@ -150,8 +151,34 @@ function executeRealUpload(taskId: string) {
         eta_seconds: 0,
       })
 
+      // Auto-associate with current folder or dropped directory structure
+      try {
+        const json = JSON.parse(xhr.responseText)
+        const currentAlbumId = useVaultStore.getState().selectedAlbumId
+        if (json.file_id && currentAlbumId) {
+          api.addFileToAlbum(currentAlbumId, json.file_id).catch(() => {})
+        } else if (json.file_id && (task.file as any).webkitRelativePath) {
+          const rel = (task.file as any).webkitRelativePath as string
+          const parts = rel.split('/')
+          if (parts.length > 1) {
+            const folderName = parts[0]
+            const albums = useVaultStore.getState().albums
+            const existing = albums.find((a) => a.name.toLowerCase() === folderName.toLowerCase())
+            if (existing) {
+              api.addFileToAlbum(existing.id, json.file_id).catch(() => {})
+            } else {
+              api.createAlbum(folderName).then((newAlb) => {
+                useVaultStore.getState().fetchAlbums()
+                api.addFileToAlbum(newAlb.id, json.file_id).catch(() => {})
+              }).catch(() => {})
+            }
+          }
+        }
+      } catch {}
+
       // Refresh files catalog and metrics in vault store
       useVaultStore.getState().fetchFiles()
+      useVaultStore.getState().fetchAlbums()
       useVaultStore.getState().fetchMetrics()
     } else {
       updateTask({

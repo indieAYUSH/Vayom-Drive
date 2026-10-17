@@ -60,17 +60,13 @@ class DeveloperLoginRequest(BaseModel):
 async def get_auth_status():
     """Returns the current authentication and node configuration status."""
     settings.load_auth_config()
-    is_authenticated = bool(storage_client._is_connected and settings.TELEGRAM_CHANNEL_ID)
+    is_authenticated = bool(settings.AUTH_MODE and storage_client._is_connected and settings.TELEGRAM_CHANNEL_ID)
 
     return {
         "is_authenticated": is_authenticated,
-        "auth_mode": settings.AUTH_MODE or ("bot" if is_authenticated else ""),
+        "auth_mode": settings.AUTH_MODE if is_authenticated else "",
         "channel_id": settings.TELEGRAM_CHANNEL_ID if is_authenticated else None,
-        "user": settings.USER_PROFILE or {
-            "display_name": "Vault User",
-            "first_name": "Vault",
-            "is_premium": False
-        } if is_authenticated else None
+        "user": settings.USER_PROFILE if is_authenticated else None
     }
 
 

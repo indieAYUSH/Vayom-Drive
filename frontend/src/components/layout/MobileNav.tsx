@@ -1,9 +1,9 @@
 import React from 'react'
-import { Clock, Image as ImageIcon, Folder, Trash2, Crop } from 'lucide-react'
+import { Clock, Image as ImageIcon, Folder, Crop, Star } from 'lucide-react'
 import { useVaultStore } from '../../store/useVaultStore'
 
 export const MobileNav: React.FC = () => {
-  const { activeTab, setActiveTab } = useVaultStore()
+  const { activeTab, setActiveTab, setSelectedAlbumId } = useVaultStore()
 
   const navItemClass = (isActive: boolean) => `
     flex-1 flex flex-col items-center justify-center py-2 text-[10px] font-mono select-none cursor-pointer transition-colors
@@ -13,43 +13,48 @@ export const MobileNav: React.FC = () => {
   return (
     <nav className="md:hidden fixed bottom-0 left-0 right-0 h-[calc(3.5rem+env(safe-area-inset-bottom))] pb-[env(safe-area-inset-bottom)] bg-[#080808] border-t border-[#282828] flex items-center justify-around z-40 select-none">
       <div 
-        onClick={() => setActiveTab('all')} 
+        onClick={() => { setActiveTab('all'); setSelectedAlbumId(null); }} 
         className={navItemClass(activeTab === 'all')}
+        title="All Media Timeline"
       >
         <Clock size={16} />
-        <span className="mt-1">All</span>
+        <span className="mt-1">Timeline</span>
       </div>
 
       <div 
-        onClick={() => setActiveTab('images')} 
+        onClick={() => { setActiveTab('images'); setSelectedAlbumId(null); }} 
         className={navItemClass(activeTab === 'images')}
+        title="Photos"
       >
         <ImageIcon size={16} />
         <span className="mt-1">Photos</span>
       </div>
 
       <div 
-        onClick={() => setActiveTab('screenshots')} 
+        onClick={() => { setActiveTab('screenshots'); setSelectedAlbumId(null); }} 
         className={navItemClass(activeTab === 'screenshots')}
+        title="Screenshots"
       >
         <Crop size={16} />
         <span className="mt-1">Screenshots</span>
       </div>
 
       <div 
-        onClick={() => setActiveTab('folders')} 
+        onClick={() => { setActiveTab('folders'); setSelectedAlbumId(null); }} 
         className={navItemClass(activeTab === 'folders' || activeTab === 'albums')}
+        title="Drive Folders"
       >
         <Folder size={16} />
-        <span className="mt-1">Folders</span>
+        <span className="mt-1">Drive</span>
       </div>
 
       <div 
-        onClick={() => setActiveTab('trash')} 
-        className={navItemClass(activeTab === 'trash')}
+        onClick={() => { setActiveTab('starred'); setSelectedAlbumId(null); }} 
+        className={navItemClass(activeTab === 'starred')}
+        title="Starred & Favorites"
       >
-        <Trash2 size={16} />
-        <span className="mt-1">Trash</span>
+        <Star size={16} />
+        <span className="mt-1">Starred</span>
       </div>
     </nav>
   )

@@ -1,6 +1,64 @@
 import React, { useEffect, useState } from 'react'
-import { UploadCloud } from 'lucide-react'
+import { UploadCloud, FolderUp } from 'lucide-react'
 import { useUploadStore } from '../../store/useUploadStore'
+
+async function extractFilesFromDataTransfer(dataTransfer: DataTransfer): Promise<File[]> {
+  const files: File[] = []
+  const items = dataTransfer.items
+
+  if (items && items.length > 0 && typeof items[0].webkitGetAsEntry === 'function') {
+    const traverseEntry = async (entry: any, path = ''): Promise<void> => {
+      if (!entry) return
+      if (entry.isFile) {
+        return new Promise<void>((resolve) => {
+          entry.file(
+            (file: File) => {
+              const relativePath = path ? `${path}/${file.name}` : file.name
+              try {
+                Object.defineProperty(file, 'webkitRelativePath', {
+                  value: relativePath,
+                  configurable: true,
+                })
+              } catch {}
+              files.push(file)
+              resolve()
+            },
+            () => resolve()
+          )
+        })
+      } else if (entry.isDirectory) {
+        const dirReader = entry.createReader()
+        const readAllEntries = async (): Promise<any[]> => {
+          const all: any[] = []
+          let batch: any[] = await new Promise((res) => dirReader.readEntries(res, () => res([])))
+          while (batch.length > 0) {
+            all.push(...batch)
+            batch = await new Promise((res) => dirReader.readEntries(res, () => res([])))
+          }
+          return all
+        }
+
+        const children = await readAllEntries()
+        const newPath = path ? `${path}/${entry.name}` : entry.name
+        for (const child of children) {
+          await traverseEntry(child, newPath)
+        }
+      }
+    }
+
+    const promises: Promise<void>[] = []
+    for (let i = 0; i < items.length; i++) {
+      const entry = items[i].webkitGetAsEntry()
+      if (entry) {
+        promises.push(traverseEntry(entry))
+      }
+    }
+    await Promise.all(promises)
+    if (files.length > 0) return files
+  }
+
+  return Array.from(dataTransfer.files)
+}
 
 export const DropZoneOverlay: React.FC = () => {
   const { addFilesToUpload } = useUploadStore()
@@ -11,7 +69,6 @@ export const DropZoneOverlay: React.FC = () => {
     let isInternalDrag = false
 
     const handleDragStart = () => {
-      // User is dragging an element already inside the browser window (e.g. thumbnail, text)
       isInternalDrag = true
     }
 
@@ -59,18 +116,18 @@ export const DropZoneOverlay: React.FC = () => {
       }
     }
 
-    const handleDrop = (e: DragEvent) => {
+    const handleDrop = async (e: DragEvent) => {
       e.preventDefault()
       const wasInternal = isInternalDrag
       isInternalDrag = false
       dragCounter = 0
       setIsDragging(false)
 
-      if (wasInternal) return
+      if (wasInternal || !e.dataTransfer) return
 
-      const files = e.dataTransfer?.files
-      if (files && files.length > 0) {
-        addFilesToUpload(files)
+      const extracted = await extractFilesFromDataTransfer(e.dataTransfer)
+      if (extracted.length > 0) {
+        addFilesToUpload(extracted)
       }
     }
 
@@ -97,14 +154,19 @@ export const DropZoneOverlay: React.FC = () => {
     <div className="fixed inset-0 z-50 pointer-events-none flex items-center justify-center bg-[#000000] bg-opacity-90 select-none">
       <div className="w-[90vw] h-[85vh] border-2 border-dashed border-[#ffffff] flex flex-col items-center justify-center p-8 bg-[#080808] text-center font-mono">
         <div className="w-16 h-16 border border-[#ffffff] flex items-center justify-center mb-4 bg-[#141414]">
-          <UploadCloud size={32} className="text-[#ffffff]" />
+          <FolderUp size={32} className="text-[#ffffff]" />
         </div>
-        <h2 className="text-base font-bold uppercase tracking-widest text-[#ffffff] mb-2">
-          Drop Files to Stage & Upload
+        <h2 className="text-base font-bold text-[#ffffff] uppercase tracking-wider mb-2">
+          Drop Files or Entire Folders Here
         </h2>
         <p className="text-xs text-[#888888] max-w-md">
-          Files &gt; 1.9 GB will be automatically partitioned into pointer-offset parts. Zero loss of original bytes.
+          Files and subdirectories are automatically scanned, encrypted, and streamed to your private Telegram vault
         </p>
+        <div className="mt-6 flex items-center gap-4 text-[11px] text-[#555555]">
+          <span>• 2000 MB Max Part Size</span>
+          <span>• Zstandard & HEVC Policy</span>
+          <span>• SHA-256 Verified</span>
+        </div>
       </div>
     </div>
   )
