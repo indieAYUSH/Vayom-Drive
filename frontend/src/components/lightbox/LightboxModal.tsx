@@ -17,6 +17,7 @@ import {
   Star
 } from 'lucide-react'
 import { Button } from '../common/Button'
+import { formatBytes } from '../../utils/format'
 
 interface LightboxModalProps {
   item: FileItem | null
@@ -148,7 +149,7 @@ export const LightboxModal: React.FC<LightboxModalProps> = ({
             {item.filename}
           </span>
           <span className="text-[10px] font-mono text-[#666666] hidden sm:inline">
-            {(item.size_bytes / (1024 * 1024)).toFixed(1)} MB
+            {formatBytes(item.size_bytes)}
           </span>
         </div>
 

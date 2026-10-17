@@ -5,6 +5,7 @@ import { TableView } from '../components/gallery/TableView'
 import { LayoutGrid, List, X, ArrowLeft, Calendar } from 'lucide-react'
 import { Badge } from '../components/common/Badge'
 import { BreadcrumbNav } from '../components/drive/BreadcrumbNav'
+import { WorkstationFilterBar } from '../components/gallery/WorkstationFilterBar'
 
 export const GalleryView: React.FC = () => {
   const { 
@@ -14,6 +15,10 @@ export const GalleryView: React.FC = () => {
     setSelectedAlbumId,
     selectedTag, 
     setSelectedTag,
+    selectedCamera,
+    selectedCodec,
+    selectedResolution,
+    selectedLens,
     selectedIds, 
     toggleSelect, 
     selectAll, 
@@ -72,9 +77,28 @@ export const GalleryView: React.FC = () => {
       if (activeTab === 'videos') return item.file_category === 'video'
       if (activeTab === 'documents') return item.file_category === 'document'
       if (activeTab === 'archives') return item.file_category === 'archive' || item.is_split
+
+      // Workstation Metadata Filters
+      if (selectedCamera) {
+        const cam = item.exif?.camera_make || item.exif?.make || item.exif?.camera_model || item.exif?.model
+        if (!cam || !cam.toLowerCase().includes(selectedCamera.toLowerCase())) return false
+      }
+      if (selectedCodec) {
+        const codec = item.exif?.codec?.toUpperCase()
+        if (codec !== selectedCodec.toUpperCase()) return false
+      }
+      if (selectedResolution) {
+        const res = item.exif?.resolution_tier
+        if (res !== selectedResolution) return false
+      }
+      if (selectedLens) {
+        const lens = item.exif?.lens
+        if (!lens || !lens.toLowerCase().includes(selectedLens.toLowerCase())) return false
+      }
+
       return true
     })
-  }, [files, activeTab, selectedAlbumId, selectedTag, starredIds])
+  }, [files, activeTab, selectedAlbumId, selectedTag, starredIds, selectedCamera, selectedCodec, selectedResolution, selectedLens])
 
   return (
     <div className="flex-1 flex flex-col h-full bg-[#000000] overflow-hidden">
@@ -186,6 +210,9 @@ export const GalleryView: React.FC = () => {
           </div>
         </div>
       </div>
+
+      {/* Workstation Media Filters Toolbar */}
+      <WorkstationFilterBar />
 
       {/* Main Virtualized Grid or Table */}
       {driveViewMode === 'grid' ? (

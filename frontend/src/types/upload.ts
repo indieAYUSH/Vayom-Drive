@@ -6,6 +6,7 @@ export type UploadStatus =
   | 'splitting' 
   | 'uploading' 
   | 'verifying' 
+  | 'rate_limited'
   | 'done' 
   | 'failed' 
   | 'paused'

@@ -2,8 +2,9 @@ import React from 'react'
 import { FileItem } from '../../types/vault'
 import { Checkbox } from '../common/Checkbox'
 import { Badge } from '../common/Badge'
-import { Play, FileText, Archive, Film, Star, Music } from 'lucide-react'
+import { Play, FileText, Archive, Film, Star, Music, Trash2, Image } from 'lucide-react'
 import { useVaultStore } from '../../store/useVaultStore'
+import { formatBytes } from '../../utils/format'
 
 interface MediaCardProps {
   item: FileItem
@@ -18,20 +19,13 @@ export const MediaCard: React.FC<MediaCardProps> = ({
   onToggleSelect,
   onOpenLightbox,
 }) => {
-  const { starredIds, toggleStar, setActiveAudioItem } = useVaultStore()
+  const { starredIds, toggleStar, setActiveAudioItem, cleanupIncomplete } = useVaultStore()
   const isStarred = starredIds.includes(item.id)
 
   const isAudio =
     item.file_category === 'audio' ||
     item.mime_type.startsWith('audio/') ||
     /\.(mp3|wav|flac|ogg|m4a|aac)$/i.test(item.filename)
-
-  const formatBytes = (bytes: number) => {
-    if (bytes >= 1024 * 1024 * 1024) {
-      return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} GB`
-    }
-    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
-  }
 
   const formatDuration = (secs?: number) => {
     if (!secs) return null
@@ -86,7 +80,12 @@ export const MediaCard: React.FC<MediaCardProps> = ({
         >
           <Star size={12} fill={isStarred ? 'white' : 'none'} />
         </button>
-        {item.is_split && (
+        {item.is_interrupted && (
+          <Badge variant="danger">
+            Interrupted ({item.uploaded_parts || item.parts?.length || 0}/{item.total_parts})
+          </Badge>
+        )}
+        {item.is_split && !item.is_interrupted && (
           <Badge variant="warning">
             {item.total_parts} Parts
           </Badge>
@@ -108,15 +107,20 @@ export const MediaCard: React.FC<MediaCardProps> = ({
         onClick={handleCardClick}
         className="w-full aspect-square bg-[#080808] overflow-hidden flex items-center justify-center cursor-pointer relative"
       >
-        {item.thumbnail_url ? (
+        {item.thumbnail_url || (item.file_category === 'image' && item.preview_url) ? (
           <img
-            src={item.thumbnail_url}
+            src={item.thumbnail_url || item.preview_url}
             alt={item.filename}
             loading="lazy"
             draggable={false}
             onDragStart={(e) => e.preventDefault()}
             className="w-full h-full object-cover transition-transform duration-200 group-hover:scale-[1.02] select-none"
           />
+        ) : item.file_category === 'image' ? (
+          <div className="flex flex-col items-center justify-center text-[#555555] gap-2">
+            <Image size={36} strokeWidth={1.5} />
+            <span className="text-[10px] font-mono text-[#888888]">IMAGE</span>
+          </div>
         ) : item.file_category === 'video' ? (
           <div className="flex flex-col items-center justify-center text-[#555555] gap-2">
             <Film size={36} strokeWidth={1.5} />
@@ -166,6 +170,23 @@ export const MediaCard: React.FC<MediaCardProps> = ({
         {item.exif?.camera_model && (
           <div className="text-[9px] text-[#555555] truncate pt-0.5 border-t border-[#161616]">
             {item.exif.camera_make} {item.exif.camera_model}
+          </div>
+        )}
+        {item.is_interrupted && (
+          <div className="flex items-center justify-between pt-1 border-t border-[#2a1a1a]">
+            <span className="text-[10px] text-[#ff5555]">Interrupted</span>
+            <button
+              onClick={(e) => {
+                e.stopPropagation()
+                if (confirm(`Clean up orphan parts for ${item.filename}?`)) {
+                  cleanupIncomplete(item.id)
+                }
+              }}
+              className="text-[10px] text-[#ff7777] hover:text-[#ffaaaa] underline flex items-center gap-1"
+              title="Purge orphan parts from Telegram WAL"
+            >
+              <Trash2 size={10} /> Clean up
+            </button>
           </div>
         )}
       </div>

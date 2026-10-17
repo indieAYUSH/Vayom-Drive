@@ -14,6 +14,10 @@ class Settings:
     TELEGRAM_API_HASH: str = os.getenv("TELEGRAM_API_HASH", "")
     TELEGRAM_BOT_TOKEN: str = ""
     TELEGRAM_CHANNEL_ID: str = ""
+    TELEGRAM_BACKUP_CHANNEL_ID: str = os.getenv("TELEGRAM_BACKUP_CHANNEL_ID", "")
+    AUTO_MIRROR_SAVED_MESSAGES: bool = True
+    MAX_CONCURRENT_UPLOADS: int = int(os.getenv("MAX_CONCURRENT_UPLOADS", "3"))
+    CHUNK_PACING_MS: int = int(os.getenv("CHUNK_PACING_MS", "25"))
 
     # Security & Admin
     ADMIN_PASSWORD: str = os.getenv("ADMIN_PASSWORD", "vayom123")
@@ -65,6 +69,7 @@ class Settings:
                 self.TELEGRAM_API_HASH = data.get("api_hash") or self.TELEGRAM_API_HASH
                 self.TELEGRAM_BOT_TOKEN = data.get("bot_token") or ""
                 self.TELEGRAM_CHANNEL_ID = str(data.get("channel_id") or "")
+                self.TELEGRAM_BACKUP_CHANNEL_ID = str(data.get("backup_channel_id") or self.TELEGRAM_BACKUP_CHANNEL_ID)
                 self.USER_PROFILE = data.get("user_profile") or {}
                 self.SESSION_NAME = data.get("session_name") or ("vayom_user" if self.AUTH_MODE == "qr" else "vayom_bot")
                 if self.USER_PROFILE.get("is_premium"):
@@ -78,6 +83,7 @@ class Settings:
         self.USER_PROFILE = {}
         self.TELEGRAM_BOT_TOKEN = ""
         self.TELEGRAM_CHANNEL_ID = ""
+        self.TELEGRAM_BACKUP_CHANNEL_ID = ""
         self.SESSION_NAME = "vayom_bot"
 
     def save_auth_config(self, data: dict):
@@ -97,6 +103,7 @@ class Settings:
         self.USER_PROFILE = {}
         self.TELEGRAM_BOT_TOKEN = ""
         self.TELEGRAM_CHANNEL_ID = ""
+        self.TELEGRAM_BACKUP_CHANNEL_ID = ""
         self.SESSION_NAME = "vayom_bot"
 
 settings = Settings()

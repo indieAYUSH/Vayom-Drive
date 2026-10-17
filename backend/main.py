@@ -12,6 +12,8 @@ from .db.connection import init_db, get_db
 from .storage.client import storage_client
 from .api.routes import router as api_router, perform_rebuild_index
 from .api.auth import router as auth_router
+from .api.workstation import router as workstation_router
+from .workstation.watcher import workstation_watcher
 from .streaming.router import router as streaming_router, root_router as streaming_root_router
 
 logging.basicConfig(
@@ -68,10 +70,14 @@ async def lifespan(app: FastAPI):
     # Launch background keep-alive heartbeat task
     heartbeat_task = asyncio.create_task(heartbeat_loop())
 
+    # Start Workstation Folder Watcher
+    await workstation_watcher.start()
+
     yield
 
     # Shutdown:
     logger.info("Shutting down Vayom Drive...")
+    await workstation_watcher.stop()
     heartbeat_task.cancel()
     try:
         await heartbeat_task
@@ -98,6 +104,7 @@ app.add_middleware(
 # Include REST API endpoints
 app.include_router(api_router)
 app.include_router(auth_router)
+app.include_router(workstation_router)
 app.include_router(streaming_router)
 app.include_router(streaming_root_router)
 

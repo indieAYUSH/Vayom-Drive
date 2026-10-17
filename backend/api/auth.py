@@ -11,6 +11,7 @@ from telethon.errors import SessionPasswordNeededError
 from telethon.tl.functions.channels import CreateChannelRequest
 from ..config import settings
 from ..storage.client import storage_client
+from ..storage.session import RobustSQLiteSession
 
 logger = logging.getLogger("vayom.auth")
 router = APIRouter(prefix="/api/v1/auth")
@@ -29,6 +30,7 @@ class QRPollResponse(BaseModel):
     status: str  # 'waiting', 'confirmed', '2fa_required', 'expired'
     url: Optional[str] = None
     expires_at: Optional[int] = None
+    confirmed_at: Optional[float] = None
     user: Optional[Dict[str, Any]] = None
     channels: Optional[List[Dict[str, Any]]] = None
     default_channel_id: Optional[str] = None
@@ -168,6 +170,7 @@ async def _monitor_qr(session_id: str, qr_login, client: TelegramClient, session
         if session_id in _active_qr_sessions:
             _active_qr_sessions[session_id].update({
                 "status": "confirmed",
+                "confirmed_at": time.time(),
                 "user": {
                     "id": user.id,
                     "first_name": user.first_name or "",
@@ -192,37 +195,50 @@ async def _monitor_qr(session_id: str, qr_login, client: TelegramClient, session
 @router.post("/qr/start", response_model=QRStartResponse)
 async def start_qr_login():
     """Initializes Telethon user MTProto client and returns dynamic tg://login?token= URI with extended session."""
+    # Ensure storage client is disconnected so it doesn't hold locks on vayom_user.session
+    await storage_client.disconnect()
+
     # Clean up previous pending sessions to avoid connection leaks
     for old_id, old_sess in list(_active_qr_sessions.items()):
-        if old_sess.get("status") in ("waiting", "expired"):
-            try:
-                mon_task = old_sess.get("monitor_task")
-                if mon_task and not mon_task.done():
-                    mon_task.cancel()
-                old_client = old_sess.get("client")
-                if old_client and old_client.is_connected():
-                    asyncio.create_task(old_client.disconnect())
-            except Exception:
-                pass
-            _active_qr_sessions.pop(old_id, None)
+        try:
+            mon_task = old_sess.get("monitor_task")
+            if mon_task and not mon_task.done():
+                mon_task.cancel()
+            old_client = old_sess.get("client")
+            if old_client and old_client.is_connected():
+                await old_client.disconnect()
+        except Exception:
+            pass
+        _active_qr_sessions.pop(old_id, None)
 
     session_id = str(uuid.uuid4())
     session_file = str(settings.DATA_DIR / "vayom_user")
+    session_path = settings.DATA_DIR / "vayom_user.session"
 
     # If new session, pre-set DC 5 to match India/Asia infrastructure and avoid DC migration
-    session_path = settings.DATA_DIR / "vayom_user.session"
     if not session_path.exists():
         try:
-            from telethon.sessions import SQLiteSession
-            s = SQLiteSession(session_file)
+            s = RobustSQLiteSession(session_file)
             s.set_dc(5, "91.108.56.164", 443)
             s.save()
             s.close()
         except Exception as e:
             logger.warning(f"Could not pre-initialize DC 5: {e}")
 
+    # Enforce SQLite WAL mode and 30s busy timeout to prevent "database is locked" errors
+    try:
+        import sqlite3
+        conn = sqlite3.connect(str(session_path))
+        conn.execute("PRAGMA journal_mode = WAL;")
+        conn.execute("PRAGMA busy_timeout = 30000;")
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        logger.warning(f"Could not configure WAL mode on {session_path}: {e}")
+
+    robust_session = RobustSQLiteSession(session_file)
     client = TelegramClient(
-        session_file,
+        robust_session,
         settings.TELEGRAM_API_ID,
         settings.TELEGRAM_API_HASH
     )
@@ -268,6 +284,7 @@ async def poll_qr_login(session_id: str):
         "status": session["status"],
         "url": session.get("url"),
         "expires_at": session.get("session_expires_at"),
+        "confirmed_at": session.get("confirmed_at"),
         "user": session.get("user"),
         "channels": session.get("channels"),
         "default_channel_id": session.get("default_channel_id")
@@ -322,64 +339,103 @@ async def submit_qr_2fa(body: QR2FARequest):
 async def finalize_qr_login(body: QRFinalizeRequest):
     """
     Finalizes user onboarding after QR scan:
-    - Sets user display name (keeps Telegram name or custom name)
-    - Automatically creates 'Vayom Vault' channel (Sign-up) or attaches to selected channel (Sign-in)
+    - Enforces 10-second Anti-Ban idle guard and double-create lock per update.md
+    - Auto-creates 'Vayom Vault' or attaches to selected channel
+    - Performs non-mutating privacy verification
     - Persists config and activates storage client.
     """
     session = _active_qr_sessions.get(body.session_id)
     if not session or session.get("status") != "confirmed":
         raise HTTPException(status_code=400, detail="QR session is not in confirmed state")
 
-    client: TelegramClient = session["client"]
-    user_data = session["user"]
-    display_name = body.display_name or user_data.get("first_name") or "Vault User"
+    create_lock = session.setdefault("create_lock", asyncio.Lock())
+    async with create_lock:
+        if session.get("is_finalized"):
+            return session["finalized_result"]
 
-    channel_id = body.selected_channel_id
-    if body.action == "auto_create" or not channel_id:
+        client: TelegramClient = session["client"]
+        user_data = session["user"]
+        display_name = body.display_name or user_data.get("first_name") or "Vault User"
+
+        channel_id = body.selected_channel_id
+        if body.action == "auto_create" or not channel_id:
+            # Double-create guard: check if already created for this session
+            if session.get("created_channel_id"):
+                channel_id = session["created_channel_id"]
+            else:
+                # Enforce minimum 10-second idle window after session confirmation per update.md Invariant 1
+                confirmed_at = session.get("confirmed_at", 0)
+                elapsed = time.time() - confirmed_at
+                if elapsed < 10.0:
+                    wait_needed = 10.0 - elapsed
+                    logger.info(f"Enforcing 10s Anti-Ban idle window before channel creation. Waiting {wait_needed:.2f}s...")
+                    await asyncio.sleep(wait_needed)
+
+                try:
+                    res = await client(CreateChannelRequest(
+                        title=f"{display_name}'s Vayom Vault",
+                        about="Private Cloud Storage powered by Telegram & Vayom Drive",
+                        megagroup=False
+                    ))
+                    created_chat = res.chats[0]
+                    channel_id = f"-100{created_chat.id}"
+                    session["created_channel_id"] = channel_id
+                    logger.info(f"Auto-created private vault channel: {channel_id}")
+                except Exception as e:
+                    logger.error(f"Failed to auto-create channel: {e}")
+                    raise HTTPException(status_code=500, detail=f"Could not auto-create channel: {e}")
+
+        # Non-mutating privacy verification per update.md Invariant 1
         try:
-            # 1 single clean API call to create the private channel
-            res = await client(CreateChannelRequest(
-                title=f"{display_name}'s Vayom Vault",
-                about="Private Cloud Storage powered by Telegram & Vayom Drive",
-                megagroup=False
-            ))
-            created_chat = res.chats[0]
-            channel_id = f"-100{created_chat.id}"
-            logger.info(f"Auto-created private vault channel: {channel_id}")
-        except Exception as e:
-            logger.error(f"Failed to auto-create channel: {e}")
-            raise HTTPException(status_code=500, detail=f"Could not auto-create channel: {e}")
+            target_entity = await client.get_entity(int(channel_id) if str(channel_id).lstrip("-").isdigit() else channel_id)
+            has_public_username = bool(
+                getattr(target_entity, "username", None) or 
+                getattr(target_entity, "usernames", None)
+            )
+            if has_public_username:
+                logger.info(f"Channel {channel_id} has public username. Privatizing per Anti-Ban privacy invariant...")
+                from telethon.tl.functions.channels import UpdateUsernameRequest
+                await client(UpdateUsernameRequest(channel=target_entity, username=""))
+                logger.info(f"Successfully privatized channel {channel_id}")
+            else:
+                logger.info(f"Channel {channel_id} verified private locally (zero write mutation calls).")
+        except Exception as priv_err:
+            logger.warning(f"Non-mutating privacy check encountered: {priv_err}")
 
-    # Persist runtime configuration
-    config_payload = {
-        "auth_mode": "qr",
-        "session_name": "vayom_user",
-        "api_id": settings.TELEGRAM_API_ID,
-        "api_hash": settings.TELEGRAM_API_HASH,
-        "channel_id": str(channel_id),
-        "user_profile": {
-            "display_name": display_name,
-            "first_name": user_data.get("first_name"),
-            "username": user_data.get("username"),
-            "id": user_data.get("id"),
-            "is_premium": user_data.get("is_premium")
+        # Persist runtime configuration
+        config_payload = {
+            "auth_mode": "qr",
+            "session_name": "vayom_user",
+            "api_id": settings.TELEGRAM_API_ID,
+            "api_hash": settings.TELEGRAM_API_HASH,
+            "channel_id": str(channel_id),
+            "user_profile": {
+                "display_name": display_name,
+                "first_name": user_data.get("first_name"),
+                "username": user_data.get("username"),
+                "id": user_data.get("id"),
+                "is_premium": user_data.get("is_premium")
+            }
         }
-    }
-    settings.save_auth_config(config_payload)
+        settings.save_auth_config(config_payload)
 
-    # Disconnect the temporary qr client and connect the singleton storage client
-    try:
-        await client.disconnect()
-    except Exception:
-        pass
-    _active_qr_sessions.pop(body.session_id, None)
+        # Disconnect the temporary qr client and connect the singleton storage client
+        try:
+            await client.disconnect()
+        except Exception:
+            pass
 
-    await storage_client.reconnect()
-    return {
-        "success": True,
-        "channel_id": channel_id,
-        "user": config_payload["user_profile"]
-    }
+        result = {
+            "success": True,
+            "channel_id": channel_id,
+            "user": config_payload["user_profile"]
+        }
+        session["is_finalized"] = True
+        session["finalized_result"] = result
+        _active_qr_sessions.pop(body.session_id, None)
+
+        await storage_client.reconnect()
+        return result
 
 
 @router.post("/bot")

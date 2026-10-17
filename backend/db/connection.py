@@ -39,6 +39,8 @@ async def init_db():
                 await db.execute("ALTER TABLE files ADD COLUMN nonce TEXT")
             if "encryption" not in columns:
                 await db.execute("ALTER TABLE files ADD COLUMN encryption TEXT NOT NULL DEFAULT 'none'")
+            # Wipe out active encryption from database records while preserving schema
+            await db.execute("UPDATE files SET encryption = 'none', nonce = NULL WHERE encryption = 'ctr'")
             await db.commit()
 
         await db.executescript(schema_sql)

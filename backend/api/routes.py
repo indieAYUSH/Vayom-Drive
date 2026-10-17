@@ -2,10 +2,12 @@ import json
 import uuid
 import os
 import secrets
+import asyncio
+import logging
 import aiofiles
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Optional, List
+from typing import Optional, List, Dict, Any
 from pydantic import BaseModel
 from fastapi import APIRouter, UploadFile, File, Form, Header, HTTPException, Query, Response, Request, status
 from fastapi.responses import StreamingResponse, FileResponse
@@ -13,10 +15,24 @@ from ..config import settings
 from ..db.connection import get_db
 from ..storage.client import storage_client
 from ..compression.splitter import split_file_if_needed, calculate_sha256
-from ..index.metadata import detect_file_category, generate_webp_thumbnail, extract_image_exif
+from ..index.metadata import detect_file_category, generate_webp_thumbnail, extract_image_exif, extract_video_metadata
 from ..streaming.engine import streaming_engine, parse_and_clamp_range, DEFAULT_MAX_206_BYTES
+import time
+from ..crypto.cipher import generate_file_nonce
 
+logger = logging.getLogger("vayom.routes")
 router = APIRouter(prefix="/api/v1")
+
+# In-memory real-time upload progress tracking keyed by task_id
+upload_progress_tracker: Dict[str, Dict[str, Any]] = {}
+
+def generate_file_id() -> str:
+    """Generates continuous alphanumeric ID without hyphens to prevent Telegram search word-breaking."""
+    return f"v_{uuid.uuid4().hex}"
+
+def generate_part_id() -> str:
+    """Generates continuous alphanumeric part ID."""
+    return f"vp_{uuid.uuid4().hex}"
 
 # --- Pydantic Request Models ---
 class CreateAlbumRequest(BaseModel):
@@ -36,59 +52,179 @@ class CreateShareRequest(BaseModel):
 class BatchFileRequest(BaseModel):
     file_ids: List[str]
 
+class BackupChannelRequest(BaseModel):
+    backup_channel_id: str
 
-# --- Disaster Recovery Logic ---
+
+# --- Master Catalog & Disaster Recovery Logic ---
+async def sync_master_catalog():
+    """
+    Compacts the local SQLite file catalog and updates/pins index.json
+    directly in the private Telegram storage channel WAL.
+    """
+    try:
+        async with get_db() as db:
+            cur = await db.execute("SELECT * FROM files WHERE is_deleted = 0 ORDER BY created_at DESC")
+            files = [dict(r) for r in await cur.fetchall()]
+            catalog_files = []
+            total_bytes = 0
+            for f in files:
+                fid = f["id"]
+                total_bytes += f.get("size_bytes", 0)
+                p_cur = await db.execute(
+                    "SELECT part_index, byte_offset AS offset, part_size_bytes AS size, part_sha256 AS sha256, telegram_message_id, telegram_channel_id FROM file_parts WHERE file_id = ? ORDER BY part_index ASC",
+                    (fid,)
+                )
+                parts = [dict(p) for p in await p_cur.fetchall()]
+                f_item = {
+                    "id": fid,
+                    "filename": f["filename"],
+                    "mime_type": f["mime_type"],
+                    "file_category": f["file_category"],
+                    "size_bytes": f["size_bytes"],
+                    "sha256": f["sha256"],
+                    "is_split": bool(f.get("is_split")),
+                    "total_parts": f.get("total_parts", 1),
+                    "upload_status": f.get("upload_status", "completed"),
+                    "nonce": f.get("nonce"),
+                    "encryption": f.get("encryption", "none"),
+                    "created_at": f.get("created_at"),
+                    "parts": parts
+                }
+                catalog_files.append(f_item)
+
+        catalog_data = {
+            "version": "1.0",
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+            "channel_id": str(settings.TELEGRAM_CHANNEL_ID or ""),
+            "total_files": len(catalog_files),
+            "total_bytes": total_bytes,
+            "files": catalog_files
+        }
+        await storage_client.save_and_pin_catalog(catalog_data)
+        logger.info("Master catalog index.json synchronized and pinned to channel.")
+    except Exception as e:
+        logger.error(f"Error syncing master catalog: {e}")
+
 async def perform_rebuild_index(limit: int = 5000) -> int:
     """
-    Scans Telegram storage channel messages backward from HEAD, parses
-    VAYOM:v1: caption envelopes, and reconstructs the SQLite files and file_parts catalog.
-    Returns the number of restored envelopes.
+    Sub-second library initialization:
+    1. Attempts to fetch the pinned master catalog (index.json) for instant restoration.
+    2. If absent/corrupted, falls back to scanning Telegram channel message captions.
+    Reconciles multi-part files and flags incomplete uploads as 'interrupted'.
     """
-    envelopes = await storage_client.scan_channel_envelopes(limit=limit)
     restored_count = 0
 
-    async with get_db() as db:
-        for env in envelopes:
-            file_id = env.get("id")
-            if not file_id:
-                continue
+    # Fast path: Check pinned master catalog index.json
+    pinned_catalog = await storage_client.get_pinned_catalog()
+    if pinned_catalog and isinstance(pinned_catalog.get("files"), list) and len(pinned_catalog["files"]) > 0:
+        logger.info(f"Sub-second boot: Restoring {len(pinned_catalog['files'])} files from pinned master catalog.")
+        async with get_db() as db:
+            for item in pinned_catalog["files"]:
+                file_id = item.get("id")
+                if not file_id:
+                    continue
 
-            # Check if file already exists
+                cur = await db.execute("SELECT id FROM files WHERE id = ?", (file_id,))
+                if not await cur.fetchone():
+                    await db.execute(
+                        """
+                        INSERT INTO files (
+                            id, filename, mime_type, file_category, size_bytes, sha256,
+                            is_split, total_parts, upload_status, nonce, encryption, created_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            file_id, item.get("filename", "recovered_file"),
+                            item.get("mime_type", "application/octet-stream"),
+                            item.get("file_category", "other"), item.get("size_bytes", 0),
+                            item.get("sha256", ""), 1 if item.get("total_parts", 1) > 1 else 0,
+                            item.get("total_parts", 1), item.get("upload_status", "completed"),
+                            item.get("nonce"), item.get("encryption", "none"),
+                            item.get("created_at", datetime.now(timezone.utc).isoformat())
+                        )
+                    )
+
+                for p in item.get("parts", []):
+                    part_id = generate_part_id()
+                    await db.execute(
+                        """
+                        INSERT OR IGNORE INTO file_parts (
+                            id, file_id, part_index, byte_offset, part_size_bytes,
+                            part_sha256, telegram_message_id, telegram_channel_id
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            part_id, file_id, p.get("part_index", 0), p.get("offset", 0),
+                            p.get("size", 0), p.get("sha256", ""), p.get("telegram_message_id"),
+                            str(p.get("telegram_channel_id") or settings.TELEGRAM_CHANNEL_ID)
+                        )
+                    )
+                restored_count += 1
+            await db.commit()
+        return restored_count
+
+    # Slow fallback: Scan channel envelopes backwards from HEAD
+    logger.info("No pinned catalog found. Falling back to backward envelope history scan.")
+    envelopes = await storage_client.scan_channel_envelopes(limit=limit)
+
+    # Group parts by file_id for incomplete upload reconciliation
+    file_envelopes: Dict[str, List[dict]] = {}
+    for env in envelopes:
+        fid = env.get("id")
+        if fid:
+            file_envelopes.setdefault(fid, []).append(env)
+
+    async with get_db() as db:
+        for file_id, parts in file_envelopes.items():
+            first = parts[0]
+            total_expected = first.get("total", 1)
+            parts_found = len(parts)
+            is_interrupted = parts_found < total_expected
+
             cur = await db.execute("SELECT id FROM files WHERE id = ?", (file_id,))
             if not await cur.fetchone():
                 await db.execute(
                     """
-                    INSERT INTO files (id, filename, mime_type, file_category, size_bytes, sha256, is_split, total_parts)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    INSERT INTO files (
+                        id, filename, mime_type, file_category, size_bytes, sha256,
+                        is_split, total_parts, upload_status, nonce, encryption
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
-                        file_id, env.get("name", "recovered_file"),
-                        env.get("mime", "application/octet-stream"),
-                        env.get("cat", "other"), env.get("size", 0),
-                        env.get("sha256", ""),
-                        1 if env.get("total", 1) > 1 else 0,
-                        env.get("total", 1)
+                        file_id, first.get("name", "recovered_file"),
+                        first.get("mime", "application/octet-stream"),
+                        first.get("cat", "other"), first.get("size", 0),
+                        first.get("sha256", ""),
+                        1 if total_expected > 1 else 0,
+                        total_expected,
+                        "interrupted" if is_interrupted else "completed",
+                        first.get("nonce"),
+                        first.get("enc", "none")
                     )
                 )
 
-            # Insert part pointer
-            part_id = str(uuid.uuid4())
-            await db.execute(
-                """
-                INSERT OR IGNORE INTO file_parts (
-                    id, file_id, part_index, byte_offset, part_size_bytes, 
-                    part_sha256, telegram_message_id, telegram_channel_id
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    part_id, file_id, env.get("part", 0), env.get("offset", 0),
-                    env.get("size", 0), env.get("sha256", ""), env.get("telegram_message_id"),
-                    str(settings.TELEGRAM_CHANNEL_ID)
+            for env in parts:
+                part_id = generate_part_id()
+                await db.execute(
+                    """
+                    INSERT OR IGNORE INTO file_parts (
+                        id, file_id, part_index, byte_offset, part_size_bytes,
+                        part_sha256, telegram_message_id, telegram_channel_id
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        part_id, file_id, env.get("part", 0), env.get("offset", 0),
+                        env.get("size", 0), env.get("sha256", ""), env.get("telegram_message_id"),
+                        str(settings.TELEGRAM_CHANNEL_ID)
+                    )
                 )
-            )
-            restored_count += 1
+                restored_count += 1
 
         await db.commit()
+
+    if restored_count > 0:
+        asyncio.create_task(sync_master_catalog())
 
     return restored_count
 
@@ -215,7 +351,12 @@ async def list_files(
             )
             f_dict["albums"] = [r[0] for r in await a_cursor.fetchall()]
 
-            # Format booleans and URLs
+            # Format booleans, URLs, and reconciliation status
+            total_parts = f_dict.get("total_parts", 1)
+            uploaded_count = len(parts)
+            is_interrupted = (f_dict.get("upload_status") == "interrupted") or (uploaded_count < total_parts and f_dict.get("upload_status") != "completed")
+            f_dict["is_interrupted"] = is_interrupted
+            f_dict["uploaded_parts"] = uploaded_count
             f_dict["is_split"] = bool(f_dict.get("is_split"))
             f_dict["is_compressed"] = bool(f_dict.get("is_compressed"))
             f_dict["is_lossy_video"] = bool(f_dict.get("is_lossy_video"))
@@ -250,17 +391,52 @@ async def list_files(
 
 @router.post("/upload")
 async def upload_file(
-    file: UploadFile = File(...)
+    request: Request,
+    file: UploadFile = File(...),
+    task_id: Optional[str] = Query(None)
 ):
     """
     Receives file, calculates SHA-256, generates WebP thumbnail,
-    slices into parts if > 1.9 GB, streams to Telegram, and commits to SQLite.
+    slices into parts if > 1.9 GB, streams to Telegram with alphanumeric v_ ID and AES-CTR nonce,
+    and commits to SQLite before updating pinned master catalog.
+    Tracks live Telegram MTProto upload progress in upload_progress_tracker.
     """
-    file_id = str(uuid.uuid4())
+    effective_task_id = task_id or request.headers.get("X-Task-ID") or request.query_params.get("task_id")
+
+    if storage_client.flood_wait_seconds > 60:
+        if effective_task_id and effective_task_id in upload_progress_tracker:
+            upload_progress_tracker[effective_task_id].update({
+                "status": "failed",
+                "stage": f"Telegram flood wait active ({storage_client.flood_wait_seconds}s)",
+                "error": f"FLOOD_WAIT_{storage_client.flood_wait_seconds}"
+            })
+        raise HTTPException(
+            status_code=429,
+            detail=f"FLOOD_WAIT_{storage_client.flood_wait_seconds}",
+            headers={"Retry-After": str(storage_client.flood_wait_seconds)}
+        )
+
+    file_id = generate_file_id()
+    nonce = None
     temp_dir = settings.UPLOAD_TEMP_DIR / file_id
     temp_dir.mkdir(parents=True, exist_ok=True)
     safe_filename = Path(file.filename).name or f"{file_id}_upload"
     target_path = temp_dir / safe_filename
+
+    if effective_task_id:
+        upload_progress_tracker[effective_task_id] = {
+            "task_id": effective_task_id,
+            "status": "uploading",
+            "stage": "Buffering file...",
+            "uploaded_bytes": 0,
+            "total_bytes": 0,
+            "speed_bps": 0,
+            "eta_seconds": 0,
+            "progress_percent": 0,
+            "current_part": 1,
+            "total_parts": 1,
+            "last_updated": time.time()
+        }
 
     # 1. Stream incoming upload to temporary disk
     async with aiofiles.open(target_path, "wb") as out_file:
@@ -277,18 +453,83 @@ async def upload_file(
     has_thumb = False
     if category == "image":
         has_thumb = generate_webp_thumbnail(target_path, thumbnail_path)
-    exif = extract_image_exif(target_path) if category == "image" else {}
+
+    exif = {}
+    if category == "image":
+        exif = extract_image_exif(target_path)
+    elif category == "video":
+        exif = await extract_video_metadata(target_path)
 
     # 3. Size Policy & Pointer-Offset Slicing
     parts = split_file_if_needed(target_path, max_part_bytes=settings.MAX_PART_BYTES)
+    total_parts_count = len(parts)
 
-    # 4. Upload each part to Telegram with Caption Envelope
+    if effective_task_id:
+        upload_progress_tracker[effective_task_id].update({
+            "status": "uploading",
+            "stage": f"Starting MTProto upload to Telegram (0/{total_parts_count} parts)",
+            "total_bytes": total_size,
+            "total_parts": total_parts_count,
+            "current_part": 1,
+            "last_updated": time.time()
+        })
+
+    # 4. Upload each part to Telegram with Caption Envelope (Continuous v_ ID & AES-CTR nonce)
     uploaded_parts = []
-    for part in parts:
+    last_callback_time = time.time()
+    last_callback_bytes = 0
+    smoothed_speed = 0.0
+
+    for part_idx, part in enumerate(parts):
+        current_part_num = part_idx + 1
+        part_offset = part.get("byte_offset", 0)
+        part_size = part.get("part_size_bytes", 0)
+
+        def make_progress_cb(p_num: int, p_offset: int, p_size_bytes: int):
+            nonlocal last_callback_time, last_callback_bytes, smoothed_speed
+            def progress_cb(current: int, total: int):
+                nonlocal last_callback_time, last_callback_bytes, smoothed_speed
+                if not effective_task_id:
+                    return
+                now = time.time()
+                dt = now - last_callback_time
+                total_uploaded = p_offset + current
+                pct = min(99, int((total_uploaded / total_size) * 100)) if total_size > 0 else 0
+
+                if dt >= 0.2:
+                    delta_bytes = current - last_callback_bytes
+                    if delta_bytes > 0:
+                        inst_speed = delta_bytes / dt
+                        smoothed_speed = (smoothed_speed * 0.7 + inst_speed * 0.3) if smoothed_speed > 0 else inst_speed
+                    last_callback_time = now
+                    last_callback_bytes = current
+
+                rem_bytes = max(0, total_size - total_uploaded)
+                eta = int(rem_bytes / smoothed_speed) if smoothed_speed > 0 else 0
+
+                upload_progress_tracker[effective_task_id] = {
+                    "task_id": effective_task_id,
+                    "status": "uploading",
+                    "stage": f"Uploading Part {p_num}/{total_parts_count} to Telegram WAL",
+                    "uploaded_bytes": total_uploaded,
+                    "total_bytes": total_size,
+                    "speed_bps": int(smoothed_speed),
+                    "eta_seconds": eta,
+                    "progress_percent": pct,
+                    "current_part": p_num,
+                    "total_parts": total_parts_count,
+                    "last_updated": now
+                }
+            return progress_cb
+
+        last_callback_bytes = 0
+        last_callback_time = time.time()
+        cb = make_progress_cb(current_part_num, part_offset, part_size) if effective_task_id else None
+
         caption = (
-            f"VAYOM:v1:{json.dumps({'id': file_id, 'name': file.filename, 'part': part['part_index'], 'total': len(parts), 'offset': part['byte_offset'], 'size': part['part_size_bytes'], 'sha256': part['part_sha256'], 'cat': category})}"
+            f"VAYOM:v1:{json.dumps({'id': file_id, 'name': file.filename, 'part': part['part_index'], 'total': len(parts), 'offset': part['byte_offset'], 'size': part['part_size_bytes'], 'sha256': part['part_sha256'], 'cat': category, 'nonce': None, 'enc': 'none'})}"
         )
-        res = await storage_client.upload_part(part["file_path"], caption=caption)
+        res = await storage_client.upload_part(part["file_path"], caption=caption, progress_callback=cb)
         if isinstance(res, dict):
             uploaded_parts.append({
                 **part,
@@ -307,25 +548,37 @@ async def upload_file(
             })
 
     # 5. Commit atomic transaction to SQLite
+    if effective_task_id:
+        upload_progress_tracker[effective_task_id].update({
+            "status": "verifying",
+            "stage": "Committing file metadata to SQLite & WAL catalog...",
+            "uploaded_bytes": total_size,
+            "progress_percent": 99,
+            "speed_bps": 0,
+            "eta_seconds": 0,
+            "last_updated": time.time()
+        })
+
     async with get_db() as db:
         await db.execute(
             """
             INSERT INTO files (
                 id, filename, mime_type, file_category, size_bytes, sha256,
-                is_split, total_parts, has_thumbnail, thumbnail_path,
-                exif_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                is_split, total_parts, upload_status, nonce, encryption,
+                has_thumbnail, thumbnail_path, exif_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 file_id, file.filename, mime_type, category, total_size, sha256,
-                1 if len(parts) > 1 else 0, len(parts), 1 if has_thumb else 0,
+                1 if len(parts) > 1 else 0, len(parts), "completed", None, "none",
+                1 if has_thumb else 0,
                 str(thumbnail_path) if has_thumb else None,
                 json.dumps(exif) if exif else None
             )
         )
 
         for p in uploaded_parts:
-            part_id = str(uuid.uuid4())
+            part_id = generate_part_id()
             await db.execute(
                 """
                 INSERT INTO file_parts (
@@ -342,6 +595,20 @@ async def upload_file(
                 )
             )
 
+        # Auto-associate extracted metadata tags
+        if exif and isinstance(exif, dict) and exif.get("tags"):
+            for t_name in exif["tags"]:
+                t_clean = str(t_name).strip().lower()
+                if not t_clean:
+                    continue
+                tag_id = f"tag_{uuid.uuid4().hex[:12]}"
+                await db.execute("INSERT OR IGNORE INTO tags (id, name) VALUES (?, ?)", (tag_id, t_clean))
+                cur = await db.execute("SELECT id FROM tags WHERE name = ?", (t_clean,))
+                row = await cur.fetchone()
+                if row:
+                    real_tag_id = row[0]
+                    await db.execute("INSERT OR IGNORE INTO file_tags (file_id, tag_id) VALUES (?, ?)", (file_id, real_tag_id))
+
         await db.commit()
 
     # 6. Cleanup temporary upload files
@@ -355,14 +622,419 @@ async def upload_file(
     except Exception:
         pass
 
+    # 7. Asynchronously sync updated master catalog to channel WAL
+    asyncio.create_task(sync_master_catalog())
+
+    if effective_task_id:
+        upload_progress_tracker[effective_task_id].update({
+            "status": "done",
+            "stage": "Upload completed successfully",
+            "uploaded_bytes": total_size,
+            "progress_percent": 100,
+            "speed_bps": 0,
+            "eta_seconds": 0,
+            "last_updated": time.time()
+        })
+        async def cleanup_tracker():
+            await asyncio.sleep(60)
+            upload_progress_tracker.pop(effective_task_id, None)
+        asyncio.create_task(cleanup_tracker())
+
     return {
         "file_id": file_id,
         "filename": file.filename,
         "size_bytes": total_size,
         "sha256": sha256,
         "total_parts": len(parts),
-        "status": "confirmed"
+        "status": "confirmed",
+        "nonce": None,
+        "encryption": "none"
     }
+
+
+@router.get("/upload/{task_id}/progress")
+async def get_upload_progress(task_id: str):
+    """Returns real-time upload progress from Telegram MTProto worker with rate-limit status."""
+    wait_secs = storage_client.flood_wait_seconds
+    if task_id in upload_progress_tracker:
+        data = dict(upload_progress_tracker[task_id])
+        if wait_secs > 0:
+            data["status"] = "rate_limited"
+            data["flood_wait_seconds"] = wait_secs
+            data["stage"] = f"Telegram rate limit active. Paused for {int(wait_secs)}s to safeguard your account from bans."
+        return data
+    return {
+        "task_id": task_id,
+        "status": "rate_limited" if wait_secs > 0 else "unknown",
+        "flood_wait_seconds": wait_secs,
+        "stage": f"Telegram rate limit active ({int(wait_secs)}s)" if wait_secs > 0 else "Unknown",
+        "uploaded_bytes": 0,
+        "total_bytes": 0,
+        "speed_bps": 0,
+        "eta_seconds": 0,
+        "progress_percent": 0
+    }
+
+
+# --- Vault Redundancy & Disaster Recovery Endpoints ---
+@router.get("/vault/channel-health")
+async def get_channel_health():
+    """Returns access, permission, and redundancy health of primary & backup channels."""
+    return await storage_client.check_channel_health()
+
+
+@router.post("/vault/backup-channel")
+async def set_backup_channel(req: BackupChannelRequest):
+    """Configures secondary mirror channel for zero-data-loss redundancy."""
+    settings.TELEGRAM_BACKUP_CHANNEL_ID = req.backup_channel_id.strip()
+    config_data = {}
+    if settings.auth_config_file.exists():
+        try:
+            config_data = json.loads(settings.auth_config_file.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+    config_data["backup_channel_id"] = settings.TELEGRAM_BACKUP_CHANNEL_ID
+    settings.save_auth_config(config_data)
+
+    # Immediately mirror current master catalog to backup channel
+    asyncio.create_task(sync_master_catalog())
+    return {
+        "status": "configured",
+        "backup_channel_id": settings.TELEGRAM_BACKUP_CHANNEL_ID
+    }
+
+
+@router.get("/vault/catalog/export")
+async def export_vault_catalog():
+    """Exports compacted master catalog JSON for local offline disaster recovery."""
+    async with get_db() as db:
+        cur = await db.execute("SELECT * FROM files WHERE is_deleted = 0 ORDER BY created_at DESC")
+        files = [dict(r) for r in await cur.fetchall()]
+        catalog_files = []
+        total_bytes = 0
+        for f in files:
+            fid = f["id"]
+            total_bytes += f.get("size_bytes", 0)
+            p_cur = await db.execute(
+                "SELECT part_index, byte_offset AS offset, part_size_bytes AS size, part_sha256 AS sha256, telegram_message_id, telegram_channel_id FROM file_parts WHERE file_id = ? ORDER BY part_index ASC",
+                (fid,)
+            )
+            parts = [dict(p) for p in await p_cur.fetchall()]
+            f_item = {
+                "id": fid,
+                "filename": f["filename"],
+                "mime_type": f["mime_type"],
+                "file_category": f["file_category"],
+                "size_bytes": f["size_bytes"],
+                "sha256": f["sha256"],
+                "is_split": bool(f.get("is_split")),
+                "total_parts": f.get("total_parts", 1),
+                "upload_status": f.get("upload_status", "completed"),
+                "nonce": f.get("nonce"),
+                "encryption": f.get("encryption", "none"),
+                "created_at": f.get("created_at"),
+                "parts": parts
+            }
+            catalog_files.append(f_item)
+
+    catalog_data = {
+        "version": "1.0",
+        "exported_at": datetime.now(timezone.utc).isoformat(),
+        "channel_id": str(settings.TELEGRAM_CHANNEL_ID or ""),
+        "total_files": len(catalog_files),
+        "total_bytes": total_bytes,
+        "files": catalog_files
+    }
+    content = json.dumps(catalog_data, indent=2)
+    filename = f"vayom_vault_catalog_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}.json"
+    return Response(
+        content=content,
+        media_type="application/json",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'}
+    )
+
+
+@router.post("/vault/catalog/import")
+async def import_vault_catalog(catalog_file: UploadFile = File(...)):
+    """Restores files, parts, and metadata from an exported vault catalog JSON backup."""
+    raw = await catalog_file.read()
+    try:
+        data = json.loads(raw.decode("utf-8"))
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Invalid JSON format: {e}")
+
+    files_list = data.get("files")
+    if not isinstance(files_list, list):
+        raise HTTPException(status_code=400, detail="Missing or invalid 'files' array in catalog")
+
+    restored_count = 0
+    async with get_db() as db:
+        for item in files_list:
+            file_id = item.get("id")
+            if not file_id:
+                continue
+
+            cur = await db.execute("SELECT id FROM files WHERE id = ?", (file_id,))
+            if not await cur.fetchone():
+                await db.execute(
+                    """
+                    INSERT INTO files (
+                        id, filename, mime_type, file_category, size_bytes, sha256,
+                        is_split, total_parts, upload_status, nonce, encryption, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        file_id, item.get("filename", "restored_file"),
+                        item.get("mime_type", "application/octet-stream"),
+                        item.get("file_category", "other"), item.get("size_bytes", 0),
+                        item.get("sha256", ""), 1 if item.get("total_parts", 1) > 1 else 0,
+                        item.get("total_parts", 1), item.get("upload_status", "completed"),
+                        item.get("nonce"), item.get("encryption", "none"),
+                        item.get("created_at", datetime.now(timezone.utc).isoformat())
+                    )
+                )
+
+            for p in item.get("parts", []):
+                part_id = generate_part_id()
+                await db.execute(
+                    """
+                    INSERT OR IGNORE INTO file_parts (
+                        id, file_id, part_index, byte_offset, part_size_bytes,
+                        part_sha256, telegram_message_id, telegram_channel_id
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        part_id, file_id, p.get("part_index", 0), p.get("offset", 0),
+                        p.get("size", 0), p.get("sha256", ""), p.get("telegram_message_id"),
+                        str(p.get("telegram_channel_id") or settings.TELEGRAM_CHANNEL_ID)
+                    )
+                )
+            restored_count += 1
+        await db.commit()
+
+    asyncio.create_task(sync_master_catalog())
+    return {
+        "status": "success",
+        "restored_files": restored_count,
+        "total_catalog_files": len(files_list)
+    }
+
+
+@router.get("/files/{file_id}/upload-status")
+async def get_upload_status(file_id: str):
+    """Returns upload status and missing parts list for one-click resumption."""
+    async with get_db() as db:
+        cur = await db.execute("SELECT * FROM files WHERE id = ?", (file_id,))
+        f_row = await cur.fetchone()
+        if not f_row:
+            raise HTTPException(status_code=404, detail="File not found")
+        f_dict = dict(f_row)
+
+        p_cur = await db.execute("SELECT part_index FROM file_parts WHERE file_id = ? ORDER BY part_index ASC", (file_id,))
+        part_indices = [r["part_index"] for r in await p_cur.fetchall()]
+
+        total_parts = f_dict.get("total_parts", 1)
+        is_interrupted = len(part_indices) < total_parts or f_dict.get("upload_status") == "interrupted"
+        missing_parts = [i for i in range(total_parts) if i not in part_indices]
+        next_part = missing_parts[0] if missing_parts else None
+
+        return {
+            "file_id": file_id,
+            "filename": f_dict["filename"],
+            "total_parts": total_parts,
+            "uploaded_parts": part_indices,
+            "uploaded_count": len(part_indices),
+            "missing_parts": missing_parts,
+            "next_part": next_part,
+            "is_interrupted": is_interrupted,
+            "upload_status": "interrupted" if is_interrupted else f_dict.get("upload_status", "completed"),
+            "nonce": f_dict.get("nonce")
+        }
+
+
+@router.post("/upload/init")
+async def init_upload(
+    filename: str = Form(...),
+    total_size: int = Form(...),
+    mime_type: Optional[str] = Form("application/octet-stream"),
+    total_parts: int = Form(1),
+    nonce: Optional[str] = Form(None),
+    encryption: str = Form("none")
+):
+    """Initializes a resumable chunked upload and returns continuous v_ file ID."""
+    file_id = generate_file_id()
+    file_nonce = nonce
+    category = detect_file_category(mime_type or "application/octet-stream", filename)
+
+    async with get_db() as db:
+        await db.execute(
+            """
+            INSERT INTO files (
+                id, filename, mime_type, file_category, size_bytes, sha256,
+                is_split, total_parts, upload_status, nonce, encryption
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                file_id, filename, mime_type or "application/octet-stream", category, total_size, "",
+                1 if total_parts > 1 else 0, total_parts, "uploading", file_nonce, encryption
+            )
+        )
+        await db.commit()
+
+    return {
+        "file_id": file_id,
+        "filename": filename,
+        "nonce": file_nonce,
+        "encryption": encryption,
+        "total_parts": total_parts,
+        "upload_status": "uploading"
+    }
+
+
+@router.post("/upload/chunk")
+async def upload_chunk(
+    file_id: str = Form(...),
+    part_index: int = Form(...),
+    total_parts: int = Form(...),
+    byte_offset: int = Form(...),
+    part_sha256: str = Form(...),
+    filename: str = Form(...),
+    total_size: int = Form(...),
+    nonce: Optional[str] = Form(None),
+    encryption: str = Form("none"),
+    chunk: UploadFile = File(...)
+):
+    """
+    Receives an individual 512 KiB / chunk slice, streams it directly to Telegram WAL,
+    commits the extent pointer, and reconciles file completion status.
+    """
+    if storage_client.flood_wait_seconds > 60:
+        raise HTTPException(
+            status_code=429,
+            detail=f"FLOOD_WAIT_{storage_client.flood_wait_seconds}",
+            headers={"Retry-After": str(storage_client.flood_wait_seconds)}
+        )
+
+    temp_dir = settings.UPLOAD_TEMP_DIR / file_id
+    temp_dir.mkdir(parents=True, exist_ok=True)
+    chunk_path = temp_dir / f"part_{part_index}.bin"
+
+    async with aiofiles.open(chunk_path, "wb") as out_file:
+        while data := await chunk.read(1024 * 1024):
+            await out_file.write(data)
+
+    chunk_size = os.path.getsize(chunk_path)
+    computed_sha = calculate_sha256(chunk_path)
+    category = detect_file_category("application/octet-stream", filename)
+
+    caption = (
+        f"VAYOM:v1:{json.dumps({'id': file_id, 'name': filename, 'part': part_index, 'total': total_parts, 'offset': byte_offset, 'size': chunk_size, 'sha256': computed_sha, 'cat': category, 'nonce': nonce, 'enc': encryption})}"
+    )
+
+    res = await storage_client.upload_part(str(chunk_path), caption=caption)
+    part_id = generate_part_id()
+
+    msg_id = res["message_id"] if isinstance(res, dict) else res
+    chan_id = res.get("channel_id", str(settings.TELEGRAM_CHANNEL_ID)) if isinstance(res, dict) else str(settings.TELEGRAM_CHANNEL_ID)
+    tg_file_id = res.get("file_id") if isinstance(res, dict) else None
+    tg_access_hash = res.get("access_hash") if isinstance(res, dict) else None
+
+    async with get_db() as db:
+        # Check/ensure file record exists
+        cur = await db.execute("SELECT id FROM files WHERE id = ?", (file_id,))
+        if not await cur.fetchone():
+            await db.execute(
+                """
+                INSERT INTO files (
+                    id, filename, mime_type, file_category, size_bytes, sha256,
+                    is_split, total_parts, upload_status, nonce, encryption
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    file_id, filename, "application/octet-stream", category, total_size, "",
+                    1 if total_parts > 1 else 0, total_parts, "uploading", nonce, encryption
+                )
+            )
+
+        # Commit part pointer
+        await db.execute(
+            """
+            INSERT OR REPLACE INTO file_parts (
+                id, file_id, part_index, byte_offset, part_size_bytes,
+                part_sha256, telegram_message_id, telegram_channel_id,
+                telegram_file_id, telegram_access_hash
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                part_id, file_id, part_index, byte_offset,
+                chunk_size, computed_sha, msg_id, chan_id,
+                tg_file_id, tg_access_hash
+            )
+        )
+
+        # Check if all parts have been received
+        p_cur = await db.execute("SELECT COUNT(*) FROM file_parts WHERE file_id = ?", (file_id,))
+        uploaded_count = (await p_cur.fetchone())[0]
+
+        is_done = uploaded_count >= total_parts
+        if is_done:
+            await db.execute("UPDATE files SET upload_status = 'completed' WHERE id = ?", (file_id,))
+
+        await db.commit()
+
+    try:
+        chunk_path.unlink()
+        if not any(temp_dir.iterdir()):
+            temp_dir.rmdir()
+    except Exception:
+        pass
+
+    if is_done:
+        asyncio.create_task(sync_master_catalog())
+
+    return {
+        "file_id": file_id,
+        "part_index": part_index,
+        "uploaded_parts": uploaded_count,
+        "total_parts": total_parts,
+        "is_completed": is_done,
+        "status": "completed" if is_done else "uploading"
+    }
+
+
+@router.delete("/files/{file_id}/incomplete")
+async def cleanup_incomplete_upload(file_id: str):
+    """
+    Purges orphan uploaded parts of an interrupted upload from Telegram WAL and database.
+    Performs atomic batch deletion via channels.deleteMessages.
+    """
+    async with get_db() as db:
+        cur = await db.execute("SELECT id FROM files WHERE id = ?", (file_id,))
+        if not await cur.fetchone():
+            raise HTTPException(status_code=404, detail="File not found")
+
+        p_cur = await db.execute(
+            "SELECT telegram_message_id, telegram_channel_id FROM file_parts WHERE file_id = ?",
+            (file_id,)
+        )
+        parts = [dict(r) for r in await p_cur.fetchall()]
+
+        # Delete all orphan parts from Telegram WAL
+        purged_messages = await storage_client.delete_parts(parts)
+
+        # Delete database records
+        await db.execute("DELETE FROM files WHERE id = ?", (file_id,))
+        await db.commit()
+
+    asyncio.create_task(sync_master_catalog())
+    return {"success": True, "purged_parts": purged_messages}
+
+
+@router.post("/catalog/sync")
+async def trigger_catalog_sync():
+    """Forces an immediate compaction and re-pinning of index.json to Telegram channel."""
+    await sync_master_catalog()
+    return {"status": "ok", "synced": True}
 
 
 @router.api_route("/files/{file_id}/thumbnail", methods=["GET", "HEAD"])
@@ -478,6 +1150,7 @@ async def delete_file(file_id: str, purge: bool = False):
                 (file_id,)
             )
         await db.commit()
+    asyncio.create_task(sync_master_catalog())
     return {"success": True, "purged": purge}
 
 
@@ -493,6 +1166,7 @@ async def restore_file(file_id: str):
             (file_id,)
         )
         await db.commit()
+    asyncio.create_task(sync_master_catalog())
     return {"success": True}
 
 
@@ -509,6 +1183,7 @@ async def batch_trash(body: BatchFileRequest):
             body.file_ids
         )
         await db.commit()
+    asyncio.create_task(sync_master_catalog())
     return {"count": len(body.file_ids)}
 
 
@@ -524,6 +1199,7 @@ async def batch_restore(body: BatchFileRequest):
             body.file_ids
         )
         await db.commit()
+    asyncio.create_task(sync_master_catalog())
     return {"count": len(body.file_ids)}
 
 
@@ -561,6 +1237,7 @@ async def batch_purge(body: BatchFileRequest):
                 except Exception:
                     pass
 
+    asyncio.create_task(sync_master_catalog())
     return {"count": len(body.file_ids), "messages_purged": messages_purged}
 
 
@@ -607,6 +1284,7 @@ async def empty_trash():
                 except Exception:
                     pass
 
+    asyncio.create_task(sync_master_catalog())
     return {"count": len(deleted_ids), "messages_purged": messages_purged}
 
 

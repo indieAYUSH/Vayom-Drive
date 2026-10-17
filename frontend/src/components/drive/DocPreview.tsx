@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react'
 import { FileItem } from '../../types/vault'
 import { Button } from '../common/Button'
 import { Download, Copy, Check, FileText, Music, Play, Pause, Volume2, VolumeX } from 'lucide-react'
+import { formatBytes } from '../../utils/format'
 
 interface DocPreviewProps {
   item: FileItem
@@ -130,7 +131,7 @@ export const DocPreview: React.FC<DocPreviewProps> = ({ item, onDownload }) => {
           {item.filename}
         </div>
         <div className="text-xs text-[#777777] mb-6">
-          {(item.size_bytes / (1024 * 1024)).toFixed(2)} MB • {ext.toUpperCase()} Audio Track
+          {formatBytes(item.size_bytes)} • {ext.toUpperCase()} Audio Track
         </div>
 
         {/* Audio Controls */}
@@ -178,7 +179,7 @@ export const DocPreview: React.FC<DocPreviewProps> = ({ item, onDownload }) => {
         <div className="h-9 bg-[#111111] border-b border-[#222222] px-3 flex items-center justify-between text-[#888888] select-none">
           <div className="flex items-center gap-2">
             <span className="uppercase text-[11px] font-semibold text-[#f0f0f0]">{ext || 'TEXT'} FILE PREVIEW</span>
-            <span className="text-[10px] text-[#555555]">({(item.size_bytes / 1024).toFixed(1)} KB)</span>
+            <span className="text-[10px] text-[#555555]">({formatBytes(item.size_bytes)})</span>
           </div>
           <div className="flex items-center gap-2">
             {textContent && (
@@ -232,7 +233,7 @@ export const DocPreview: React.FC<DocPreviewProps> = ({ item, onDownload }) => {
         {item.filename}
       </div>
       <div className="text-xs text-[#777777] mb-4">
-        {(item.size_bytes / (1024 * 1024)).toFixed(2)} MB • {item.mime_type}
+        {formatBytes(item.size_bytes)} • {item.mime_type}
       </div>
       <Button variant="primary" onClick={onDownload} icon={<Download size={14} />}>
         Download Original File

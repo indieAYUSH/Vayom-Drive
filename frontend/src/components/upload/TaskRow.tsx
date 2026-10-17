@@ -2,6 +2,7 @@ import React from 'react'
 import { UploadTask } from '../../types/upload'
 import { Pause, Play, X, Check, AlertCircle } from 'lucide-react'
 import { Badge } from '../common/Badge'
+import { formatBytes, formatSpeed } from '../../utils/format'
 
 interface TaskRowProps {
   task: UploadTask
@@ -16,15 +17,6 @@ export const TaskRow: React.FC<TaskRowProps> = ({
   onResume,
   onCancel
 }) => {
-  const formatBytes = (bytes: number) => {
-    if (bytes >= 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`
-    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
-  }
-
-  const formatSpeed = (bps: number) => {
-    if (bps <= 0) return ''
-    return `${(bps / (1024 * 1024)).toFixed(1)} MB/s`
-  }
 
   const getStatusBadge = () => {
     switch (task.status) {
@@ -46,6 +38,8 @@ export const TaskRow: React.FC<TaskRowProps> = ({
         )
       case 'verifying':
         return <Badge variant="warning">Verifying</Badge>
+      case 'rate_limited':
+        return <Badge variant="warning">Rate Limited (Cooldown)</Badge>
       case 'done':
         return <Badge variant="success">Committed</Badge>
       case 'failed':
@@ -114,7 +108,25 @@ export const TaskRow: React.FC<TaskRowProps> = ({
             {formatSpeed(task.speed_bps)} • ETA {task.eta_seconds}s
           </span>
         )}
+        {task.status === 'verifying' && (
+          <span className="text-[#f59e0b] animate-pulse">
+            Syncing catalog...
+          </span>
+        )}
+        {task.status === 'rate_limited' && (
+          <span className="text-[#f59e0b] animate-pulse">
+            Safeguarding Account...
+          </span>
+        )}
       </div>
+
+      {/* Error or Cooldown Notice */}
+      {task.error_message && (
+        <div className="flex items-center gap-1.5 text-[10px] text-[#f59e0b] bg-[#221605] p-1.5 border border-[#78350f]">
+          <AlertCircle size={11} className="shrink-0 text-[#f59e0b]" />
+          <span className="truncate">{task.error_message}</span>
+        </div>
+      )}
     </div>
   )
 }

@@ -22,6 +22,12 @@ interface VaultState {
   timelineGroupByDate: boolean
   driveViewMode: 'grid' | 'table'
 
+  // Workstation EXIF & Codec Filters
+  selectedCamera: string | null
+  selectedCodec: string | null
+  selectedResolution: string | null
+  selectedLens: string | null
+
   // Starred / Favorites & Audio Player
   starredIds: string[]
   activeAudioItem: FileItem | null
@@ -51,6 +57,11 @@ interface VaultState {
   setCategoryFilter: (category: FileCategory | 'all') => void
   setTimelineGroupByDate: (group: boolean) => void
   setDriveViewMode: (mode: 'grid' | 'table') => void
+  setSelectedCamera: (camera: string | null) => void
+  setSelectedCodec: (codec: string | null) => void
+  setSelectedResolution: (res: string | null) => void
+  setSelectedLens: (lens: string | null) => void
+  resetWorkstationFilters: () => void
 
   toggleStar: (id: string) => void
   setActiveAudioItem: (item: FileItem | null) => void
@@ -77,6 +88,7 @@ interface VaultState {
   emptyTrash: () => Promise<void>
   createAlbum: (name: string, description?: string) => Promise<void>
   rebuildIndex: () => Promise<{ status: string; restored_envelopes: number }>
+  cleanupIncomplete: (fileId: string) => Promise<void>
 }
 
 const getInitialStarred = (): string[] => {
@@ -112,6 +124,11 @@ export const useVaultStore = create<VaultState>((set, get) => ({
   activeCategoryFilter: 'all',
   timelineGroupByDate: true,
   driveViewMode: 'grid',
+
+  selectedCamera: null,
+  selectedCodec: null,
+  selectedResolution: null,
+  selectedLens: null,
 
   starredIds: getInitialStarred(),
   activeAudioItem: null,
@@ -237,7 +254,16 @@ export const useVaultStore = create<VaultState>((set, get) => ({
   },
 
   setActiveTab: (tab) => {
-    set({ activeTab: tab, selectedAlbumId: null, selectedTag: null, selectedIds: [] })
+    set({
+      activeTab: tab,
+      selectedAlbumId: null,
+      selectedTag: null,
+      selectedIds: [],
+      selectedCamera: null,
+      selectedCodec: null,
+      selectedResolution: null,
+      selectedLens: null
+    })
     get().fetchFiles()
   },
 
@@ -260,6 +286,17 @@ export const useVaultStore = create<VaultState>((set, get) => ({
     set({ activeCategoryFilter: category })
     get().fetchFiles()
   },
+
+  setSelectedCamera: (camera) => set({ selectedCamera: camera }),
+  setSelectedCodec: (codec) => set({ selectedCodec: codec }),
+  setSelectedResolution: (res) => set({ selectedResolution: res }),
+  setSelectedLens: (lens) => set({ selectedLens: lens }),
+  resetWorkstationFilters: () => set({
+    selectedCamera: null,
+    selectedCodec: null,
+    selectedResolution: null,
+    selectedLens: null
+  }),
 
   toggleSelect: (id) => set((state) => {
     const exists = state.selectedIds.includes(id)
@@ -358,5 +395,10 @@ export const useVaultStore = create<VaultState>((set, get) => ({
     const result = await api.rebuildIndex()
     await Promise.all([get().fetchFiles(), get().fetchMetrics(), get().fetchAlbums(), get().fetchTrashCount()])
     return result
+  },
+
+  cleanupIncomplete: async (fileId) => {
+    await api.cleanupIncompleteUpload(fileId)
+    await Promise.all([get().fetchFiles(), get().fetchMetrics()])
   },
 }))

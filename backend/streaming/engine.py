@@ -7,6 +7,11 @@ from typing import Optional, List, Dict, Tuple, AsyncIterator, Any
 
 logger = logging.getLogger("vayom.streaming")
 
+try:
+    from ..crypto.cipher import aes_ctr_decrypt
+except Exception:
+    aes_ctr_decrypt = None
+
 # Cryptographic and binary invariants from update.md Section 0 & Section 3
 DEFAULT_CHUNK_SIZE: int = 512 * 1024       # 512 KiB (multiple of 4096, divides 1 MiB)
 DEFAULT_MAX_206_BYTES: int = 16 * 1024 * 1024  # 16 MiB default capping for HTTP 206
@@ -427,7 +432,10 @@ class StreamingEngine:
         parts: List[dict],
         total_size: int,
         range_spec: RangeSpec,
-        storage_client
+        storage_client,
+        encryption: str = "none",
+        nonce: Optional[str] = None,
+        key: Optional[bytes] = None
     ) -> AsyncIterator[bytes]:
         """
         Asynchronously streams the requested byte range slice-by-slice across one or more file parts.
@@ -487,6 +495,15 @@ class StreamingEngine:
                     chunk_bytes = await self.cache.get_or_fetch(cache_key, _fetch_upstream)
                     if not chunk_bytes:
                         break
+
+                    # Invariant 1: Decrypt chunk if encrypted with AES-256-CTR
+                    if encryption == "ctr" and nonce and key and aes_ctr_decrypt:
+                        chunk_bytes = aes_ctr_decrypt(
+                            chunk_bytes,
+                            key,
+                            nonce,
+                            aligned_byte_offset=chunk_aligned_offset
+                        )
 
                     # Slice out the specific sub-segment needed for this range
                     needed_len = min(len(chunk_bytes) - offset_within_chunk, slice_end - curr_offset + 1)

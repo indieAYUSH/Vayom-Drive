@@ -4,6 +4,7 @@ import { useVaultStore } from '../../store/useVaultStore'
 import { useUploadStore } from '../../store/useUploadStore'
 import { useAuthStore } from '../../store/useAuthStore'
 import { Button } from '../common/Button'
+import { formatBytes } from '../../utils/format'
 
 export const Header: React.FC = () => {
   const { metrics, setCommandBarOpen, setActiveTab, activeTab, primaryMode, setPrimaryMode } = useVaultStore()
@@ -17,11 +18,6 @@ export const Header: React.FC = () => {
       addFilesToUpload(e.target.files)
       e.target.value = ''
     }
-  }
-
-  const formatStorage = (bytes: number) => {
-    const gb = (bytes / (1024 * 1024 * 1024)).toFixed(1)
-    return `${gb} GB`
   }
 
   return (
@@ -115,7 +111,7 @@ export const Header: React.FC = () => {
         {/* Storage Metric */}
         <div className="hidden xl:flex items-center gap-2 px-2.5 py-1 bg-[#111111] border border-[#222222] font-mono text-xs">
           <HardDrive size={13} className="text-[#888888]" />
-          <span className="text-[#cccccc]">{formatStorage(metrics.total_bytes)}</span>
+          <span className="text-[#cccccc]">{formatBytes(metrics.total_bytes)}</span>
           <span className="text-[#555555]">/ UNLIMITED</span>
         </div>
 

@@ -102,3 +102,27 @@ CREATE TABLE IF NOT EXISTS sessions (
     expires_at TIMESTAMP NOT NULL,
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
+
+-- Workstation Watch Folders
+CREATE TABLE IF NOT EXISTS watch_folders (
+    id TEXT PRIMARY KEY,
+    path TEXT NOT NULL UNIQUE,
+    label TEXT NOT NULL,
+    target_album_id TEXT,
+    auto_delete_local INTEGER DEFAULT 0,
+    is_active INTEGER DEFAULT 1,
+    last_synced_at TIMESTAMP,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS watch_folder_events (
+    id TEXT PRIMARY KEY,
+    folder_id TEXT NOT NULL REFERENCES watch_folders(id) ON DELETE CASCADE,
+    file_path TEXT NOT NULL,
+    file_size_bytes INTEGER NOT NULL,
+    status TEXT NOT NULL,                      -- 'detected', 'syncing', 'synced', 'failed'
+    file_id TEXT REFERENCES files(id) ON DELETE SET NULL,
+    error_message TEXT,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_watch_events_folder ON watch_folder_events(folder_id, created_at DESC);

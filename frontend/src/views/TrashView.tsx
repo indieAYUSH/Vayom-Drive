@@ -3,6 +3,7 @@ import { useVaultStore } from '../store/useVaultStore'
 import { Trash2, RotateCcw } from 'lucide-react'
 import { Button } from '../components/common/Button'
 import { Badge } from '../components/common/Badge'
+import { formatBytes } from '../utils/format'
 
 export const TrashView: React.FC = () => {
   const { files, restoreFromTrash, purgeFiles, emptyTrash } = useVaultStore()
@@ -17,11 +18,6 @@ export const TrashView: React.FC = () => {
     if (window.confirm('Permanently purge all items from trash and Telegram? This cannot be undone.')) {
       await emptyTrash()
     }
-  }
-
-  const formatBytes = (bytes: number) => {
-    if (bytes >= 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`
-    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
   }
 
   return (

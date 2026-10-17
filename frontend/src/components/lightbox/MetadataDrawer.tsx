@@ -2,6 +2,7 @@ import React from 'react'
 import { FileItem } from '../../types/vault'
 import { Copy, Check, MapPin, Camera, HardDrive, ShieldCheck, Tag, X } from 'lucide-react'
 import { Badge } from '../common/Badge'
+import { formatBytes } from '../../utils/format'
 
 interface MetadataDrawerProps {
   item: FileItem
@@ -17,11 +18,8 @@ export const MetadataDrawer: React.FC<MetadataDrawerProps> = ({ item, onClose })
     setTimeout(() => setCopiedSha(false), 1500)
   }
 
-  const formatBytes = (bytes: number) => {
-    if (bytes >= 1024 * 1024 * 1024) {
-      return `${(bytes / (1024 * 1024 * 1024)).toFixed(3)} GB (${bytes.toLocaleString()} bytes)`
-    }
-    return `${(bytes / (1024 * 1024)).toFixed(2)} MB (${bytes.toLocaleString()} bytes)`
+  const formatSize = (bytes: number) => {
+    return `${formatBytes(bytes)} (${(bytes || 0).toLocaleString()} bytes)`
   }
 
   return (
@@ -55,7 +53,7 @@ export const MetadataDrawer: React.FC<MetadataDrawerProps> = ({ item, onClose })
           </div>
           <div className="flex justify-between text-[11px] pt-1 border-t border-[#1a1a1a]">
             <span className="text-[#666666]">Size:</span>
-            <span className="text-[#cccccc]">{formatBytes(item.size_bytes)}</span>
+            <span className="text-[#cccccc]">{formatSize(item.size_bytes)}</span>
           </div>
           <div className="flex justify-between text-[11px]">
             <span className="text-[#666666]">MIME:</span>
@@ -109,7 +107,7 @@ export const MetadataDrawer: React.FC<MetadataDrawerProps> = ({ item, onClose })
               </div>
               <div className="flex justify-between text-[10px] text-[#777777]">
                 <span>Byte Offset: {part.offset.toLocaleString()}</span>
-                <span>Slice: {(part.size / (1024 * 1024)).toFixed(1)} MB</span>
+                <span>Slice: {formatBytes(part.size)}</span>
               </div>
               <div className="text-[9px] text-[#555555] truncate">
                 Hash: {part.sha256}

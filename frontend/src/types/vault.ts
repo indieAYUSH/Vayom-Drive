@@ -11,15 +11,22 @@ export interface TelegramPartManifest {
 export interface ExifMetadata {
   camera_make?: string
   camera_model?: string
+  make?: string
+  model?: string
   lens?: string
   focal_length?: string
   aperture?: string
   iso?: number
   shutter_speed?: string
+  codec?: string
+  resolution_tier?: string
+  frame_rate?: number
+  duration_seconds?: number
   dimensions?: {
     width: number
     height: number
   }
+  tags?: string[]
 }
 
 export interface GpsCoordinates {
@@ -40,6 +47,11 @@ export interface FileItem {
   is_lossy_video: boolean
   is_split: boolean
   total_parts: number
+  upload_status?: 'completed' | 'interrupted' | 'uploading'
+  is_interrupted?: boolean
+  uploaded_parts?: number
+  nonce?: string
+  encryption?: 'none' | 'ctr' | 'gcm'
   parts: TelegramPartManifest[]
   thumbnail_url?: string
   preview_url?: string
@@ -92,4 +104,33 @@ export interface StorageMetrics {
   telegram_messages: number
   online_status: 'online' | 'flood_wait' | 'reconnecting'
   flood_wait_seconds?: number
+}
+
+export interface WatchFolder {
+  id: string
+  path: string
+  label: string
+  target_album_id?: string | null
+  auto_delete_local: boolean
+  is_active: boolean
+  last_synced_at?: string | null
+  created_at: string
+  total_events: number
+  synced_count: number
+  syncing_count: number
+  failed_count: number
+  exists: boolean
+}
+
+export interface WatchFolderEvent {
+  id: string
+  folder_id: string
+  folder_label?: string
+  file_path: string
+  file_size_bytes: number
+  status: 'detected' | 'syncing' | 'synced' | 'failed'
+  file_id?: string | null
+  filename?: string | null
+  error_message?: string | null
+  created_at: string
 }

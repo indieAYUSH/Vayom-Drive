@@ -1,7 +1,8 @@
 import React from 'react'
 import { useUploadStore } from '../../store/useUploadStore'
 import { TaskRow } from './TaskRow'
-import { ChevronUp, ChevronDown, UploadCloud, CheckCircle2, Trash } from 'lucide-react'
+import { ChevronUp, ChevronDown, UploadCloud, CheckCircle2, Trash, ShieldAlert } from 'lucide-react'
+import { formatSpeed } from '../../utils/format'
 
 export const UploadTray: React.FC = () => {
   const { 
@@ -11,7 +12,8 @@ export const UploadTray: React.FC = () => {
     pauseTask, 
     resumeTask, 
     cancelTask, 
-    clearCompleted 
+    clearCompleted,
+    floodWaitSecondsRemaining
   } = useUploadStore()
 
   if (tasks.length === 0) return null
@@ -19,11 +21,6 @@ export const UploadTray: React.FC = () => {
   const activeTasks = tasks.filter((t) => t.status !== 'done' && t.status !== 'failed')
   const completedTasks = tasks.filter((t) => t.status === 'done')
   const totalSpeed = activeTasks.reduce((acc, t) => acc + (t.speed_bps || 0), 0)
-
-  const formatSpeed = (bps: number) => {
-    if (bps <= 0) return ''
-    return `${(bps / (1024 * 1024)).toFixed(1)} MB/s`
-  }
 
   return (
     <div className="fixed bottom-16 left-2 right-2 sm:left-auto sm:right-4 sm:bottom-4 sm:w-96 z-40 bg-[#111111] border border-[#333333] select-none font-mono text-xs flex flex-col shadow-none">
@@ -64,6 +61,16 @@ export const UploadTray: React.FC = () => {
           </button>
         </div>
       </div>
+
+      {/* Anti-Ban Rate Limit Shield Alert */}
+      {floodWaitSecondsRemaining > 0 && (
+        <div className="px-3 py-2 bg-[#2a1b05] border-b border-[#78350f] text-[#f59e0b] flex items-center gap-2 text-[11px]">
+          <ShieldAlert size={14} className="shrink-0 text-[#f59e0b] animate-pulse" />
+          <span className="leading-tight">
+            🛡️ Anti-Ban Cooldown Active ({floodWaitSecondsRemaining}s). Uploads paused to safeguard account.
+          </span>
+        </div>
+      )}
 
       {/* Task List (Visible when Open) */}
       {isTrayOpen && (

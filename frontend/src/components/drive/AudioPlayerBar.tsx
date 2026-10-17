@@ -1,6 +1,7 @@
 import React, { useRef, useState, useEffect } from 'react'
 import { useVaultStore } from '../../store/useVaultStore'
 import { Play, Pause, Volume2, VolumeX, X, Download, Music } from 'lucide-react'
+import { formatBytes } from '../../utils/format'
 
 export const AudioPlayerBar: React.FC = () => {
   const { activeAudioItem, setActiveAudioItem } = useVaultStore()
@@ -108,7 +109,7 @@ export const AudioPlayerBar: React.FC = () => {
               {activeAudioItem.filename}
             </div>
             <div className="text-[10px] text-[#777777]">
-              {formatSecs(currentTime)} / {formatSecs(duration || 0)} • {(activeAudioItem.size_bytes / (1024 * 1024)).toFixed(1)} MB
+              {formatSecs(currentTime)} / {formatSecs(duration || 0)} • {formatBytes(activeAudioItem.size_bytes)}
             </div>
           </div>
         </div>

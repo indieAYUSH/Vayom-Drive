@@ -3,6 +3,7 @@ import { FileItem } from '../../types/vault'
 import { Checkbox } from '../common/Checkbox'
 import { Badge } from '../common/Badge'
 import { useVaultStore } from '../../store/useVaultStore'
+import { formatBytes } from '../../utils/format'
 import { 
   Copy, 
   Check, 
@@ -37,7 +38,7 @@ export const TableView: React.FC<TableViewProps> = ({
   onOpenLightbox,
   onMoveToTrash,
 }) => {
-  const { starredIds, toggleStar, setActiveAudioItem } = useVaultStore()
+  const { starredIds, toggleStar, setActiveAudioItem, cleanupIncomplete } = useVaultStore()
   const [copiedSha, setCopiedSha] = useState<string | null>(null)
   const [sortField, setSortField] = useState<SortField>('created_at')
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc')
@@ -46,13 +47,6 @@ export const TableView: React.FC<TableViewProps> = ({
     navigator.clipboard.writeText(text)
     setCopiedSha(text)
     setTimeout(() => setCopiedSha(null), 1500)
-  }
-
-  const formatBytes = (bytes: number) => {
-    if (bytes >= 1024 * 1024 * 1024) {
-      return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`
-    }
-    return `${(bytes / (1024 * 1024)).toFixed(2)} MB`
   }
 
   const handleSort = (field: SortField) => {
@@ -200,7 +194,9 @@ export const TableView: React.FC<TableViewProps> = ({
                   {formatBytes(item.size_bytes)}
                 </td>
                 <td className="py-2 px-3 hidden md:table-cell">
-                  {item.is_split ? (
+                  {item.is_interrupted ? (
+                    <Badge variant="danger">Interrupted ({item.uploaded_parts || item.parts?.length || 0}/{item.total_parts})</Badge>
+                  ) : item.is_split ? (
                     <Badge variant="warning">{item.total_parts} Parts</Badge>
                   ) : (
                     <span className="text-[#666666]">1 Msg</span>
@@ -212,7 +208,7 @@ export const TableView: React.FC<TableViewProps> = ({
                     className="flex items-center gap-1.5 hover:text-[#ffffff] transition-colors"
                     title="Click to copy full sha256"
                   >
-                    <span>{item.sha256.substring(0, 10)}...</span>
+                    <span>{item.sha256 ? `${item.sha256.substring(0, 10)}...` : 'n/a'}</span>
                     {copiedSha === item.sha256 ? (
                       <Check size={11} className="text-[#22c55e]" />
                     ) : (
@@ -225,28 +221,44 @@ export const TableView: React.FC<TableViewProps> = ({
                 </td>
                 <td className="py-2 px-3 text-right">
                   <div className="flex items-center justify-end gap-1">
-                    <button
-                      onClick={handleRowClick}
-                      className="p-1 text-[#888888] hover:text-[#ffffff] border border-transparent hover:border-[#333333]"
-                      title="Preview"
-                    >
-                      <Eye size={13} />
-                    </button>
-                    <a
-                      href={item.preview_url || `/api/v1/files/${item.id}/download`}
-                      download={item.filename}
-                      className="p-1 text-[#888888] hover:text-[#ffffff] border border-transparent hover:border-[#333333]"
-                      title="Download"
-                    >
-                      <Download size={13} />
-                    </a>
-                    <button
-                      onClick={() => onMoveToTrash([item.id])}
-                      className="p-1 text-[#888888] hover:text-[#ef4444] border border-transparent hover:border-[#441111]"
-                      title="Trash"
-                    >
-                      <Trash2 size={13} />
-                    </button>
+                    {item.is_interrupted ? (
+                      <button
+                        onClick={() => {
+                          if (confirm(`Clean up orphan parts for ${item.filename}?`)) {
+                            cleanupIncomplete(item.id)
+                          }
+                        }}
+                        className="px-2 py-0.5 text-[10px] text-[#ef4444] hover:text-[#ffffff] bg-[#221111] hover:bg-[#441111] border border-[#552222]"
+                        title="Purge orphan parts from Telegram channel"
+                      >
+                        Clean up
+                      </button>
+                    ) : (
+                      <>
+                        <button
+                          onClick={handleRowClick}
+                          className="p-1 text-[#888888] hover:text-[#ffffff] border border-transparent hover:border-[#333333]"
+                          title="Preview"
+                        >
+                          <Eye size={13} />
+                        </button>
+                        <a
+                          href={item.preview_url || `/api/v1/files/${item.id}/download`}
+                          download={item.filename}
+                          className="p-1 text-[#888888] hover:text-[#ffffff] border border-transparent hover:border-[#333333]"
+                          title="Download"
+                        >
+                          <Download size={13} />
+                        </a>
+                        <button
+                          onClick={() => onMoveToTrash([item.id])}
+                          className="p-1 text-[#888888] hover:text-[#ef4444] border border-transparent hover:border-[#441111]"
+                          title="Trash"
+                        >
+                          <Trash2 size={13} />
+                        </button>
+                      </>
+                    )}
                   </div>
                 </td>
               </tr>

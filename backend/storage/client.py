@@ -8,6 +8,7 @@ from telethon import TelegramClient, events
 from telethon.errors import FloodWaitError
 from telethon.tl.types import MessageMediaDocument
 from ..config import settings
+from .session import RobustSQLiteSession
 
 logger = logging.getLogger("vayom.storage")
 
@@ -18,6 +19,8 @@ class TelegramStorageClient:
         self._lock = asyncio.Lock()
         self._media_cache: dict[tuple[str, int], Any] = {}
         self._flood_wait_until: float = 0.0
+        # Anti-Ban Invariant 4: Limit upload concurrency to 3-4 parallel workers
+        self._upload_semaphore = asyncio.Semaphore(3)
 
     def set_flood_wait(self, seconds: int):
         """Sets or extends the flood wait period in seconds."""
@@ -36,6 +39,42 @@ class TelegramStorageClient:
             return "flood_wait"
         return "online" if self._is_connected else "reconnecting"
 
+    async def _wait_if_flooded(self):
+        """
+        Anti-Ban Invariant 5: Strict Global FloodWait Handling.
+        If any request triggered a FloodWait, pause execution globally for X + 2 seconds
+        so Telegram is not repeatedly spammed under an active rate limit.
+        """
+        now = time.time()
+        if self._flood_wait_until > now:
+            wait_left = self._flood_wait_until - now
+            logger.warning(f"Global FloodWait active: pausing request for {wait_left:.2f}s...")
+            await asyncio.sleep(wait_left)
+
+    async def verify_channel_privacy(self, channel_id: str):
+        """
+        Non-mutating privacy verification per update.md:
+        Verify state locally from cached dialog properties before invoking write calls.
+        Only invoke UpdateUsernameRequest if a public username actually exists.
+        """
+        if not self.client or not self._is_connected:
+            return
+        try:
+            target_entity = await self.client.get_entity(int(channel_id) if str(channel_id).lstrip("-").isdigit() else channel_id)
+            has_public_username = bool(
+                getattr(target_entity, "username", None) or 
+                getattr(target_entity, "usernames", None)
+            )
+            if has_public_username:
+                logger.info(f"Storage channel {channel_id} has public username. Privatizing per Anti-Ban privacy invariant...")
+                from telethon.tl.functions.channels import UpdateUsernameRequest
+                await self.client(UpdateUsernameRequest(channel=target_entity, username=""))
+                logger.info(f"Successfully privatized storage channel {channel_id}")
+            else:
+                logger.info(f"Storage channel {channel_id} verified private locally (zero write mutation calls).")
+        except Exception as e:
+            logger.warning(f"Could not verify channel privacy for {channel_id}: {e}")
+
     async def connect(self):
         """Initializes and authenticates the Telethon client (User MTProto or Bot MTProto)."""
         async with self._lock:
@@ -49,8 +88,9 @@ class TelegramStorageClient:
                 return
 
             session_file = str(settings.DATA_DIR / settings.SESSION_NAME)
+            robust_session = RobustSQLiteSession(session_file)
             self.client = TelegramClient(
-                session_file,
+                robust_session,
                 settings.TELEGRAM_API_ID,
                 settings.TELEGRAM_API_HASH
             )
@@ -64,11 +104,15 @@ class TelegramStorageClient:
                     return
                 self._is_connected = True
                 logger.info("Successfully connected to Telegram MTProto as User (QR Session)!")
+                if settings.TELEGRAM_CHANNEL_ID:
+                    await self.verify_channel_privacy(settings.TELEGRAM_CHANNEL_ID)
             elif settings.AUTH_MODE in ("bot", "developer") and settings.TELEGRAM_BOT_TOKEN:
                 # Bot MTProto Session
                 await self.client.start(bot_token=settings.TELEGRAM_BOT_TOKEN)
                 self._is_connected = True
                 logger.info("Successfully connected to Telegram MTProto as Bot!")
+                if settings.TELEGRAM_CHANNEL_ID:
+                    await self.verify_channel_privacy(settings.TELEGRAM_CHANNEL_ID)
             else:
                 logger.info("No active auth session. Awaiting user login.")
                 self._is_connected = False
@@ -113,6 +157,12 @@ class TelegramStorageClient:
             with open(mock_dir / f"{msg_id}.caption", "w", encoding="utf-8") as cf:
                 cf.write(caption)
             logger.info(f"Offline mock upload: stored part {msg_id}")
+            if progress_callback:
+                try:
+                    p_sz = os.path.getsize(file_path)
+                    progress_callback(p_sz, p_sz)
+                except Exception:
+                    pass
             return {
                 "message_id": msg_id,
                 "channel_id": str(settings.TELEGRAM_CHANNEL_ID or "mock"),
@@ -122,30 +172,56 @@ class TelegramStorageClient:
 
         channel = int(settings.TELEGRAM_CHANNEL_ID)
 
+        # Anti-Ban Invariant 4: Limit upload concurrency to 3-4 parallel workers
         while True:
+            # Anti-Ban Invariant 5: Pause if global FloodWait is active BEFORE attempting semaphore
+            await self._wait_if_flooded()
             try:
-                message = await self.client.send_file(
-                    channel,
-                    file_path,
-                    caption=caption,
-                    progress_callback=progress_callback,
-                    force_document=True  # Preserve exact original bytes and MIME type
-                )
-                doc = getattr(message.media, "document", None) if message and message.media else None
-                self._media_cache[(str(channel), message.id)] = message.media
-                return {
-                    "message_id": message.id,
-                    "channel_id": str(channel),
-                    "file_id": str(doc.id) if doc else None,
-                    "access_hash": str(doc.access_hash) if doc else None
-                }
+                async with self._upload_semaphore:
+                    # Adaptive chunk pacing: insert micro-delay between uploads to smooth burst traffic
+                    if settings.CHUNK_PACING_MS > 0:
+                        await asyncio.sleep(settings.CHUNK_PACING_MS / 1000.0)
+
+                    # 512 KB chunk part size per update.md anti-ban specification
+                    file_handle = await self.client.upload_file(
+                        file_path,
+                        part_size_kb=512,
+                        progress_callback=progress_callback
+                    )
+                    message = await self.client.send_file(
+                        channel,
+                        file_handle,
+                        caption=caption,
+                        force_document=True  # Preserve exact original bytes and MIME type
+                    )
+                    doc = getattr(message.media, "document", None) if message and message.media else None
+                    self._media_cache[(str(channel), message.id)] = message.media
+                    return {
+                        "message_id": message.id,
+                        "channel_id": str(channel),
+                        "file_id": str(doc.id) if doc else None,
+                        "access_hash": str(doc.access_hash) if doc else None
+                    }
             except FloodWaitError as e:
-                self.set_flood_wait(e.seconds)
-                logger.warning(f"Telegram FloodWait encountered: sleeping for {e.seconds}s...")
-                await asyncio.sleep(e.seconds + 1)
+                # Anti-Ban Invariant 5: Catch FLOOD_WAIT_X globally and pause for X + 2 seconds.
+                # Notice semaphore was released upon exiting `async with`, preventing worker deadlock!
+                penalty = e.seconds + 2
+                self.set_flood_wait(penalty)
+                logger.warning(f"Telegram FloodWait encountered ({e.seconds}s): global pause enforced for {penalty}s (X + 2 rule)...")
+                await asyncio.sleep(penalty)
             except Exception as e:
-                logger.error(f"Error uploading file part to Telegram: {e}")
-                raise
+                err_str = str(e)
+                if "FLOOD_WAIT_" in err_str:
+                    import re
+                    match = re.search(r"FLOOD_WAIT_(\d+)", err_str)
+                    wait_sec = int(match.group(1)) if match else 10
+                    penalty = wait_sec + 2
+                    self.set_flood_wait(penalty)
+                    logger.warning(f"Telegram FloodWait text encountered ({wait_sec}s): global pause for {penalty}s...")
+                    await asyncio.sleep(penalty)
+                else:
+                    logger.error(f"Error uploading file part to Telegram: {e}")
+                    raise
 
     async def stream_part_bytes(
         self,
@@ -185,8 +261,16 @@ class TelegramStorageClient:
         # 1. Check in-memory media cache (avoids repeated Telegram RPC calls on Range requests)
         media = self._media_cache.get(cache_key)
         if not media:
+            await self._wait_if_flooded()
             channel = int(target_channel_str)
-            message = await self.client.get_messages(channel, ids=message_id)
+            try:
+                message = await self.client.get_messages(channel, ids=message_id)
+            except FloodWaitError as e:
+                penalty = e.seconds + 2
+                self.set_flood_wait(penalty)
+                logger.warning(f"FloodWait when getting message {message_id}: sleeping {penalty}s (X + 2 rule)")
+                await asyncio.sleep(penalty)
+                message = await self.client.get_messages(channel, ids=message_id)
             if not message or not message.media:
                 raise FileNotFoundError(f"Message {message_id} not found in channel {channel}")
             media = message.media
@@ -194,6 +278,7 @@ class TelegramStorageClient:
                 self._media_cache.pop(next(iter(self._media_cache)))
             self._media_cache[cache_key] = media
 
+        await self._wait_if_flooded()
         # 2. Telethon iter_download streams chunks directly from Telegram DC sockets
         bytes_sent = 0
         async for chunk in self.client.iter_download(
@@ -211,8 +296,12 @@ class TelegramStorageClient:
 
     async def get_pinned_catalog(self) -> Optional[dict]:
         """
-        Retrieves the pinned master catalog (index.json) directly from the storage channel.
-        Provides sub-second boot initialization without traversing individual message captions.
+        Retrieves the pinned master catalog (index.json).
+        Provides resilient multi-tier fallback:
+        1. Primary storage channel.
+        2. Secondary backup mirror channel (if configured).
+        3. User 'Saved Messages' ('me') mirror (if in QR user session).
+        4. Local snapshot backup (vault_catalog_backup.json).
         """
         # 1. Offline mock mode handling
         if not self._is_connected or not self.client:
@@ -223,50 +312,105 @@ class TelegramStorageClient:
                     return json.loads(cat_file.read_text(encoding="utf-8"))
                 except Exception as e:
                     logger.warning(f"Failed to read mock pinned catalog: {e}")
+            local_backup = settings.DATA_DIR / "vault_catalog_backup.json"
+            if local_backup.exists():
+                try:
+                    return json.loads(local_backup.read_text(encoding="utf-8"))
+                except Exception:
+                    pass
             return None
 
-        # 2. Live Telegram MTProto
-        try:
-            from telethon.tl.functions.channels import GetFullChannelRequest
-            channel = int(settings.TELEGRAM_CHANNEL_ID)
-            full_channel = await self.client(GetFullChannelRequest(channel))
-            pinned_id = getattr(full_channel.full_chat, "pinned_msg_id", None)
-            if not pinned_id:
-                logger.info("No pinned message found in channel.")
+        await self._wait_if_flooded()
+
+        async def fetch_catalog_from_target(target_chat) -> Optional[dict]:
+            try:
+                from telethon.tl.functions.channels import GetFullChannelRequest
+                pinned_id = None
+                if isinstance(target_chat, int) or (isinstance(target_chat, str) and (target_chat.startswith("-") or target_chat.isdigit())):
+                    try:
+                        full_channel = await self.client(GetFullChannelRequest(int(target_chat)))
+                        pinned_id = getattr(full_channel.full_chat, "pinned_msg_id", None)
+                    except Exception:
+                        pass
+
+                if pinned_id:
+                    message = await self.client.get_messages(target_chat, ids=pinned_id)
+                    if isinstance(message, list):
+                        message = message[0] if message else None
+                    if message and message.media and getattr(message.media, "document", None):
+                        raw_bytes = await self.client.download_media(message, bytes)
+                        if raw_bytes:
+                            return json.loads(raw_bytes.decode("utf-8"))
+
+                # Fallback: Scan recent 10 messages for VAYOM:CATALOG envelope
+                messages = await self.client.get_messages(target_chat, limit=10)
+                for msg in messages:
+                    text = msg.text or msg.message or ""
+                    if text.startswith("VAYOM:CATALOG:"):
+                        if msg.media and getattr(msg.media, "document", None):
+                            raw_bytes = await self.client.download_media(msg, bytes)
+                            if raw_bytes:
+                                return json.loads(raw_bytes.decode("utf-8"))
+                        elif "{" in text and text.endswith("}"):
+                            try:
+                                json_part = text[text.index("{"):]
+                                return json.loads(json_part)
+                            except Exception:
+                                pass
+                return None
+            except Exception as err:
+                logger.warning(f"Could not fetch catalog from target {target_chat}: {err}")
                 return None
 
-            message = await self.client.get_messages(channel, ids=pinned_id)
-            if not message:
-                return None
+        # Tier 1: Primary Storage Channel
+        if settings.TELEGRAM_CHANNEL_ID:
+            cat = await fetch_catalog_from_target(settings.TELEGRAM_CHANNEL_ID)
+            if cat:
+                return cat
+            logger.warning(f"Primary channel {settings.TELEGRAM_CHANNEL_ID} catalog missing or unreachable.")
 
-            # Case A: Document attachment (index.json)
-            if message.media and getattr(message.media, "document", None):
-                raw_bytes = await self.client.download_media(message, bytes)
-                if raw_bytes:
-                    return json.loads(raw_bytes.decode("utf-8"))
+        # Tier 2: Secondary Backup Channel
+        if settings.TELEGRAM_BACKUP_CHANNEL_ID:
+            logger.info(f"Attempting disaster recovery from backup channel {settings.TELEGRAM_BACKUP_CHANNEL_ID}...")
+            cat = await fetch_catalog_from_target(settings.TELEGRAM_BACKUP_CHANNEL_ID)
+            if cat:
+                logger.info("Successfully recovered master catalog from secondary backup channel!")
+                return cat
 
-            # Case B: Message caption / text
-            text = message.text or message.message or ""
-            if text.startswith("VAYOM:CATALOG:v1:"):
-                return json.loads(text[len("VAYOM:CATALOG:v1:"):])
-            elif text.startswith("{") and text.endswith("}"):
-                return json.loads(text)
+        # Tier 3: Saved Messages ('me') Mirror in QR mode
+        if settings.AUTH_MODE == "qr" and settings.AUTO_MIRROR_SAVED_MESSAGES:
+            logger.info("Attempting disaster recovery from Telegram 'Saved Messages' ('me')...")
+            cat = await fetch_catalog_from_target("me")
+            if cat:
+                logger.info("Successfully recovered master catalog from Saved Messages mirror!")
+                return cat
 
-            return None
-        except FloodWaitError as e:
-            self.set_flood_wait(e.seconds)
-            logger.warning(f"FloodWait when reading pinned catalog: sleeping {e.seconds}s")
-            return None
-        except Exception as e:
-            logger.error(f"Error fetching pinned master catalog: {e}")
-            return None
+        # Tier 4: Local Snapshot Backup
+        local_backup = settings.DATA_DIR / "vault_catalog_backup.json"
+        if local_backup.exists():
+            try:
+                logger.info("Recovering master catalog from local persistent snapshot backup.")
+                return json.loads(local_backup.read_text(encoding="utf-8"))
+            except Exception as e:
+                logger.warning(f"Could not load local snapshot backup: {e}")
+
+        return None
 
     async def save_and_pin_catalog(self, catalog_data: dict, old_pinned_id: Optional[int] = None) -> int:
         """
         Saves and pins the compacted master catalog (index.json) to the private channel WAL.
-        Rotates out and deletes previous pinned catalog message to prevent channel bloat.
-        Returns the new pinned message ID.
+        Automatically mirrors to:
+        1. Local persistent snapshot (vault_catalog_backup.json) for offline recovery.
+        2. Secondary backup channel (if configured).
+        3. Saved Messages ('me') (if in QR user session).
         """
+        # Always maintain local snapshot for zero-cloud disaster recovery
+        try:
+            backup_snapshot = settings.DATA_DIR / "vault_catalog_backup.json"
+            backup_snapshot.write_text(json.dumps(catalog_data, indent=2), encoding="utf-8")
+        except Exception as e:
+            logger.warning(f"Could not write local catalog snapshot: {e}")
+
         # 1. Offline mock mode handling
         if not self._is_connected or not self.client:
             mock_dir = settings.DATA_DIR / "mock_blobs"
@@ -276,6 +420,7 @@ class TelegramStorageClient:
             logger.info("Saved mock pinned catalog index.json")
             return 999999
 
+        await self._wait_if_flooded()
         channel = int(settings.TELEGRAM_CHANNEL_ID)
         temp_catalog = settings.DATA_DIR / "index.json"
         try:
@@ -289,29 +434,58 @@ class TelegramStorageClient:
             }
             caption = f"VAYOM:CATALOG:v1:{json.dumps(summary)}"
 
-            # Upload index.json as document
+            # 1. Upload & Pin to Primary Channel
             msg = await self.client.send_file(
                 channel,
                 str(temp_catalog),
                 caption=caption,
                 force_document=True
             )
+            try:
+                await self.client.pin_message(channel, msg.id, notify=False)
+                logger.info(f"Pinned new master catalog message {msg.id} in primary channel.")
+            except Exception as pin_err:
+                logger.warning(f"Could not pin catalog in primary channel: {pin_err}")
 
-            # Pin the new catalog message silently (notify=False)
-            await self.client.pin_message(channel, msg.id, notify=False)
-            logger.info(f"Pinned new master catalog message {msg.id}")
-
-            # Delete old pinned catalog message if specified
             if old_pinned_id and old_pinned_id != msg.id:
                 try:
                     await self.client.delete_messages(channel, [old_pinned_id])
                 except Exception as err:
                     logger.warning(f"Could not delete old pinned catalog message {old_pinned_id}: {err}")
 
+            # 2. Mirror to Secondary Backup Channel if configured
+            if settings.TELEGRAM_BACKUP_CHANNEL_ID:
+                try:
+                    b_chan = int(settings.TELEGRAM_BACKUP_CHANNEL_ID)
+                    b_msg = await self.client.send_file(
+                        b_chan,
+                        str(temp_catalog),
+                        caption=f"VAYOM:CATALOG:MIRROR:v1:{json.dumps(summary)}",
+                        force_document=True
+                    )
+                    await self.client.pin_message(b_chan, b_msg.id, notify=False)
+                    logger.info(f"Mirrored master catalog to backup channel {b_chan}")
+                except Exception as b_err:
+                    logger.warning(f"Failed to mirror catalog to backup channel: {b_err}")
+
+            # 3. Mirror to Saved Messages ('me') in QR user mode
+            if settings.AUTH_MODE == "qr" and settings.AUTO_MIRROR_SAVED_MESSAGES:
+                try:
+                    await self.client.send_file(
+                        "me",
+                        str(temp_catalog),
+                        caption=f"VAYOM:CATALOG:MIRROR:v1:{json.dumps(summary)}",
+                        force_document=True
+                    )
+                    logger.info("Mirrored master catalog to Telegram Saved Messages ('me').")
+                except Exception as s_err:
+                    logger.warning(f"Could not mirror catalog to Saved Messages: {s_err}")
+
             return msg.id
         except FloodWaitError as e:
-            self.set_flood_wait(e.seconds)
-            logger.warning(f"FloodWait when saving pinned catalog: sleeping {e.seconds}s")
+            penalty = e.seconds + 2
+            self.set_flood_wait(penalty)
+            logger.warning(f"FloodWait when saving pinned catalog: sleeping {penalty}s (X + 2 rule)")
             raise
         except Exception as e:
             logger.error(f"Error pinning master catalog: {e}")
@@ -322,6 +496,65 @@ class TelegramStorageClient:
                     temp_catalog.unlink()
                 except Exception:
                     pass
+
+    async def check_channel_health(self) -> dict:
+        """
+        Verifies access, permissions, and redundancy health of primary & backup channels.
+        """
+        health = {
+            "online": self._is_connected,
+            "flood_wait_seconds": self.flood_wait_seconds,
+            "max_concurrent_workers": settings.MAX_CONCURRENT_UPLOADS,
+            "primary_channel": {
+                "id": settings.TELEGRAM_CHANNEL_ID or "NOT_CONFIGURED",
+                "healthy": False,
+                "title": None,
+                "can_post": False,
+                "error": None
+            },
+            "backup_channel": {
+                "id": settings.TELEGRAM_BACKUP_CHANNEL_ID or None,
+                "configured": bool(settings.TELEGRAM_BACKUP_CHANNEL_ID),
+                "healthy": False,
+                "error": None
+            },
+            "saved_messages_mirror": settings.AUTH_MODE == "qr",
+            "local_backup": {
+                "exists": (settings.DATA_DIR / "vault_catalog_backup.json").exists(),
+                "path": str(settings.DATA_DIR / "vault_catalog_backup.json")
+            }
+        }
+
+        if not self._is_connected or not self.client:
+            health["primary_channel"]["error"] = "Telegram client offline"
+            return health
+
+        # Check Primary Channel
+        if settings.TELEGRAM_CHANNEL_ID:
+            try:
+                from telethon.tl.functions.channels import GetFullChannelRequest
+                c_id = int(settings.TELEGRAM_CHANNEL_ID)
+                full = await self.client(GetFullChannelRequest(c_id))
+                chat = getattr(full, "chats", [None])[0]
+                health["primary_channel"]["healthy"] = True
+                health["primary_channel"]["title"] = getattr(chat, "title", "Primary Vault Channel")
+                health["primary_channel"]["can_post"] = getattr(chat, "admin_rights", None) is not None or getattr(chat, "creator", False)
+            except Exception as e:
+                health["primary_channel"]["healthy"] = False
+                health["primary_channel"]["error"] = str(e)
+
+        # Check Backup Channel
+        if settings.TELEGRAM_BACKUP_CHANNEL_ID:
+            try:
+                from telethon.tl.functions.channels import GetFullChannelRequest
+                b_id = int(settings.TELEGRAM_BACKUP_CHANNEL_ID)
+                await self.client(GetFullChannelRequest(b_id))
+                health["backup_channel"]["healthy"] = True
+            except Exception as e:
+                health["backup_channel"]["healthy"] = False
+                health["backup_channel"]["error"] = str(e)
+
+        return health
 
     async def scan_channel_envelopes(self, limit: int = 2000) -> list[dict]:
         """
@@ -349,11 +582,17 @@ class TelegramStorageClient:
         channel = int(settings.TELEGRAM_CHANNEL_ID)
 
         # 1. Ephemeral probe to discover channel HEAD ID
+        await self._wait_if_flooded()
         head_id = 1
         try:
             probe = await self.client.send_message(channel, "VAYOM:DISASTER_RECOVERY_HEAD_PROBE")
             head_id = probe.id
             await self.client.delete_messages(channel, [head_id])
+        except FloodWaitError as e:
+            penalty = e.seconds + 2
+            self.set_flood_wait(penalty)
+            logger.warning(f"FloodWait during channel head probe: sleeping {penalty}s (X + 2 rule)")
+            head_id = 500
         except Exception as e:
             logger.warning(f"Could not probe channel HEAD, falling back to scanning range: {e}")
             head_id = 500
@@ -366,6 +605,7 @@ class TelegramStorageClient:
             if not batch_ids:
                 continue
 
+            await self._wait_if_flooded()
             try:
                 messages = await self.client.get_messages(channel, ids=batch_ids)
                 for message in messages:
@@ -383,6 +623,11 @@ class TelegramStorageClient:
                             envelopes.append(data)
                         except Exception as err:
                             logger.warning(f"Failed to parse caption envelope in message {message.id}: {err}")
+            except FloodWaitError as e:
+                penalty = e.seconds + 2
+                self.set_flood_wait(penalty)
+                logger.warning(f"FloodWait during channel message scan: sleeping {penalty}s (X + 2 rule)")
+                await asyncio.sleep(penalty)
             except Exception as e:
                 logger.error(f"Error fetching message batch {batch_ids[0]}-{batch_ids[-1]}: {e}")
 
@@ -441,12 +686,14 @@ class TelegramStorageClient:
         for i in range(0, len(message_ids), 100):
             batch = message_ids[i:i + 100]
             try:
+                await self._wait_if_flooded()
                 await self.client.delete_messages(channel, batch)
                 deleted_count += len(batch)
             except FloodWaitError as e:
-                self.set_flood_wait(e.seconds)
-                logger.warning(f"Telegram FloodWait during delete: sleeping {e.seconds}s")
-                await asyncio.sleep(e.seconds + 1)
+                penalty = e.seconds + 2
+                self.set_flood_wait(penalty)
+                logger.warning(f"Telegram FloodWait during delete: sleeping {penalty}s (X + 2 rule)")
+                await asyncio.sleep(penalty)
                 try:
                     await self.client.delete_messages(channel, batch)
                     deleted_count += len(batch)

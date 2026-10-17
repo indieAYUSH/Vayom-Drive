@@ -16,6 +16,7 @@ import {
   Music
 } from 'lucide-react'
 import { useVaultStore } from '../../store/useVaultStore'
+import { formatBytes } from '../../utils/format'
 
 export const Sidebar: React.FC = () => {
   const { 
@@ -30,7 +31,8 @@ export const Sidebar: React.FC = () => {
     selectedTag,
     setSelectedTag,
     setCreateAlbumModalOpen,
-    starredIds
+    starredIds,
+    metrics
   } = useVaultStore()
 
   // Use catalogFiles for stable, accurate vault-wide counts that don't fluctuate on active tab
@@ -292,14 +294,14 @@ export const Sidebar: React.FC = () => {
           <span className="flex items-center gap-1.5 text-[#888888]">
             <Database size={11} /> Channel WAL
           </span>
-          <span className="text-[#22c55e]">SYNCED</span>
+          <span className="text-[#22c55e] flex items-center gap-1.5">
+            <span className="w-1.5 h-1.5 rounded-full bg-[#22c55e] inline-block" />
+            SYNCED
+          </span>
         </div>
-        <div className="w-full bg-[#1c1c1c] h-1 my-1.5">
-          <div className="bg-[#ffffff] h-1 w-2/5" />
-        </div>
-        <div className="flex justify-between text-[10px] text-[#444444]">
-          <span>Part Cap: 1.9 GB</span>
-          <span>Zero-Cost</span>
+        <div className="flex justify-between items-center text-[10px] text-[#888888] pt-1">
+          <span>Synced: <span className="text-[#e5e5e5] font-semibold">{formatBytes(metrics.total_bytes)}</span></span>
+          <span className="text-[#666666]">{metrics.total_files} {metrics.total_files === 1 ? 'file' : 'files'}</span>
         </div>
       </div>
     </aside>

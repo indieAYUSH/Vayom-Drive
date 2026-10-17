@@ -3,6 +3,7 @@ import { Search, Image, Video, Archive, FileText, ArrowRight, X } from 'lucide-r
 import { useVaultStore } from '../../store/useVaultStore'
 import { FileItem } from '../../types/vault'
 import { Badge } from '../common/Badge'
+import { formatBytes } from '../../utils/format'
 
 export const CommandBar: React.FC = () => {
   const { 
@@ -166,7 +167,7 @@ export const CommandBar: React.FC = () => {
                   <div className="truncate min-w-0 flex-1">
                     <div className="font-medium truncate text-xs">{item.filename}</div>
                     <div className="text-[10px] text-[#777777] flex items-center gap-2 mt-0.5">
-                      <span>{(item.size_bytes / (1024 * 1024)).toFixed(1)} MB</span>
+                      <span>{formatBytes(item.size_bytes)}</span>
                       <span>•</span>
                       <span>{item.file_category}</span>
                       {item.tags.length > 0 && (

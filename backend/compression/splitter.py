@@ -1,7 +1,7 @@
 import os
 import hashlib
 from pathlib import Path
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 from ..config import settings
 
 def calculate_sha256(file_path: Path) -> str:
@@ -12,7 +12,11 @@ def calculate_sha256(file_path: Path) -> str:
             h.update(chunk)
     return h.hexdigest()
 
-def split_file_if_needed(file_path: Path, max_part_bytes: int = settings.MAX_PART_BYTES) -> List[Dict[str, Any]]:
+def split_file_if_needed(
+    file_path: Path,
+    max_part_bytes: int = settings.MAX_PART_BYTES,
+    output_dir: Optional[Path] = None
+) -> List[Dict[str, Any]]:
     """
     Checks if a file exceeds max_part_bytes (default 1.9 GB).
     If <= max_part_bytes: returns a single part descriptor.
@@ -34,12 +38,13 @@ def split_file_if_needed(file_path: Path, max_part_bytes: int = settings.MAX_PAR
     parts = []
     part_index = 0
     byte_offset = 0
+    dest_dir = output_dir if output_dir is not None else file_path.parent
 
     with open(file_path, "rb") as src:
         while byte_offset < total_size:
             slice_size = min(max_part_bytes, total_size - byte_offset)
             part_filename = f"{file_path.stem}.part_{part_index}{file_path.suffix}"
-            part_path = file_path.parent / part_filename
+            part_path = dest_dir / part_filename
 
             h = hashlib.sha256()
             bytes_written = 0

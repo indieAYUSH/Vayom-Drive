@@ -4,13 +4,13 @@ import { LoginView } from './views/LoginView'
 import { useAuthStore } from './store/useAuthStore'
 
 export const App: React.FC = () => {
-  const { isAuthenticated, isLoading, checkAuth } = useAuthStore()
+  const { isAuthenticated, isInitializing, checkAuth } = useAuthStore()
 
   useEffect(() => {
     checkAuth()
   }, [checkAuth])
 
-  if (isLoading) {
+  if (isInitializing) {
     return (
       <div className="min-h-screen bg-[#000000] flex flex-col items-center justify-center font-mono text-xs text-[#888888] select-none">
         <div className="w-8 h-8 border-2 border-[#333333] border-t-[#ffffff] animate-spin mb-4" />
