@@ -136,6 +136,18 @@ export const useAuthStore = create<AuthState>((set, get) => ({
           availableChannels: data.channels || [],
           defaultChannelId: data.default_channel_id || null,
         })
+
+        // Auto-finalize immediately: scan with phone -> instant login to Drive!
+        const targetChannel = data.default_channel_id || (data.channels && data.channels.length > 0 ? data.channels[0].id : undefined)
+        const channelAction = targetChannel ? 'select_existing' : 'auto_create'
+        const displayName = data.user?.first_name || data.user?.display_name || 'Vault User'
+
+        try {
+          await get().finalizeQr(displayName, channelAction, targetChannel)
+        } catch (e: any) {
+          console.error("Auto-finalize error:", e)
+          set({ error: e.message || 'Auto-connect failed. Please configure storage channel below.' })
+        }
       } else if (data.status === '2fa_required') {
         if (pollInterval) clearInterval(pollInterval)
         set({ qrStatus: '2fa_required' })

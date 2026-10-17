@@ -286,13 +286,26 @@ export const LoginView: React.FC = () => {
                 </form>
               )}
 
-              {/* State: Scan Confirmed -> Account Setup */}
-              {qrStatus === 'confirmed' && scannedUser && (
-                <div className="space-y-5 py-1">
-                  <div className="p-3 bg-[#0d1f12] border border-[#166534] text-xs text-[#22c55e] flex items-center gap-2">
-                    <CheckCircle2 size={16} />
-                    <span>Telegram Verified: Welcome, <strong>{scannedUser.first_name || 'User'}</strong>!</span>
+              {/* State: Scan Confirmed -> Auto-connecting or Account Setup */}
+              {qrStatus === 'confirmed' && (
+                isLoading ? (
+                  <div className="py-10 text-center space-y-4">
+                    <div className="w-8 h-8 border-2 border-[#22c55e] border-t-transparent animate-spin mx-auto" />
+                    <div>
+                      <div className="text-xs font-bold text-[#22c55e] uppercase tracking-wider">
+                        Telegram Confirmed: Welcome, {scannedUser?.first_name || 'User'}!
+                      </div>
+                      <div className="text-[11px] text-[#777777] mt-1">
+                        Attaching storage vault and loading Drive...
+                      </div>
+                    </div>
                   </div>
+                ) : scannedUser ? (
+                  <div className="space-y-5 py-1">
+                    <div className="p-3 bg-[#0d1f12] border border-[#166534] text-xs text-[#22c55e] flex items-center gap-2">
+                      <CheckCircle2 size={16} />
+                      <span>Telegram Verified: Welcome, <strong>{scannedUser.first_name || 'User'}</strong>!</span>
+                    </div>
 
                   {/* Profile Name Choice */}
                   <div className="space-y-1.5">
@@ -376,7 +389,7 @@ export const LoginView: React.FC = () => {
                     {isLoading ? 'Allocating Node...' : 'Enter Vayom Vault'}
                   </Button>
                 </div>
-              )}
+              ) : null)}
 
               {/* State: Expired */}
               {qrStatus === 'expired' && (

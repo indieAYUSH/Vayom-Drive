@@ -110,8 +110,20 @@ export const SettingsView: React.FC = () => {
             <span className="text-xs font-semibold text-[#f0f0f0] uppercase tracking-wider">
               Telegram Backend Status
             </span>
-            <Badge variant={metrics.online_status === 'online' ? 'success' : 'warning'}>
-              {metrics.online_status === 'online' ? 'Online • Direct MTProto' : 'Connecting'}
+            <Badge
+              variant={
+                metrics.online_status === 'online'
+                  ? 'success'
+                  : metrics.online_status === 'flood_wait'
+                  ? 'danger'
+                  : 'warning'
+              }
+            >
+              {metrics.online_status === 'online'
+                ? 'Online • Direct MTProto'
+                : metrics.online_status === 'flood_wait'
+                ? `Rate Limited • Flood Wait (${metrics.flood_wait_seconds ?? 0}s)`
+                : 'Connecting'}
             </Badge>
           </div>
 

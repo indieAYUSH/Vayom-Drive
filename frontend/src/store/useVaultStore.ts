@@ -1,18 +1,19 @@
 import { create } from 'zustand'
-import { FileItem, AlbumItem, ShareLinkItem, StorageMetrics, FileCategory } from '../types/vault'
+import { FileItem, AlbumItem, StorageMetrics, FileCategory } from '../types/vault'
 import { api } from '../services/api'
 
 interface VaultState {
   // Data
   files: FileItem[]
+  catalogFiles: FileItem[]
+  trashCount: number
   albums: AlbumItem[]
-  shares: ShareLinkItem[]
   metrics: StorageMetrics
   isLoading: boolean
   error: string | null
 
   // Navigation & Filtering
-  activeTab: 'all' | 'images' | 'videos' | 'screenshots' | 'documents' | 'archives' | 'audio' | 'starred' | 'folders' | 'albums' | 'trash' | 'shares' | 'settings'
+  activeTab: 'all' | 'images' | 'videos' | 'screenshots' | 'documents' | 'archives' | 'audio' | 'starred' | 'folders' | 'albums' | 'trash' | 'settings'
   primaryMode: 'photos' | 'drive'
   selectedAlbumId: string | null
   selectedTag: string | null
@@ -33,14 +34,12 @@ interface VaultState {
   isCommandBarOpen: boolean
   isUploadModalOpen: boolean
   isCreateAlbumModalOpen: boolean
-  isShareModalOpen: boolean
-  shareTargetFile: FileItem | null
 
   // Data Actions
   fetchFiles: () => Promise<void>
   fetchMetrics: () => Promise<void>
   fetchAlbums: () => Promise<void>
-  fetchShares: () => Promise<void>
+  fetchTrashCount: () => Promise<void>
   init: () => Promise<void>
 
   // Navigation Actions
@@ -59,7 +58,7 @@ interface VaultState {
   toggleSelect: (id: string) => void
   selectIds: (ids: string[]) => void
   deselectIds: (ids: string[]) => void
-  selectAll: () => void
+  selectAll: (ids?: string[]) => void
   clearSelection: () => void
 
   openLightbox: (item: FileItem) => void
@@ -70,8 +69,6 @@ interface VaultState {
   setCommandBarOpen: (open: boolean) => void
   setUploadModalOpen: (open: boolean) => void
   setCreateAlbumModalOpen: (open: boolean) => void
-  openShareModal: (file: FileItem) => void
-  closeShareModal: () => void
 
   // File mutations
   moveToTrash: (ids: string[]) => Promise<void>
@@ -79,8 +76,6 @@ interface VaultState {
   purgeFiles: (ids: string[]) => Promise<void>
   emptyTrash: () => Promise<void>
   createAlbum: (name: string, description?: string) => Promise<void>
-  createShareLink: (fileId: string, hours: number, hasPassword?: boolean, password?: string) => Promise<void>
-  revokeShareLink: (shareId: string) => Promise<void>
   rebuildIndex: () => Promise<{ status: string; restored_envelopes: number }>
 }
 
@@ -95,11 +90,13 @@ const getInitialStarred = (): string[] => {
 
 export const useVaultStore = create<VaultState>((set, get) => ({
   files: [],
+  catalogFiles: [],
+  trashCount: 0,
   albums: [],
-  shares: [],
   metrics: {
     total_bytes: 0,
     total_files: 0,
+    total_parts: 0,
     channel_id: 'Loading...',
     telegram_messages: 0,
     online_status: 'online',
@@ -124,8 +121,6 @@ export const useVaultStore = create<VaultState>((set, get) => ({
   isCommandBarOpen: false,
   isUploadModalOpen: false,
   isCreateAlbumModalOpen: false,
-  isShareModalOpen: false,
-  shareTargetFile: null,
 
   setPrimaryMode: (mode) => set({ primaryMode: mode }),
   setTimelineGroupByDate: (group) => set({ timelineGroupByDate: group }),
@@ -146,6 +141,12 @@ export const useVaultStore = create<VaultState>((set, get) => ({
       const { activeTab, selectedAlbumId, selectedTag, searchQuery, activeCategoryFilter } = get()
       const isTrash = activeTab === 'trash'
 
+      if (isTrash) {
+        const files = await api.listFiles({ is_deleted: true, limit: 1000 })
+        set({ files, trashCount: files.length, error: null })
+        return
+      }
+
       let cat: string | undefined = undefined
       if (activeCategoryFilter !== 'all') {
         cat = activeCategoryFilter
@@ -160,14 +161,32 @@ export const useVaultStore = create<VaultState>((set, get) => ({
         tag: selectedTag || undefined,
         album_id: isFolderTab && selectedAlbumId ? selectedAlbumId : undefined,
         q: searchQuery.trim() || undefined,
-        is_deleted: isTrash,
-        limit: 500,
+        is_deleted: false,
+        limit: 1000,
       })
 
-      set({ files, error: null })
+      const isGeneralAll =
+        activeTab === 'all' &&
+        !selectedAlbumId &&
+        !selectedTag &&
+        !searchQuery.trim() &&
+        activeCategoryFilter === 'all'
+
+      set((state) => ({
+        files,
+        catalogFiles: isGeneralAll ? files : state.catalogFiles.length === 0 ? files : state.catalogFiles,
+        error: null,
+      }))
     } catch (err: any) {
       set({ error: err.message || 'Failed to fetch files' })
     }
+  },
+
+  fetchTrashCount: async () => {
+    try {
+      const deleted = await api.listFiles({ is_deleted: true, limit: 1000 })
+      set({ trashCount: deleted.length })
+    } catch {}
   },
 
   fetchMetrics: async () => {
@@ -188,23 +207,33 @@ export const useVaultStore = create<VaultState>((set, get) => ({
     }
   },
 
-  fetchShares: async () => {
-    try {
-      const shares = await api.listShares()
-      set({ shares })
-    } catch (err) {
-      console.error('Failed to fetch shares', err)
-    }
-  },
-
   init: async () => {
     set({ isLoading: true })
-    await Promise.allSettled([
-      get().fetchFiles(),
-      get().fetchMetrics(),
-      get().fetchAlbums(),
-    ])
-    set({ isLoading: false })
+    try {
+      const [allActive, deleted, metrics, albums] = await Promise.allSettled([
+        api.listFiles({ is_deleted: false, limit: 1000 }),
+        api.listFiles({ is_deleted: true, limit: 1000 }),
+        api.getMetrics(),
+        api.listAlbums(),
+      ])
+
+      const activeFiles = allActive.status === 'fulfilled' ? allActive.value : []
+      const trashFiles = deleted.status === 'fulfilled' ? deleted.value : []
+      const metricsData = metrics.status === 'fulfilled' ? metrics.value : get().metrics
+      const albumsData = albums.status === 'fulfilled' ? albums.value : []
+
+      set({
+        catalogFiles: activeFiles,
+        files: get().activeTab === 'trash' ? trashFiles : activeFiles,
+        trashCount: trashFiles.length,
+        metrics: metricsData,
+        albums: albumsData,
+        isLoading: false,
+        error: null,
+      })
+    } catch {
+      set({ isLoading: false })
+    }
   },
 
   setActiveTab: (tab) => {
@@ -249,9 +278,13 @@ export const useVaultStore = create<VaultState>((set, get) => ({
       selectedIds: state.selectedIds.filter((id) => !ids.includes(id)),
     })),
 
-  selectAll: () => {
-    const visibleFiles = get().files.filter((f) => !f.is_deleted)
-    set({ selectedIds: visibleFiles.map((f) => f.id) })
+  selectAll: (ids?: string[]) => {
+    if (ids && ids.length > 0) {
+      set({ selectedIds: ids })
+    } else {
+      const visibleFiles = get().files.filter((f) => !f.is_deleted)
+      set({ selectedIds: visibleFiles.map((f) => f.id) })
+    }
   },
 
   clearSelection: () => set({ selectedIds: [] }),
@@ -280,30 +313,38 @@ export const useVaultStore = create<VaultState>((set, get) => ({
   setCommandBarOpen: (open) => set({ isCommandBarOpen: open }),
   setUploadModalOpen: (open) => set({ isUploadModalOpen: open }),
   setCreateAlbumModalOpen: (open) => set({ isCreateAlbumModalOpen: open }),
-  openShareModal: (file) => set({ isShareModalOpen: true, shareTargetFile: file }),
-  closeShareModal: () => set({ isShareModalOpen: false, shareTargetFile: null }),
 
   moveToTrash: async (ids) => {
     await api.batchTrash(ids)
-    set({ selectedIds: [] })
-    await Promise.all([get().fetchFiles(), get().fetchMetrics()])
+    set((state) => ({
+      selectedIds: [],
+      catalogFiles: state.catalogFiles.filter((f) => !ids.includes(f.id)),
+      trashCount: state.trashCount + ids.length,
+    }))
+    await Promise.all([get().fetchFiles(), get().fetchTrashCount(), get().fetchMetrics()])
   },
 
   restoreFromTrash: async (ids) => {
     await api.batchRestore(ids)
-    set({ selectedIds: [] })
-    await Promise.all([get().fetchFiles(), get().fetchMetrics()])
+    set((state) => ({
+      selectedIds: [],
+      trashCount: Math.max(0, state.trashCount - ids.length),
+    }))
+    await Promise.all([get().fetchFiles(), get().fetchTrashCount(), get().fetchMetrics()])
   },
 
   purgeFiles: async (ids) => {
     await api.batchPurge(ids)
-    set({ selectedIds: [] })
-    await Promise.all([get().fetchFiles(), get().fetchMetrics()])
+    set((state) => ({
+      selectedIds: [],
+      trashCount: Math.max(0, state.trashCount - ids.length),
+    }))
+    await Promise.all([get().fetchFiles(), get().fetchTrashCount(), get().fetchMetrics()])
   },
 
   emptyTrash: async () => {
     await api.emptyTrash()
-    set({ selectedIds: [] })
+    set({ selectedIds: [], trashCount: 0 })
     await Promise.all([get().fetchFiles(), get().fetchMetrics()])
   },
 
@@ -313,20 +354,9 @@ export const useVaultStore = create<VaultState>((set, get) => ({
     await get().fetchAlbums()
   },
 
-  createShareLink: async (fileId, hours, hasPassword = false, password?: string) => {
-    await api.createShare(fileId, hours, hasPassword, password)
-    set({ isShareModalOpen: false, shareTargetFile: null })
-    await get().fetchShares()
-  },
-
-  revokeShareLink: async (shareId) => {
-    await api.revokeShare(shareId)
-    await get().fetchShares()
-  },
-
   rebuildIndex: async () => {
     const result = await api.rebuildIndex()
-    await Promise.all([get().fetchFiles(), get().fetchMetrics(), get().fetchAlbums()])
+    await Promise.all([get().fetchFiles(), get().fetchMetrics(), get().fetchAlbums(), get().fetchTrashCount()])
     return result
   },
 }))

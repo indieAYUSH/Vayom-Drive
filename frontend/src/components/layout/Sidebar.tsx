@@ -13,8 +13,7 @@ import {
   Lock,
   Crop,
   Star,
-  Music,
-  Share2
+  Music
 } from 'lucide-react'
 import { useVaultStore } from '../../store/useVaultStore'
 
@@ -24,6 +23,8 @@ export const Sidebar: React.FC = () => {
     setActiveTab, 
     albums, 
     files, 
+    catalogFiles,
+    trashCount,
     selectedAlbumId, 
     setSelectedAlbumId,
     selectedTag,
@@ -32,8 +33,9 @@ export const Sidebar: React.FC = () => {
     starredIds
   } = useVaultStore()
 
-  const trashCount = files.filter((f) => f.is_deleted).length
-  const allTags = Array.from(new Set(files.flatMap((f) => f.tags)))
+  // Use catalogFiles for stable, accurate vault-wide counts that don't fluctuate on active tab
+  const catalog = catalogFiles.length > 0 ? catalogFiles : files.filter((f) => !f.is_deleted)
+  const allTags = Array.from(new Set(catalog.flatMap((f) => f.tags)))
 
   const isScreenshotFile = (f: any): boolean => {
     if (f.file_category === 'screenshot' || f.is_screenshot) return true
@@ -83,7 +85,7 @@ export const Sidebar: React.FC = () => {
                 <span>Timeline</span>
               </div>
               <span className="text-[10px] text-[#555555]">
-                {files.filter(f => !f.is_deleted).length}
+                {catalog.length}
               </span>
             </div>
 
@@ -96,7 +98,7 @@ export const Sidebar: React.FC = () => {
                 <span>Photos</span>
               </div>
               <span className="text-[10px] text-[#555555]">
-                {files.filter(f => !f.is_deleted && f.file_category === 'image' && !isScreenshotFile(f)).length}
+                {catalog.filter(f => f.file_category === 'image' && !isScreenshotFile(f)).length}
               </span>
             </div>
 
@@ -109,7 +111,7 @@ export const Sidebar: React.FC = () => {
                 <span>Screenshots</span>
               </div>
               <span className="text-[10px] text-[#555555]">
-                {files.filter(f => !f.is_deleted && isScreenshotFile(f)).length}
+                {catalog.filter(f => isScreenshotFile(f)).length}
               </span>
             </div>
 
@@ -122,7 +124,7 @@ export const Sidebar: React.FC = () => {
                 <span>Videos</span>
               </div>
               <span className="text-[10px] text-[#555555]">
-                {files.filter(f => !f.is_deleted && f.file_category === 'video').length}
+                {catalog.filter(f => f.file_category === 'video').length}
               </span>
             </div>
 
@@ -135,7 +137,7 @@ export const Sidebar: React.FC = () => {
                 <span>Starred</span>
               </div>
               <span className="text-[10px] text-[#555555]">
-                {files.filter(f => !f.is_deleted && starredIds.includes(f.id)).length}
+                {catalog.filter(f => starredIds.includes(f.id)).length}
               </span>
             </div>
           </div>
@@ -169,7 +171,7 @@ export const Sidebar: React.FC = () => {
                 <span>Documents & Code</span>
               </div>
               <span className="text-[10px] text-[#555555]">
-                {files.filter(f => !f.is_deleted && f.file_category === 'document').length}
+                {catalog.filter(f => f.file_category === 'document').length}
               </span>
             </div>
 
@@ -182,7 +184,7 @@ export const Sidebar: React.FC = () => {
                 <span>Audio Tracks</span>
               </div>
               <span className="text-[10px] text-[#555555]">
-                {files.filter(f => !f.is_deleted && isAudioFile(f)).length}
+                {catalog.filter(f => isAudioFile(f)).length}
               </span>
             </div>
 
@@ -195,7 +197,7 @@ export const Sidebar: React.FC = () => {
                 <span>Archives & Split</span>
               </div>
               <span className="text-[10px] text-[#555555]">
-                {files.filter(f => !f.is_deleted && (f.file_category === 'archive' || f.is_split)).length}
+                {catalog.filter(f => f.file_category === 'archive' || f.is_split).length}
               </span>
             </div>
           </div>
@@ -266,16 +268,6 @@ export const Sidebar: React.FC = () => {
             System
           </div>
           <div className="space-y-0.5">
-            <div
-              onClick={() => setActiveTab('shares')}
-              className={navItemClass(activeTab === 'shares')}
-            >
-              <div className="flex items-center gap-2.5">
-                <Share2 size={14} />
-                <span>Shared Links</span>
-              </div>
-            </div>
-
             <div
               onClick={() => setActiveTab('trash')}
               className={navItemClass(activeTab === 'trash')}

@@ -23,7 +23,6 @@ interface LightboxModalProps {
   onClose: () => void
   onNext: () => void
   onPrev: () => void
-  onOpenShare?: (file: FileItem) => void
   onMoveToTrash: (id: string) => void
 }
 
@@ -32,7 +31,6 @@ export const LightboxModal: React.FC<LightboxModalProps> = ({
   onClose,
   onNext,
   onPrev,
-  onOpenShare,
   onMoveToTrash
 }) => {
   const [showMetadata, setShowMetadata] = useState(false)

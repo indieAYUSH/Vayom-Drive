@@ -12,6 +12,7 @@ from .db.connection import init_db, get_db
 from .storage.client import storage_client
 from .api.routes import router as api_router, perform_rebuild_index
 from .api.auth import router as auth_router
+from .streaming.router import router as streaming_router, root_router as streaming_root_router
 
 logging.basicConfig(
     level=logging.INFO,
@@ -23,15 +24,20 @@ FRONTEND_DIST = settings.ROOT_DIR / "frontend" / "dist"
 
 async def heartbeat_loop():
     """Periodic keep-alive heartbeat loop to prevent Hugging Face Spaces from idling."""
-    client = httpx.AsyncClient(timeout=10.0)
-    while True:
-        await asyncio.sleep(settings.HEARTBEAT_INTERVAL_SECONDS)
-        try:
-            target_url = settings.PING_URL or f"http://127.0.0.1:{settings.PORT}/api/v1/health"
-            resp = await client.get(target_url)
-            logger.info(f"Self-ping heartbeat to {target_url} returned status: {resp.status_code}")
-        except Exception as e:
-            logger.debug(f"Heartbeat ping: {e}")
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            while True:
+                await asyncio.sleep(settings.HEARTBEAT_INTERVAL_SECONDS)
+                try:
+                    target_url = settings.PING_URL or f"http://127.0.0.1:{settings.PORT}/api/v1/health"
+                    resp = await client.get(target_url)
+                    logger.info(f"Self-ping heartbeat to {target_url} returned status: {resp.status_code}")
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:
+                    logger.debug(f"Heartbeat ping: {e}")
+    except asyncio.CancelledError:
+        logger.info("Heartbeat loop cancelled.")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -67,8 +73,11 @@ async def lifespan(app: FastAPI):
     # Shutdown:
     logger.info("Shutting down Vayom Drive...")
     heartbeat_task.cancel()
-    if storage_client.client:
-        await storage_client.client.disconnect()
+    try:
+        await heartbeat_task
+    except asyncio.CancelledError:
+        pass
+    await storage_client.disconnect()
 
 app = FastAPI(
     title="Vayom Drive",
@@ -89,6 +98,8 @@ app.add_middleware(
 # Include REST API endpoints
 app.include_router(api_router)
 app.include_router(auth_router)
+app.include_router(streaming_router)
+app.include_router(streaming_root_router)
 
 @app.get("/s/{token}")
 async def redirect_share(token: str):
@@ -105,8 +116,8 @@ if FRONTEND_DIST.exists():
             from fastapi import HTTPException
             raise HTTPException(status_code=404, detail="API route not found")
         # Serve static file if exists (e.g. manifest.webmanifest, sw.js), else fallback to index.html
-        potential_file = FRONTEND_DIST / full_path
-        if potential_file.is_file():
+        potential_file = (FRONTEND_DIST / full_path).resolve()
+        if potential_file.is_file() and str(potential_file).startswith(str(FRONTEND_DIST.resolve())):
             return FileResponse(potential_file)
         return FileResponse(FRONTEND_DIST / "index.html")
 else:

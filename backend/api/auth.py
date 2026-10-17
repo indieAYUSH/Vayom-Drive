@@ -118,8 +118,33 @@ async def _monitor_qr(session_id: str, qr_login, client: TelegramClient, session
     )
 
     try:
-        timeout = max(1.0, session_end_time - time.time())
-        user = await qr_login.wait(timeout=timeout)
+        user = None
+        while time.time() < session_end_time and not wait_done_event.is_set():
+            remaining_time = max(1.0, session_end_time - time.time())
+            try:
+                user = await qr_login.wait(timeout=remaining_time)
+                if user:
+                    break
+            except SessionPasswordNeededError:
+                wait_done_event.set()
+                if session_id in _active_qr_sessions:
+                    _active_qr_sessions[session_id]["status"] = "2fa_required"
+                return
+            except Exception as e:
+                err_str = str(e)
+                # If Telegram migrated to a new DC and the old token expired during switch:
+                if "ImportLoginTokenRequest" in err_str or "re-scanned" in err_str or "expired" in err_str.lower():
+                    logger.info(f"Telegram MTProto DC migration occurred or token refreshed. Recreating token on DC {client.session.dc_id}: {e}")
+                    await qr_login.recreate()
+                    if session_id in _active_qr_sessions:
+                        _active_qr_sessions[session_id]["url"] = qr_login.url
+                    continue
+                logger.warning(f"QR login wait error: {e}")
+                raise
+
+        if not user:
+            raise asyncio.TimeoutError("QR login session timed out")
+
         wait_done_event.set()
 
         # Fetch user's channels with a single lightweight query
@@ -153,10 +178,6 @@ async def _monitor_qr(session_id: str, qr_login, client: TelegramClient, session
                 "channels": channels,
                 "default_channel_id": default_channel_id
             })
-    except SessionPasswordNeededError:
-        wait_done_event.set()
-        if session_id in _active_qr_sessions:
-            _active_qr_sessions[session_id]["status"] = "2fa_required"
     except Exception as e:
         wait_done_event.set()
         logger.info(f"QR login session {session_id} expired or cancelled: {e}")
@@ -187,6 +208,18 @@ async def start_qr_login():
 
     session_id = str(uuid.uuid4())
     session_file = str(settings.DATA_DIR / "vayom_user")
+
+    # If new session, pre-set DC 5 to match India/Asia infrastructure and avoid DC migration
+    session_path = settings.DATA_DIR / "vayom_user.session"
+    if not session_path.exists():
+        try:
+            from telethon.sessions import SQLiteSession
+            s = SQLiteSession(session_file)
+            s.set_dc(5, "91.108.56.164", 443)
+            s.save()
+            s.close()
+        except Exception as e:
+            logger.warning(f"Could not pre-initialize DC 5: {e}")
 
     client = TelegramClient(
         session_file,

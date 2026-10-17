@@ -1,4 +1,5 @@
 import os
+import time
 import asyncio
 import json
 import logging
@@ -16,6 +17,24 @@ class TelegramStorageClient:
         self._is_connected = False
         self._lock = asyncio.Lock()
         self._media_cache: dict[tuple[str, int], Any] = {}
+        self._flood_wait_until: float = 0.0
+
+    def set_flood_wait(self, seconds: int):
+        """Sets or extends the flood wait period in seconds."""
+        self._flood_wait_until = max(self._flood_wait_until, time.time() + seconds)
+
+    @property
+    def flood_wait_seconds(self) -> int:
+        """Returns the remaining flood wait duration in seconds, or 0 if not waiting."""
+        remaining = self._flood_wait_until - time.time()
+        return max(0, int(remaining))
+
+    @property
+    def online_status(self) -> str:
+        """Returns current connectivity status: 'flood_wait', 'online', or 'reconnecting'."""
+        if self.flood_wait_seconds > 0:
+            return "flood_wait"
+        return "online" if self._is_connected else "reconnecting"
 
     async def connect(self):
         """Initializes and authenticates the Telethon client (User MTProto or Bot MTProto)."""
@@ -65,6 +84,7 @@ class TelegramStorageClient:
                 self.client = None
             self._is_connected = False
             self._media_cache.clear()
+            self._flood_wait_until = 0.0
             logger.info("Disconnected from Telegram MTProto.")
 
     async def reconnect(self):
@@ -120,6 +140,7 @@ class TelegramStorageClient:
                     "access_hash": str(doc.access_hash) if doc else None
                 }
             except FloodWaitError as e:
+                self.set_flood_wait(e.seconds)
                 logger.warning(f"Telegram FloodWait encountered: sleeping for {e.seconds}s...")
                 await asyncio.sleep(e.seconds + 1)
             except Exception as e:
@@ -188,11 +209,125 @@ class TelegramStorageClient:
             yield chunk
             bytes_sent += len(chunk)
 
+    async def get_pinned_catalog(self) -> Optional[dict]:
+        """
+        Retrieves the pinned master catalog (index.json) directly from the storage channel.
+        Provides sub-second boot initialization without traversing individual message captions.
+        """
+        # 1. Offline mock mode handling
+        if not self._is_connected or not self.client:
+            mock_dir = settings.DATA_DIR / "mock_blobs"
+            cat_file = mock_dir / "pinned_catalog.json"
+            if cat_file.exists():
+                try:
+                    return json.loads(cat_file.read_text(encoding="utf-8"))
+                except Exception as e:
+                    logger.warning(f"Failed to read mock pinned catalog: {e}")
+            return None
+
+        # 2. Live Telegram MTProto
+        try:
+            from telethon.tl.functions.channels import GetFullChannelRequest
+            channel = int(settings.TELEGRAM_CHANNEL_ID)
+            full_channel = await self.client(GetFullChannelRequest(channel))
+            pinned_id = getattr(full_channel.full_chat, "pinned_msg_id", None)
+            if not pinned_id:
+                logger.info("No pinned message found in channel.")
+                return None
+
+            message = await self.client.get_messages(channel, ids=pinned_id)
+            if not message:
+                return None
+
+            # Case A: Document attachment (index.json)
+            if message.media and getattr(message.media, "document", None):
+                raw_bytes = await self.client.download_media(message, bytes)
+                if raw_bytes:
+                    return json.loads(raw_bytes.decode("utf-8"))
+
+            # Case B: Message caption / text
+            text = message.text or message.message or ""
+            if text.startswith("VAYOM:CATALOG:v1:"):
+                return json.loads(text[len("VAYOM:CATALOG:v1:"):])
+            elif text.startswith("{") and text.endswith("}"):
+                return json.loads(text)
+
+            return None
+        except FloodWaitError as e:
+            self.set_flood_wait(e.seconds)
+            logger.warning(f"FloodWait when reading pinned catalog: sleeping {e.seconds}s")
+            return None
+        except Exception as e:
+            logger.error(f"Error fetching pinned master catalog: {e}")
+            return None
+
+    async def save_and_pin_catalog(self, catalog_data: dict, old_pinned_id: Optional[int] = None) -> int:
+        """
+        Saves and pins the compacted master catalog (index.json) to the private channel WAL.
+        Rotates out and deletes previous pinned catalog message to prevent channel bloat.
+        Returns the new pinned message ID.
+        """
+        # 1. Offline mock mode handling
+        if not self._is_connected or not self.client:
+            mock_dir = settings.DATA_DIR / "mock_blobs"
+            mock_dir.mkdir(parents=True, exist_ok=True)
+            cat_file = mock_dir / "pinned_catalog.json"
+            cat_file.write_text(json.dumps(catalog_data, indent=2), encoding="utf-8")
+            logger.info("Saved mock pinned catalog index.json")
+            return 999999
+
+        channel = int(settings.TELEGRAM_CHANNEL_ID)
+        temp_catalog = settings.DATA_DIR / "index.json"
+        try:
+            # Serialize compacted JSON
+            temp_catalog.write_text(json.dumps(catalog_data, separators=(",", ":")), encoding="utf-8")
+            summary = {
+                "version": "1.0",
+                "updated_at": catalog_data.get("updated_at", ""),
+                "total_files": catalog_data.get("total_files", len(catalog_data.get("files", []))),
+                "total_bytes": catalog_data.get("total_bytes", 0)
+            }
+            caption = f"VAYOM:CATALOG:v1:{json.dumps(summary)}"
+
+            # Upload index.json as document
+            msg = await self.client.send_file(
+                channel,
+                str(temp_catalog),
+                caption=caption,
+                force_document=True
+            )
+
+            # Pin the new catalog message silently (notify=False)
+            await self.client.pin_message(channel, msg.id, notify=False)
+            logger.info(f"Pinned new master catalog message {msg.id}")
+
+            # Delete old pinned catalog message if specified
+            if old_pinned_id and old_pinned_id != msg.id:
+                try:
+                    await self.client.delete_messages(channel, [old_pinned_id])
+                except Exception as err:
+                    logger.warning(f"Could not delete old pinned catalog message {old_pinned_id}: {err}")
+
+            return msg.id
+        except FloodWaitError as e:
+            self.set_flood_wait(e.seconds)
+            logger.warning(f"FloodWait when saving pinned catalog: sleeping {e.seconds}s")
+            raise
+        except Exception as e:
+            logger.error(f"Error pinning master catalog: {e}")
+            raise
+        finally:
+            if temp_catalog.exists():
+                try:
+                    temp_catalog.unlink()
+                except Exception:
+                    pass
+
     async def scan_channel_envelopes(self, limit: int = 2000) -> list[dict]:
         """
         Scans channel message history backward from HEAD.
         Extracts VAYOM:v1: JSON envelopes from captions for zero-loss recovery.
-        Uses ephemeral probe message to identify channel HEAD, then fetches by ID chunks.
+        Recognizes alphanumeric continuous IDs (e.g. v_...) and legacy UUIDs.
         """
         if not self._is_connected or not self.client:
             mock_dir = settings.DATA_DIR / "mock_blobs"
@@ -237,6 +372,9 @@ class TelegramStorageClient:
                     if not message:
                         continue
                     text = message.text or message.message or ""
+                    # Ignore catalog envelopes and system probe messages
+                    if text.startswith("VAYOM:CATALOG:v1:") or text.startswith("VAYOM:DISASTER_RECOVERY"):
+                        continue
                     if text.startswith("VAYOM:v1:"):
                         try:
                             payload = text[len("VAYOM:v1:"):]
@@ -306,6 +444,7 @@ class TelegramStorageClient:
                 await self.client.delete_messages(channel, batch)
                 deleted_count += len(batch)
             except FloodWaitError as e:
+                self.set_flood_wait(e.seconds)
                 logger.warning(f"Telegram FloodWait during delete: sleeping {e.seconds}s")
                 await asyncio.sleep(e.seconds + 1)
                 try:

@@ -18,6 +18,9 @@ CREATE TABLE IF NOT EXISTS files (
     latitude REAL,
     longitude REAL,
     duration_seconds REAL,                     -- Video duration in seconds
+    upload_status TEXT NOT NULL DEFAULT 'completed', -- 'completed', 'interrupted', 'uploading'
+    nonce TEXT,                                -- Fresh 8-byte hex nonce for AES-CTR encryption
+    encryption TEXT NOT NULL DEFAULT 'none',    -- 'none', 'ctr', 'gcm'
     is_deleted INTEGER NOT NULL DEFAULT 0,     -- Soft delete
     deleted_at TIMESTAMP,                      -- Moved to trash timestamp
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -27,6 +30,7 @@ CREATE TABLE IF NOT EXISTS files (
 CREATE INDEX IF NOT EXISTS idx_files_created ON files(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_files_category ON files(file_category);
 CREATE INDEX IF NOT EXISTS idx_files_deleted ON files(is_deleted);
+CREATE INDEX IF NOT EXISTS idx_files_status ON files(upload_status);
 CREATE INDEX IF NOT EXISTS idx_files_sha ON files(sha256);
 
 -- Extent / Pointer-Offset Parts Table

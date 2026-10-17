@@ -142,7 +142,7 @@ export const GalleryView: React.FC = () => {
             </button>
           ) : (
             <button
-              onClick={selectAll}
+              onClick={() => selectAll(displayItems.map((item) => item.id))}
               className="text-[11px] text-[#999999] hover:text-[#ffffff] px-2 py-1 border border-[#282828] hover:border-[#444444] hidden sm:inline-block"
             >
               Select All

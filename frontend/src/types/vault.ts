@@ -87,6 +87,7 @@ export interface ShareLinkItem {
 export interface StorageMetrics {
   total_bytes: number
   total_files: number
+  total_parts?: number
   channel_id: string
   telegram_messages: number
   online_status: 'online' | 'flood_wait' | 'reconnecting'

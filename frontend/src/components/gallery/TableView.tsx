@@ -13,7 +13,6 @@ import {
   ArrowDown, 
   Star, 
   Download, 
-  Share2,
   Music,
   FileText,
   Film,
@@ -38,7 +37,7 @@ export const TableView: React.FC<TableViewProps> = ({
   onOpenLightbox,
   onMoveToTrash,
 }) => {
-  const { starredIds, toggleStar, openShareModal, setActiveAudioItem } = useVaultStore()
+  const { starredIds, toggleStar, setActiveAudioItem } = useVaultStore()
   const [copiedSha, setCopiedSha] = useState<string | null>(null)
   const [sortField, setSortField] = useState<SortField>('created_at')
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc')
@@ -241,13 +240,6 @@ export const TableView: React.FC<TableViewProps> = ({
                     >
                       <Download size={13} />
                     </a>
-                    <button
-                      onClick={() => openShareModal(item)}
-                      className="p-1 text-[#888888] hover:text-[#ffffff] border border-transparent hover:border-[#333333] hidden sm:inline-block"
-                      title="Share Link"
-                    >
-                      <Share2 size={13} />
-                    </button>
                     <button
                       onClick={() => onMoveToTrash([item.id])}
                       className="p-1 text-[#888888] hover:text-[#ef4444] border border-transparent hover:border-[#441111]"

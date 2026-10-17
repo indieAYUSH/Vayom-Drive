@@ -7,13 +7,14 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional, List
 from pydantic import BaseModel
-from fastapi import APIRouter, UploadFile, File, Form, Header, HTTPException, Query, Response, status
+from fastapi import APIRouter, UploadFile, File, Form, Header, HTTPException, Query, Response, Request, status
 from fastapi.responses import StreamingResponse, FileResponse
 from ..config import settings
 from ..db.connection import get_db
 from ..storage.client import storage_client
 from ..compression.splitter import split_file_if_needed, calculate_sha256
 from ..index.metadata import detect_file_category, generate_webp_thumbnail, extract_image_exif
+from ..streaming.engine import streaming_engine, parse_and_clamp_range, DEFAULT_MAX_206_BYTES
 
 router = APIRouter(prefix="/api/v1")
 
@@ -110,16 +111,32 @@ async def get_metrics():
         cursor = await db.execute("SELECT COUNT(*), COALESCE(SUM(size_bytes), 0) FROM files WHERE is_deleted = 0")
         total_files, total_bytes = await cursor.fetchone()
 
-        cursor = await db.execute("SELECT COUNT(*) FROM file_parts")
-        total_parts = (await cursor.fetchone())[0]
+        cursor = await db.execute(
+            """
+            SELECT
+                COUNT(DISTINCT fp.telegram_message_id),
+                COUNT(fp.id)
+            FROM file_parts fp
+            JOIN files f ON fp.file_id = f.id
+            WHERE f.is_deleted = 0
+            """
+        )
+        telegram_messages, total_parts = await cursor.fetchone()
 
-    return {
+    status_str = storage_client.online_status
+    wait_secs = storage_client.flood_wait_seconds
+
+    metrics_res = {
         "total_files": total_files,
         "total_bytes": total_bytes,
+        "total_parts": total_parts,
         "channel_id": settings.TELEGRAM_CHANNEL_ID or "NOT_CONFIGURED",
-        "telegram_messages": total_parts,
-        "online_status": "online" if storage_client._is_connected else "reconnecting"
+        "telegram_messages": telegram_messages,
+        "online_status": status_str,
     }
+    if wait_secs > 0:
+        metrics_res["flood_wait_seconds"] = wait_secs
+    return metrics_res
 
 
 # --- Files Endpoints ---
@@ -204,12 +221,15 @@ async def list_files(
             f_dict["is_lossy_video"] = bool(f_dict.get("is_lossy_video"))
             f_dict["is_deleted"] = bool(f_dict.get("is_deleted"))
 
-            if f_dict.get("has_thumbnail"):
+            if f_dict.get("has_thumbnail") and not f_dict.get("is_deleted"):
                 f_dict["thumbnail_url"] = f"/api/v1/files/{file_id}/thumbnail"
             else:
                 f_dict["thumbnail_url"] = None
 
-            f_dict["preview_url"] = f"/api/v1/files/{file_id}/download"
+            if not f_dict.get("is_deleted"):
+                f_dict["preview_url"] = f"/api/v1/files/{file_id}/download"
+            else:
+                f_dict["preview_url"] = None
 
             if f_dict.get("exif_json"):
                 try:
@@ -239,7 +259,8 @@ async def upload_file(
     file_id = str(uuid.uuid4())
     temp_dir = settings.UPLOAD_TEMP_DIR / file_id
     temp_dir.mkdir(parents=True, exist_ok=True)
-    target_path = temp_dir / file.filename
+    safe_filename = Path(file.filename).name or f"{file_id}_upload"
+    target_path = temp_dir / safe_filename
 
     # 1. Stream incoming upload to temporary disk
     async with aiofiles.open(target_path, "wb") as out_file:
@@ -347,6 +368,12 @@ async def upload_file(
 @router.api_route("/files/{file_id}/thumbnail", methods=["GET", "HEAD"])
 async def get_thumbnail(file_id: str):
     """Serves the ultra-compact WebP thumbnail preview."""
+    async with get_db() as db:
+        cursor = await db.execute("SELECT is_deleted FROM files WHERE id = ?", (file_id,))
+        file_row = await cursor.fetchone()
+        if not file_row or file_row["is_deleted"]:
+            raise HTTPException(status_code=404, detail="Thumbnail not found")
+
     thumb = settings.THUMBNAIL_DIR / f"{file_id}.webp"
     if thumb.exists():
         return FileResponse(thumb, media_type="image/webp")
@@ -356,6 +383,7 @@ async def get_thumbnail(file_id: str):
 @router.api_route("/files/{file_id}/download", methods=["GET", "HEAD"])
 async def download_file(
     file_id: str,
+    request: Request,
     range_header: Optional[str] = Header(None, alias="Range")
 ):
     """
@@ -363,7 +391,7 @@ async def download_file(
     Enables instant seeking in 4K videos without downloading the full file!
     """
     async with get_db() as db:
-        cursor = await db.execute("SELECT * FROM files WHERE id = ?", (file_id,))
+        cursor = await db.execute("SELECT * FROM files WHERE id = ? AND is_deleted = 0", (file_id,))
         file_row = await cursor.fetchone()
         if not file_row:
             raise HTTPException(status_code=404, detail="File not found")
@@ -378,53 +406,37 @@ async def download_file(
     total_size = file_item["size_bytes"]
     filename = file_item["filename"]
 
-    # Parse Range Header if present
-    start_byte = 0
-    end_byte = total_size - 1
+    # Parse and clamp range according to update.md invariants
+    range_spec = parse_and_clamp_range(range_header, total_size, max_chunk_bytes=DEFAULT_MAX_206_BYTES)
 
-    if range_header and range_header.startswith("bytes="):
-        range_val = range_header[len("bytes="):].strip()
-        parts_range = range_val.split("-")
-        if parts_range[0]:
-            start_byte = int(parts_range[0])
-        if len(parts_range) > 1 and parts_range[1]:
-            end_byte = min(total_size - 1, int(parts_range[1]))
-
-    content_length = end_byte - start_byte + 1
-
-    async def multi_part_stream():
-        """Iterates over all parts intersecting [start_byte, end_byte] and streams contiguous bytes."""
-        for p in parts:
-            p_start = p["byte_offset"]
-            p_end = p_start + p["part_size_bytes"] - 1
-            if p_end < start_byte or p_start > end_byte:
-                continue
-
-            slice_start = max(0, start_byte - p_start)
-            slice_end = min(p["part_size_bytes"] - 1, end_byte - p_start)
-            slice_len = slice_end - slice_start + 1
-
-            async for chunk in storage_client.stream_part_bytes(
-                message_id=p["telegram_message_id"],
-                channel_id=p.get("telegram_channel_id"),
-                file_id=p.get("telegram_file_id"),
-                access_hash=p.get("telegram_access_hash"),
-                offset=slice_start,
-                limit=slice_len
-            ):
-                yield chunk
+    if not range_spec.is_satisfiable:
+        headers = {
+            "Content-Range": range_spec.content_range_header,
+            "Accept-Ranges": "bytes"
+        }
+        return Response(status_code=status.HTTP_416_RANGE_NOT_SATISFIABLE, headers=headers)
 
     headers = {
         "Accept-Ranges": "bytes",
-        "Content-Length": str(content_length),
+        "Content-Length": str(range_spec.content_length),
         "Content-Disposition": f'inline; filename="{filename}"'
     }
-    if range_header:
-        headers["Content-Range"] = f"bytes {start_byte}-{end_byte}/{total_size}"
+    if range_spec.is_range:
+        headers["Content-Range"] = range_spec.content_range_header
+        status_code = status.HTTP_206_PARTIAL_CONTENT
+    else:
+        status_code = status.HTTP_200_OK
 
-    status_code = status.HTTP_206_PARTIAL_CONTENT if range_header else status.HTTP_200_OK
+    if request.method == "HEAD":
+        return Response(status_code=status_code, headers=headers, media_type=file_item["mime_type"])
+
     return StreamingResponse(
-        multi_part_stream(),
+        streaming_engine.stream_range(
+            parts=parts,
+            total_size=total_size,
+            range_spec=range_spec,
+            storage_client=storage_client
+        ),
         status_code=status_code,
         headers=headers,
         media_type=file_item["mime_type"]
@@ -435,6 +447,10 @@ async def download_file(
 async def delete_file(file_id: str, purge: bool = False):
     """Soft deletes file to 30-day trash, or purges permanently from disk and Telegram."""
     async with get_db() as db:
+        cur = await db.execute("SELECT id FROM files WHERE id = ?", (file_id,))
+        if not await cur.fetchone():
+            raise HTTPException(status_code=404, detail="File not found")
+
         if purge:
             # 1. Fetch parts before cascade deletion deletes them from file_parts
             p_cur = await db.execute(
@@ -469,6 +485,9 @@ async def delete_file(file_id: str, purge: bool = False):
 async def restore_file(file_id: str):
     """Restores soft-deleted file from trash."""
     async with get_db() as db:
+        cur = await db.execute("SELECT id FROM files WHERE id = ?", (file_id,))
+        if not await cur.fetchone():
+            raise HTTPException(status_code=404, detail="File not found")
         await db.execute(
             "UPDATE files SET is_deleted = 0, deleted_at = NULL WHERE id = ?",
             (file_id,)
@@ -635,6 +654,9 @@ async def create_album(body: CreateAlbumRequest):
 async def delete_album(album_id: str):
     """Deletes an album collection (does not delete underlying files)."""
     async with get_db() as db:
+        cur = await db.execute("SELECT id FROM albums WHERE id = ?", (album_id,))
+        if not await cur.fetchone():
+            raise HTTPException(status_code=404, detail="Album not found")
         await db.execute("DELETE FROM albums WHERE id = ?", (album_id,))
         await db.commit()
     return {"success": True}
@@ -724,13 +746,20 @@ async def create_share_link(body: CreateShareRequest):
 async def revoke_share_link(share_id: str):
     """Revokes a share link immediately."""
     async with get_db() as db:
+        cur = await db.execute("SELECT id FROM share_links WHERE id = ?", (share_id,))
+        if not await cur.fetchone():
+            raise HTTPException(status_code=404, detail="Share link not found")
         await db.execute("UPDATE share_links SET is_revoked = 1 WHERE id = ?", (share_id,))
         await db.commit()
     return {"success": True}
 
 
 @router.get("/s/{token}")
-async def access_shared_file(token: str, range_header: Optional[str] = Header(None, alias="Range")):
+async def access_shared_file(
+    token: str,
+    request: Request,
+    range_header: Optional[str] = Header(None, alias="Range")
+):
     """Public streaming download endpoint for a valid share link."""
     async with get_db() as db:
         cursor = await db.execute(
@@ -738,7 +767,7 @@ async def access_shared_file(token: str, range_header: Optional[str] = Header(No
             SELECT s.*, f.filename, f.mime_type, f.size_bytes
             FROM share_links s
             JOIN files f ON s.file_id = f.id
-            WHERE s.token = ? AND s.is_revoked = 0
+            WHERE s.token = ? AND s.is_revoked = 0 AND f.is_deleted = 0
             """,
             (token,)
         )
@@ -754,7 +783,7 @@ async def access_shared_file(token: str, range_header: Optional[str] = Header(No
         await db.execute("UPDATE share_links SET view_count = view_count + 1 WHERE id = ?", (s_dict["id"],))
         await db.commit()
 
-    return await download_file(file_id=s_dict["file_id"], range_header=range_header)
+    return await download_file(file_id=s_dict["file_id"], request=request, range_header=range_header)
 
 
 # --- Disaster Recovery ---
