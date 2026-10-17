@@ -43,6 +43,7 @@ class Settings:
     AUTH_MODE: str = ""                         # 'qr', 'bot', 'developer'
     USER_PROFILE: dict = {}                     # {'first_name', 'username', 'id', 'is_premium'}
     SESSION_NAME: str = "vayom_bot"
+    QR_SESSION_TTL_SECONDS: int = int(os.getenv("QR_SESSION_TTL_SECONDS", "300"))  # 5 minutes expiry
 
     def ensure_directories(self):
         self.DATA_DIR.mkdir(parents=True, exist_ok=True)

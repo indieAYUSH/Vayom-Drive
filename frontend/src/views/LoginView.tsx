@@ -43,8 +43,14 @@ export const LoginView: React.FC = () => {
   const [devChannelId, setDevChannelId] = useState('')
   const [devDisplayName, setDevDisplayName] = useState('')
 
-  // Countdown timer for QR
+  // Countdown timer for QR (5 minutes = 300s)
   const [timeLeft, setTimeLeft] = useState<number>(0)
+
+  const formatTime = (seconds: number) => {
+    const mins = Math.floor(seconds / 60)
+    const secs = seconds % 60
+    return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`
+  }
 
   useEffect(() => {
     if (activeTab === 'qr' && qrStatus === 'idle') {
@@ -58,14 +64,11 @@ export const LoginView: React.FC = () => {
       const now = Math.floor(Date.now() / 1000)
       const diff = Math.max(0, qrExpiresAt - now)
       setTimeLeft(diff)
-      if (diff === 0 && qrStatus === 'waiting') {
-        // Expired
-      }
     }
     updateCountdown()
     const timer = setInterval(updateCountdown, 1000)
     return () => clearInterval(timer)
-  }, [qrExpiresAt, qrStatus])
+  }, [qrExpiresAt])
 
   useEffect(() => {
     if (scannedUser) {
@@ -196,25 +199,39 @@ export const LoginView: React.FC = () => {
                 <Badge variant="success">RECOMMENDED</Badge>
               </div>
 
-              {/* State: Awaiting Scan */}
-              {(qrStatus === 'waiting' || qrStatus === 'idle') && (
+              {/* State: Awaiting Scan or Expired */}
+              {(qrStatus === 'waiting' || qrStatus === 'idle' || qrStatus === 'expired') && (
                 <div className="flex flex-col sm:flex-row items-center gap-6">
                   {/* QR Box */}
                   <div className="w-52 h-52 bg-[#000000] border-2 border-[#333333] p-3 flex flex-col items-center justify-center relative flex-shrink-0">
-                    {qrUrl ? (
-                      <QRCodeSVG
-                        value={qrUrl}
-                        size={180}
-                        bgColor="#000000"
-                        fgColor="#ffffff"
-                        level="M"
-                      />
+                    {qrStatus === 'expired' || (qrStatus === 'waiting' && timeLeft === 0) ? (
+                      <div className="w-full h-full bg-[#0d0d0d] p-3 flex flex-col items-center justify-center text-center space-y-2.5">
+                        <div className="w-7 h-7 rounded-full bg-[#1f0a0a] border border-[#ef4444] flex items-center justify-center text-[#ef4444]">
+                          <AlertTriangle size={14} />
+                        </div>
+                        <div>
+                          <div className="text-[11px] font-bold text-[#ef4444] uppercase tracking-wider">Session Expired</div>
+                          <div className="text-[10px] text-[#777777] mt-0.5">5-minute window ended</div>
+                        </div>
+                        <Button variant="secondary" size="sm" onClick={startQrSession} className="w-full text-[10px] py-1 flex items-center justify-center gap-1">
+                          <RefreshCw size={11} /> New QR Code
+                        </Button>
+                      </div>
+                    ) : qrUrl ? (
+                      <>
+                        <QRCodeSVG
+                          value={qrUrl}
+                          size={180}
+                          bgColor="#000000"
+                          fgColor="#ffffff"
+                          level="M"
+                        />
+                        {/* Scanline overlay effect */}
+                        <div className="absolute inset-0 border border-[#22c55e] opacity-30 pointer-events-none" />
+                      </>
                     ) : (
                       <div className="text-xs text-[#555555] animate-pulse">Generating QR...</div>
                     )}
-
-                    {/* Scanline overlay effect */}
-                    <div className="absolute inset-0 border border-[#22c55e] opacity-30 pointer-events-none" />
                   </div>
 
                   {/* Step Instructions */}
@@ -230,7 +247,10 @@ export const LoginView: React.FC = () => {
                     </ol>
 
                     <div className="pt-2 flex items-center justify-between text-[11px] text-[#666666] border-t border-[#1c1c1c]">
-                      <span>Expires in: <strong className="text-[#ffffff]">{timeLeft}s</strong></span>
+                      <div className="flex items-center gap-1.5">
+                        <span className={`w-1.5 h-1.5 rounded-full ${timeLeft > 0 && qrStatus !== 'expired' ? 'bg-[#22c55e] animate-pulse' : 'bg-[#ef4444]'}`} />
+                        <span>Expires in: <strong className="text-[#ffffff] font-bold tracking-wider">{formatTime(timeLeft)}</strong></span>
+                      </div>
                       <button
                         onClick={startQrSession}
                         className="text-[#22c55e] hover:underline flex items-center gap-1 font-mono text-[11px]"

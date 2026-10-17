@@ -1,5 +1,7 @@
 import asyncio
+import datetime
 import logging
+import time
 import uuid
 from typing import Optional, List, Dict, Any
 from pydantic import BaseModel
@@ -25,6 +27,8 @@ class QRStartResponse(BaseModel):
 
 class QRPollResponse(BaseModel):
     status: str  # 'waiting', 'confirmed', '2fa_required', 'expired'
+    url: Optional[str] = None
+    expires_at: Optional[int] = None
     user: Optional[Dict[str, Any]] = None
     channels: Optional[List[Dict[str, Any]]] = None
     default_channel_id: Optional[str] = None
@@ -70,10 +74,54 @@ async def get_auth_status():
     }
 
 
-async def _monitor_qr(session_id: str, qr_login, client: TelegramClient):
-    """Background coroutine to await user QR scan confirmation or 2FA challenge."""
+async def _auto_refresh_tokens(session_id: str, qr_login, session_end_time: float, wait_done_event: asyncio.Event):
+    """Background coroutine to refresh MTProto token before it expires, keeping QR valid for full session."""
+    while time.time() < session_end_time and not wait_done_event.is_set():
+        session = _active_qr_sessions.get(session_id)
+        if not session or session.get("status") != "waiting":
+            break
+
+        # Calculate time until current Telegram MTProto token expires (~25-30s from server)
+        expires = qr_login.expires
+        now = datetime.datetime.now(datetime.timezone.utc)
+        if isinstance(expires, datetime.datetime):
+            time_to_expiry = (expires - now).total_seconds()
+        else:
+            time_to_expiry = 25.0
+
+        # Sleep until ~3 seconds before individual token expiry
+        sleep_duration = max(2.0, time_to_expiry - 3.0)
+        try:
+            await asyncio.wait_for(wait_done_event.wait(), timeout=sleep_duration)
+            break
+        except asyncio.TimeoutError:
+            pass
+
+        if time.time() >= session_end_time or wait_done_event.is_set():
+            break
+
+        try:
+            await qr_login.recreate()
+            if session_id in _active_qr_sessions:
+                _active_qr_sessions[session_id]["url"] = qr_login.url
+                logger.info(f"Telegram MTProto QR token refreshed for session {session_id}")
+        except Exception as e:
+            logger.warning(f"Error recreating QR token for {session_id}: {e}")
+            await asyncio.sleep(3.0)
+
+
+async def _monitor_qr(session_id: str, qr_login, client: TelegramClient, session_end_time: float):
+    """Background coroutine to await user QR scan confirmation, handle 2FA, and maintain long session."""
+    wait_done_event = asyncio.Event()
+    refresh_task = asyncio.create_task(
+        _auto_refresh_tokens(session_id, qr_login, session_end_time, wait_done_event)
+    )
+
     try:
-        user = await qr_login.wait(timeout=180)
+        timeout = max(1.0, session_end_time - time.time())
+        user = await qr_login.wait(timeout=timeout)
+        wait_done_event.set()
+
         # Fetch user's channels with a single lightweight query
         channels = []
         default_channel_id = None
@@ -92,28 +140,51 @@ async def _monitor_qr(session_id: str, qr_login, client: TelegramClient):
         except Exception as e:
             logger.warning(f"Fast channel check on QR login encountered: {e}")
 
-        _active_qr_sessions[session_id].update({
-            "status": "confirmed",
-            "user": {
-                "id": user.id,
-                "first_name": user.first_name or "",
-                "last_name": user.last_name or "",
-                "username": user.username or "",
-                "is_premium": getattr(user, "premium", False)
-            },
-            "channels": channels,
-            "default_channel_id": default_channel_id
-        })
+        if session_id in _active_qr_sessions:
+            _active_qr_sessions[session_id].update({
+                "status": "confirmed",
+                "user": {
+                    "id": user.id,
+                    "first_name": user.first_name or "",
+                    "last_name": user.last_name or "",
+                    "username": user.username or "",
+                    "is_premium": getattr(user, "premium", False)
+                },
+                "channels": channels,
+                "default_channel_id": default_channel_id
+            })
     except SessionPasswordNeededError:
-        _active_qr_sessions[session_id]["status"] = "2fa_required"
+        wait_done_event.set()
+        if session_id in _active_qr_sessions:
+            _active_qr_sessions[session_id]["status"] = "2fa_required"
     except Exception as e:
+        wait_done_event.set()
         logger.info(f"QR login session {session_id} expired or cancelled: {e}")
-        _active_qr_sessions[session_id]["status"] = "expired"
+        if session_id in _active_qr_sessions:
+            _active_qr_sessions[session_id]["status"] = "expired"
+    finally:
+        wait_done_event.set()
+        if not refresh_task.done():
+            refresh_task.cancel()
 
 
 @router.post("/qr/start", response_model=QRStartResponse)
 async def start_qr_login():
-    """Initializes Telethon user MTProto client and returns dynamic tg://login?token= URI."""
+    """Initializes Telethon user MTProto client and returns dynamic tg://login?token= URI with extended session."""
+    # Clean up previous pending sessions to avoid connection leaks
+    for old_id, old_sess in list(_active_qr_sessions.items()):
+        if old_sess.get("status") in ("waiting", "expired"):
+            try:
+                mon_task = old_sess.get("monitor_task")
+                if mon_task and not mon_task.done():
+                    mon_task.cancel()
+                old_client = old_sess.get("client")
+                if old_client and old_client.is_connected():
+                    asyncio.create_task(old_client.disconnect())
+            except Exception:
+                pass
+            _active_qr_sessions.pop(old_id, None)
+
     session_id = str(uuid.uuid4())
     session_file = str(settings.DATA_DIR / "vayom_user")
 
@@ -126,21 +197,26 @@ async def start_qr_login():
 
     qr_login = await client.qr_login()
 
+    session_expires_at = int(time.time()) + settings.QR_SESSION_TTL_SECONDS
+
     _active_qr_sessions[session_id] = {
         "client": client,
         "qr": qr_login,
+        "url": qr_login.url,
+        "session_expires_at": session_expires_at,
         "status": "waiting",
         "user": None,
         "channels": None,
         "default_channel_id": None
     }
 
-    asyncio.create_task(_monitor_qr(session_id, qr_login, client))
+    mon_task = asyncio.create_task(_monitor_qr(session_id, qr_login, client, float(session_expires_at)))
+    _active_qr_sessions[session_id]["monitor_task"] = mon_task
 
     return {
         "session_id": session_id,
         "url": qr_login.url,
-        "expires_at": int(qr_login.expires.timestamp()) if hasattr(qr_login.expires, "timestamp") else int(qr_login.expires)
+        "expires_at": session_expires_at
     }
 
 
@@ -151,8 +227,14 @@ async def poll_qr_login(session_id: str):
     if not session:
         raise HTTPException(status_code=404, detail="QR session not found or expired")
 
+    # If past total session expiry and still waiting, mark expired
+    if session["status"] == "waiting" and time.time() >= session.get("session_expires_at", 0):
+        session["status"] = "expired"
+
     return {
         "status": session["status"],
+        "url": session.get("url"),
+        "expires_at": session.get("session_expires_at"),
         "user": session.get("user"),
         "channels": session.get("channels"),
         "default_channel_id": session.get("default_channel_id")

@@ -142,6 +142,18 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       } else if (data.status === 'expired') {
         if (pollInterval) clearInterval(pollInterval)
         set({ qrStatus: 'expired' })
+      } else if (data.status === 'waiting') {
+        // Token seamlessly auto-refreshed by backend
+        const updates: any = {}
+        if (data.url && data.url !== get().qrUrl) {
+          updates.qrUrl = data.url
+        }
+        if (data.expires_at && data.expires_at !== get().qrExpiresAt) {
+          updates.qrExpiresAt = data.expires_at
+        }
+        if (Object.keys(updates).length > 0) {
+          set(updates)
+        }
       }
     } catch (err) {
       // transient network error, keep polling
