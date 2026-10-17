@@ -11,7 +11,7 @@ export const MobileNav: React.FC = () => {
   `
 
   return (
-    <nav className="md:hidden fixed bottom-0 left-0 right-0 h-14 bg-[#080808] border-t border-[#282828] flex items-center justify-around z-40 select-none">
+    <nav className="md:hidden fixed bottom-0 left-0 right-0 h-[calc(3.5rem+env(safe-area-inset-bottom))] pb-[env(safe-area-inset-bottom)] bg-[#080808] border-t border-[#282828] flex items-center justify-around z-40 select-none">
       <div 
         onClick={() => setActiveTab('all')} 
         className={navItemClass(activeTab === 'all')}

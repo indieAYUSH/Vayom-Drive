@@ -58,13 +58,23 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({ src, poster }) => {
     }
   }
 
-  const handleSeek = (e: React.MouseEvent<HTMLDivElement>) => {
+  const handleSeekPos = (clientX: number) => {
     if (!videoRef.current || !progressRef.current || !duration) return
     const rect = progressRef.current.getBoundingClientRect()
-    const pos = (e.clientX - rect.left) / rect.width
+    const pos = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width))
     const newTime = pos * duration
     videoRef.current.currentTime = newTime
     setCurrentTime(newTime)
+  }
+
+  const handleSeek = (e: React.MouseEvent<HTMLDivElement>) => {
+    handleSeekPos(e.clientX)
+  }
+
+  const handleTouchSeek = (e: React.TouchEvent<HTMLDivElement>) => {
+    if (e.touches.length > 0) {
+      handleSeekPos(e.touches[0].clientX)
+    }
   }
 
   const toggleMute = () => {
@@ -89,23 +99,25 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({ src, poster }) => {
   }
 
   return (
-    <div className="relative w-full h-full flex flex-col items-center justify-center bg-[#000000] group select-none">
+    <div className="relative w-full h-full flex flex-col items-center justify-center bg-[#000000] group select-none p-2 sm:p-4">
       <video
         ref={videoRef}
         src={src}
         poster={poster}
         onClick={togglePlay}
-        className="max-h-[80vh] max-w-full object-contain cursor-pointer"
+        className="max-h-[60vh] sm:max-h-[80vh] max-w-full object-contain cursor-pointer"
         playsInline
       />
 
       {/* Control Overlay Bar */}
-      <div className="w-full max-w-4xl bg-[#0c0c0c] border border-[#222222] p-2 mt-3 font-mono text-xs flex flex-col gap-2">
+      <div className="w-full max-w-4xl bg-[#0c0c0c] border border-[#222222] p-2 mt-2 sm:mt-3 font-mono text-xs flex flex-col gap-2">
         {/* Progress Bar (Range Scrubber) */}
         <div
           ref={progressRef}
           onClick={handleSeek}
-          className="relative h-2 bg-[#1c1c1c] cursor-pointer"
+          onTouchStart={handleTouchSeek}
+          onTouchMove={handleTouchSeek}
+          className="relative h-3 sm:h-2 bg-[#1c1c1c] cursor-pointer touch-none"
         >
           {/* Buffered range (Range requests) */}
           <div

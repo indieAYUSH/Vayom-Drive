@@ -28,7 +28,8 @@ export const VirtualizedGrid: React.FC<VirtualizedGridProps> = ({
       else if (width < 768) setColumns(3)
       else if (width < 1100) setColumns(4)
       else if (width < 1400) setColumns(5)
-      else setColumns(6)
+      else if (width < 1800) setColumns(6)
+      else setColumns(8)
     }
 
     updateColumns()
@@ -48,9 +49,18 @@ export const VirtualizedGrid: React.FC<VirtualizedGridProps> = ({
   const rowVirtualizer = useVirtualizer({
     count: rows.length,
     getScrollElement: () => parentRef.current,
-    estimateSize: () => 280, // estimated height of row
+    estimateSize: React.useCallback(() => {
+      const containerWidth = parentRef.current ? parentRef.current.clientWidth - 32 : 800
+      const colWidth = containerWidth / Math.max(1, columns)
+      return Math.round(colWidth + 70) // aspect-square card + metadata footer
+    }, [columns]),
     overscan: 3,
   })
+
+  // Invalidate measurement cache when column count changes on window resize
+  useEffect(() => {
+    rowVirtualizer.measure()
+  }, [columns, rowVirtualizer])
 
   if (items.length === 0) {
     return (
@@ -81,6 +91,8 @@ export const VirtualizedGrid: React.FC<VirtualizedGridProps> = ({
           return (
             <div
               key={virtualRow.key}
+              ref={rowVirtualizer.measureElement}
+              data-index={virtualRow.index}
               className="grid gap-3 pb-3"
               style={{
                 position: 'absolute',

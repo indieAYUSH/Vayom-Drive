@@ -22,7 +22,7 @@ export const Header: React.FC = () => {
   }
 
   return (
-    <header className="h-14 bg-[#080808] border-b border-[#282828] px-4 flex items-center justify-between select-none z-30 flex-shrink-0">
+    <header className="h-14 bg-[#080808] border-b border-[#282828] px-3 sm:px-4 flex items-center justify-between select-none z-30 flex-shrink-0">
       <input
         type="file"
         ref={fileInputRef}
@@ -32,15 +32,15 @@ export const Header: React.FC = () => {
       />
 
       {/* Brand Mark */}
-      <div className="flex items-center gap-4">
+      <div className="flex items-center gap-2 sm:gap-4 flex-shrink-0">
         <div 
           onClick={() => setActiveTab('all')}
-          className="flex items-center gap-2.5 cursor-pointer group"
+          className="flex items-center gap-2 cursor-pointer group"
         >
-          <div className="w-5 h-5 bg-[#ffffff] flex items-center justify-center">
+          <div className="w-5 h-5 bg-[#ffffff] flex items-center justify-center flex-shrink-0">
             <div className="w-2.5 h-2.5 bg-[#000000]" />
           </div>
-          <span className="font-mono text-sm font-bold tracking-widest text-[#ffffff] uppercase group-hover:text-[#e5e5e5]">
+          <span className="font-mono text-xs sm:text-sm font-bold tracking-widest text-[#ffffff] uppercase group-hover:text-[#e5e5e5] hidden min-[400px]:inline">
             VAYOM DRIVE
           </span>
         </div>
@@ -53,23 +53,23 @@ export const Header: React.FC = () => {
       </div>
 
       {/* Search / Command Trigger */}
-      <div className="flex-1 max-w-lg mx-4">
+      <div className="flex-1 max-w-lg mx-2 sm:mx-4 min-w-0">
         <div
           onClick={() => setCommandBarOpen(true)}
-          className="h-8 bg-[#111111] border border-[#282828] hover:border-[#444444] px-3 flex items-center justify-between text-xs text-[#666666] cursor-pointer transition-colors"
+          className="h-8 bg-[#111111] border border-[#282828] hover:border-[#444444] px-2.5 sm:px-3 flex items-center justify-between text-xs text-[#666666] cursor-pointer transition-colors"
         >
-          <div className="flex items-center gap-2 truncate">
+          <div className="flex items-center gap-2 truncate min-w-0">
             <Search size={13} className="text-[#666666] flex-shrink-0" />
-            <span className="font-mono text-[11px] truncate">Search semantic CLIP, camera, or filename...</span>
+            <span className="font-mono text-[11px] truncate">Search CLIP, camera, filename...</span>
           </div>
-          <kbd className="hidden sm:inline-block font-mono text-[10px] bg-[#1c1c1c] text-[#888888] px-1.5 py-0.5 border border-[#282828]">
+          <kbd className="hidden sm:inline-block font-mono text-[10px] bg-[#1c1c1c] text-[#888888] px-1.5 py-0.5 border border-[#282828] flex-shrink-0">
             ⌘K
           </kbd>
         </div>
       </div>
 
       {/* Action Buttons & Storage Badge */}
-      <div className="flex items-center gap-2.5">
+      <div className="flex items-center gap-1.5 sm:gap-2.5 flex-shrink-0">
         {/* Storage Metric */}
         <div className="hidden md:flex items-center gap-2 px-2.5 py-1 bg-[#111111] border border-[#222222] font-mono text-xs">
           <HardDrive size={13} className="text-[#888888]" />

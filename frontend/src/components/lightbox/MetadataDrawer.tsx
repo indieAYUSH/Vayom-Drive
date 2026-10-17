@@ -1,6 +1,6 @@
 import React from 'react'
 import { FileItem } from '../../types/vault'
-import { Copy, Check, MapPin, Camera, HardDrive, ShieldCheck, Tag } from 'lucide-react'
+import { Copy, Check, MapPin, Camera, HardDrive, ShieldCheck, Tag, X } from 'lucide-react'
 import { Badge } from '../common/Badge'
 
 interface MetadataDrawerProps {
@@ -8,7 +8,7 @@ interface MetadataDrawerProps {
   onClose?: () => void
 }
 
-export const MetadataDrawer: React.FC<MetadataDrawerProps> = ({ item }) => {
+export const MetadataDrawer: React.FC<MetadataDrawerProps> = ({ item, onClose }) => {
   const [copiedSha, setCopiedSha] = React.useState(false)
 
   const copySha = () => {
@@ -25,7 +25,24 @@ export const MetadataDrawer: React.FC<MetadataDrawerProps> = ({ item }) => {
   }
 
   return (
-    <aside className="w-80 sm:w-96 bg-[#0c0c0c] border-l border-[#282828] h-full overflow-y-auto p-4 flex flex-col gap-6 font-mono text-xs select-none flex-shrink-0">
+    <aside className="fixed inset-y-0 right-0 z-30 w-full sm:static sm:w-80 sm:w-96 bg-[#0c0c0c] border-l border-[#282828] h-full overflow-y-auto p-4 flex flex-col gap-5 font-mono text-xs select-none flex-shrink-0 shadow-none">
+      {/* Drawer Header Bar */}
+      <div className="flex items-center justify-between pb-3 border-b border-[#222222]">
+        <div className="text-xs font-semibold uppercase tracking-wider text-[#ffffff] flex items-center gap-2">
+          <HardDrive size={13} />
+          <span>File Inspector</span>
+        </div>
+        {onClose && (
+          <button
+            onClick={onClose}
+            className="p-1 text-[#888888] hover:text-[#ffffff] border border-transparent hover:border-[#333333] transition-colors"
+            title="Close Info (Esc)"
+          >
+            <X size={15} />
+          </button>
+        )}
+      </div>
+
       {/* File Overview */}
       <div className="space-y-2">
         <div className="text-[10px] text-[#555555] uppercase tracking-widest flex items-center gap-1.5">

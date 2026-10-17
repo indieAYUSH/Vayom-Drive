@@ -36,6 +36,62 @@ class BatchFileRequest(BaseModel):
     file_ids: List[str]
 
 
+# --- Disaster Recovery Logic ---
+async def perform_rebuild_index(limit: int = 5000) -> int:
+    """
+    Scans Telegram storage channel messages backward from HEAD, parses
+    VAYOM:v1: caption envelopes, and reconstructs the SQLite files and file_parts catalog.
+    Returns the number of restored envelopes.
+    """
+    envelopes = await storage_client.scan_channel_envelopes(limit=limit)
+    restored_count = 0
+
+    async with get_db() as db:
+        for env in envelopes:
+            file_id = env.get("id")
+            if not file_id:
+                continue
+
+            # Check if file already exists
+            cur = await db.execute("SELECT id FROM files WHERE id = ?", (file_id,))
+            if not await cur.fetchone():
+                await db.execute(
+                    """
+                    INSERT INTO files (id, filename, mime_type, file_category, size_bytes, sha256, is_split, total_parts)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        file_id, env.get("name", "recovered_file"),
+                        env.get("mime", "application/octet-stream"),
+                        env.get("cat", "other"), env.get("size", 0),
+                        env.get("sha256", ""),
+                        1 if env.get("total", 1) > 1 else 0,
+                        env.get("total", 1)
+                    )
+                )
+
+            # Insert part pointer
+            part_id = str(uuid.uuid4())
+            await db.execute(
+                """
+                INSERT OR IGNORE INTO file_parts (
+                    id, file_id, part_index, byte_offset, part_size_bytes, 
+                    part_sha256, telegram_message_id, telegram_channel_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    part_id, file_id, env.get("part", 0), env.get("offset", 0),
+                    env.get("size", 0), env.get("sha256", ""), env.get("telegram_message_id"),
+                    str(settings.TELEGRAM_CHANNEL_ID)
+                )
+            )
+            restored_count += 1
+
+        await db.commit()
+
+    return restored_count
+
+
 # --- Health & Metrics ---
 @router.get("/health")
 async def health_check():
@@ -46,6 +102,11 @@ async def health_check():
 async def get_metrics():
     """Returns storage metrics, channel stats, and online health."""
     async with get_db() as db:
+        # Automatically rebuild index if local SQLite database is empty/fresh
+        cur = await db.execute("SELECT COUNT(*) FROM files")
+        if (await cur.fetchone())[0] == 0 and storage_client._is_connected:
+            await perform_rebuild_index(limit=5000)
+
         cursor = await db.execute("SELECT COUNT(*), COALESCE(SUM(size_bytes), 0) FROM files WHERE is_deleted = 0")
         total_files, total_bytes = await cursor.fetchone()
 
@@ -74,6 +135,11 @@ async def list_files(
 ):
     """Returns filtered, paginated file list with parts, thumbnails, albums, and metadata."""
     async with get_db() as db:
+        # Automatically rebuild index if local SQLite database is empty/fresh
+        cur = await db.execute("SELECT COUNT(*) FROM files")
+        if (await cur.fetchone())[0] == 0 and storage_client._is_connected:
+            await perform_rebuild_index(limit=5000)
+
         query = "SELECT f.* FROM files f"
         joins = []
         where_clauses = ["f.is_deleted = ?"]
@@ -698,50 +764,5 @@ async def rebuild_index_from_channel():
     Disaster Recovery: scans Telegram channel message history,
     parses VAYOM:v1: captions, and reconstructs the full SQLite catalog!
     """
-    envelopes = await storage_client.scan_channel_envelopes(limit=5000)
-    restored_count = 0
-
-    async with get_db() as db:
-        for env in envelopes:
-            file_id = env.get("id")
-            if not file_id:
-                continue
-
-            # Check if file already exists
-            cur = await db.execute("SELECT id FROM files WHERE id = ?", (file_id,))
-            if not await cur.fetchone():
-                await db.execute(
-                    """
-                    INSERT INTO files (id, filename, mime_type, file_category, size_bytes, sha256, is_split, total_parts)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        file_id, env.get("name", "recovered_file"),
-                        env.get("mime", "application/octet-stream"),
-                        env.get("cat", "other"), env.get("size", 0),
-                        env.get("sha256", ""),
-                        1 if env.get("total", 1) > 1 else 0,
-                        env.get("total", 1)
-                    )
-                )
-
-            # Insert part pointer
-            part_id = str(uuid.uuid4())
-            await db.execute(
-                """
-                INSERT OR IGNORE INTO file_parts (
-                    id, file_id, part_index, byte_offset, part_size_bytes, 
-                    part_sha256, telegram_message_id, telegram_channel_id
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    part_id, file_id, env.get("part", 0), env.get("offset", 0),
-                    env.get("size", 0), env.get("sha256", ""), env.get("telegram_message_id"),
-                    str(settings.TELEGRAM_CHANNEL_ID)
-                )
-            )
-            restored_count += 1
-
-        await db.commit()
-
+    restored_count = await perform_rebuild_index(limit=5000)
     return {"status": "complete", "restored_envelopes": restored_count}

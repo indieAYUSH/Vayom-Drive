@@ -19,6 +19,7 @@ import { useVaultStore } from '../../store/useVaultStore'
 export const Shell: React.FC = () => {
   const { 
     activeTab, 
+    selectedAlbumId,
     lightboxItem, 
     closeLightbox, 
     nextLightbox, 
@@ -35,7 +36,7 @@ export const Shell: React.FC = () => {
   const renderActiveView = () => {
     switch (activeTab) {
       case 'albums':
-        return <AlbumsView />
+        return selectedAlbumId ? <GalleryView /> : <AlbumsView />
       case 'trash':
         return <TrashView />
       case 'shares':
@@ -65,7 +66,7 @@ export const Shell: React.FC = () => {
         </div>
 
         {/* View Router Canvas */}
-        <main className="flex-1 flex flex-col h-full overflow-hidden bg-[#000000] pb-14 md:pb-0">
+        <main className="flex-1 flex flex-col h-full overflow-hidden bg-[#000000] pb-[calc(3.5rem+env(safe-area-inset-bottom))] md:pb-0">
           {renderActiveView()}
         </main>
       </div>

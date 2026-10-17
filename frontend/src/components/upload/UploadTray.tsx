@@ -26,7 +26,7 @@ export const UploadTray: React.FC = () => {
   }
 
   return (
-    <div className="fixed bottom-4 right-4 z-40 w-80 sm:w-96 bg-[#111111] border border-[#333333] select-none font-mono text-xs flex flex-col shadow-none">
+    <div className="fixed bottom-16 left-2 right-2 sm:left-auto sm:right-4 sm:bottom-4 sm:w-96 z-40 bg-[#111111] border border-[#333333] select-none font-mono text-xs flex flex-col shadow-none">
       {/* Tray Header Bar */}
       <div 
         onClick={() => setTrayOpen(!isTrayOpen)}

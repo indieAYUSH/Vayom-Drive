@@ -4,12 +4,13 @@ import httpx
 from pathlib import Path
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from .config import settings
-from .db.connection import init_db
+from .db.connection import init_db, get_db
 from .storage.client import storage_client
-from .api.routes import router as api_router
+from .api.routes import router as api_router, perform_rebuild_index
 
 logging.basicConfig(
     level=logging.INFO,
@@ -44,6 +45,19 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"Could not connect to Telegram MTProto on startup: {e}")
 
+    # Auto-rebuild SQLite index if catalog is empty and channel is connected
+    try:
+        async with get_db() as db:
+            cur = await db.execute("SELECT COUNT(*) FROM files")
+            count = (await cur.fetchone())[0]
+
+        if count == 0 and storage_client._is_connected:
+            logger.info("SQLite catalog index is empty. Automatically rebuilding index from Telegram storage channel...")
+            restored = await perform_rebuild_index(limit=5000)
+            logger.info(f"Auto-index rebuild complete: restored {restored} envelope(s) from Telegram channel.")
+    except Exception as e:
+        logger.warning(f"Auto-rebuild on startup encountered: {e}")
+
     # Launch background keep-alive heartbeat task
     heartbeat_task = asyncio.create_task(heartbeat_loop())
 
@@ -60,6 +74,15 @@ app = FastAPI(
     description="Personal cloud storage powered by Telegram",
     version="1.0.0",
     lifespan=lifespan
+)
+
+# Enable CORS for cross-origin local and remote frontends
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 # Include REST API endpoints
