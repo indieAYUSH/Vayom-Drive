@@ -5,6 +5,10 @@ from typing import Optional, Tuple, Dict, Any
 from PIL import Image, ExifTags
 from ..config import settings
 
+# I-2: pin Pillow's decompression-bomb guard explicitly (same threshold as Pillow's default).
+# Image decodes now run inside worker threads, so this cap is the memory-safety backstop.
+Image.MAX_IMAGE_PIXELS = 89_478_485
+
 
 def detect_file_category(mime_type: str, filename: str) -> str:
     ext = Path(filename).suffix.lower()
@@ -51,6 +55,86 @@ def generate_webp_thumbnail(
                 optimize=True
             )
             return True
+    except Exception:
+        return False
+
+
+async def generate_video_thumbnail(
+    video_path: Path,
+    output_path: Path,
+    size: Tuple[int, int] = (480, 480),
+    quality: int = 85
+) -> bool:
+    """
+    Extracts a crisp frame from video and converts it to high-definition WebP thumbnail using ffmpeg.
+    Probes at 1.0s, with fallback to 0.0s. Supports both local file paths and HTTP stream URLs.
+    """
+    try:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        # Try at 1.0s first
+        cmd = [
+            "ffmpeg", "-y",
+            "-ss", "00:00:01",
+            "-i", str(video_path),
+            "-vframes", "1",
+            "-vf", f"scale='min({size[0]},iw)':-1",
+            "-c:v", "libwebp",
+            "-quality", str(quality),
+            str(output_path)
+        ]
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+        await asyncio.wait_for(proc.communicate(), timeout=20.0)
+        if proc.returncode == 0 and output_path.exists() and output_path.stat().st_size > 0:
+            return True
+
+        # Fallback to start of video (00:00:00)
+        cmd_fallback = [
+            "ffmpeg", "-y",
+            "-ss", "00:00:00",
+            "-i", str(video_path),
+            "-vframes", "1",
+            "-vf", f"scale='min({size[0]},iw)':-1",
+            "-c:v", "libwebp",
+            "-quality", str(quality),
+            str(output_path)
+        ]
+        proc = await asyncio.create_subprocess_exec(
+            *cmd_fallback,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+        await asyncio.wait_for(proc.communicate(), timeout=20.0)
+        return proc.returncode == 0 and output_path.exists() and output_path.stat().st_size > 0
+    except Exception:
+        return False
+
+
+async def apply_mp4_faststart(input_path: Path, output_path: Path) -> bool:
+    """
+    Relocates the MP4 'moov' atom box to the front of the file (FastStart / Web Optimized).
+    This allows web browsers and native players to stream videos immediately
+    without downloading or seeking to the end of the file.
+    Does NOT re-encode video or audio streams (-c copy).
+    """
+    try:
+        cmd = [
+            "ffmpeg", "-y",
+            "-i", str(input_path),
+            "-c", "copy",
+            "-movflags", "+faststart",
+            str(output_path)
+        ]
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+        await asyncio.wait_for(proc.communicate(), timeout=60.0)
+        return proc.returncode == 0 and output_path.exists() and output_path.stat().st_size > 0
     except Exception:
         return False
 
@@ -112,7 +196,12 @@ def extract_image_exif(image_path: Path) -> Dict[str, Any]:
                 else:
                     metadata["shutter_speed"] = f"{exp}s"
 
-            metadata["dimensions"] = {"width": img.width, "height": img.height}
+            # I-14: report display dimensions (honour EXIF orientation 5-8, matching the thumbnail)
+            orientation = exif.get(0x0112, 1)
+            width, height = img.width, img.height
+            if orientation in (5, 6, 7, 8):
+                width, height = height, width
+            metadata["dimensions"] = {"width": width, "height": height}
 
             # Tags from keywords / comments
             tags = []
@@ -144,6 +233,9 @@ async def extract_video_metadata(video_path: Path) -> Dict[str, Any]:
             "-print_format", "json",
             "-show_streams",
             "-show_format",
+            # I-10: terminate option parsing so a leading-dash filename
+            # (e.g. "-sample.mp4") is treated as a path, not an ffprobe flag.
+            "--",
             str(video_path)
         ]
         proc = await asyncio.create_subprocess_exec(
@@ -151,7 +243,17 @@ async def extract_video_metadata(video_path: Path) -> Dict[str, Any]:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE
         )
-        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=10.0)
+        try:
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=10.0)
+        except asyncio.TimeoutError:
+            # I-10: communicate() cancellation alone does not reap the child;
+            # kill + await so a hung ffprobe cannot leak as a zombie process.
+            try:
+                proc.kill()
+                await proc.wait()
+            except Exception:
+                pass
+            return metadata
         if proc.returncode != 0 or not stdout:
             return metadata
 
@@ -185,15 +287,17 @@ async def extract_video_metadata(video_path: Path) -> Dict[str, Any]:
             metadata["dimensions"] = {"width": width, "height": height}
             max_dim = max(width, height)
             min_dim = min(width, height)
-            if max_dim >= 7600 or min_dim >= 4300:
+            # I-12: tier by the short side (standard classes — YouTube-style), never the OR-max logic
+            # that let ultrawide/square clips jump a class; long side only for the 8K threshold.
+            if max_dim >= 7600:
                 res_tier = "8K"
-            elif max_dim >= 3800 or min_dim >= 2100:
+            elif min_dim >= 2160:
                 res_tier = "4K UHD"
-            elif max_dim >= 2500 or min_dim >= 1400:
+            elif min_dim >= 1440:
                 res_tier = "2K QHD"
-            elif max_dim >= 1900 or min_dim >= 1000:
+            elif min_dim >= 1080:
                 res_tier = "1080p FHD"
-            elif max_dim >= 1200 or min_dim >= 700:
+            elif min_dim >= 720:
                 res_tier = "720p HD"
             else:
                 res_tier = "SD"
@@ -210,8 +314,11 @@ async def extract_video_metadata(video_path: Path) -> Dict[str, Any]:
             except Exception:
                 pass
 
-        # Duration & bitrate
-        dur = float(video_stream.get("duration") or format_info.get("duration") or 0)
+        # Duration & bitrate (I-11: "N/A"/non-numeric tags must not abort the remaining metadata)
+        try:
+            dur = float(video_stream.get("duration") or format_info.get("duration") or 0)
+        except (TypeError, ValueError):
+            dur = 0.0
         if dur > 0:
             metadata["duration_seconds"] = round(dur, 2)
 

@@ -27,7 +27,7 @@ interface AuthState {
   qrSessionId: string | null
   qrUrl: string | null
   qrExpiresAt: number | null
-  qrStatus: 'idle' | 'waiting' | 'confirmed' | '2fa_required' | 'expired'
+  qrStatus: 'idle' | 'waiting' | 'confirmed' | '2fa_required' | 'expired' | 'failed'
   scannedUser: UserProfile | null
   availableChannels: ChannelOption[]
   defaultChannelId: string | null
@@ -46,6 +46,19 @@ interface AuthState {
 }
 
 let pollInterval: any = null
+let currentQrRequestId = 0
+let qrAbortController: AbortController | null = null
+
+export function stopQrPolling() {
+  if (qrAbortController) {
+    qrAbortController.abort()
+    qrAbortController = null
+  }
+  if (pollInterval) {
+    clearInterval(pollInterval)
+    pollInterval = null
+  }
+}
 
 export const useAuthStore = create<AuthState>((set, get) => ({
   isAuthenticated: false,
@@ -84,16 +97,23 @@ export const useAuthStore = create<AuthState>((set, get) => ({
   },
 
   startQrSession: async () => {
-    if (pollInterval) {
-      clearInterval(pollInterval)
-      pollInterval = null
-    }
+    // H-4: Abort any in-flight start request and clear active intervals
+    stopQrPolling()
+
+    const requestId = ++currentQrRequestId
+    qrAbortController = new AbortController()
 
     set({ qrStatus: 'waiting', error: null, scannedUser: null, availableChannels: [] })
     try {
-      const res = await fetch('/api/v1/auth/qr/start', { method: 'POST' })
+      const res = await fetch('/api/v1/auth/qr/start', {
+        method: 'POST',
+        signal: qrAbortController.signal,
+      })
+      if (requestId !== currentQrRequestId) return
       if (!res.ok) throw new Error('Could not initialize Telegram QR session')
       const data = await res.json()
+
+      if (requestId !== currentQrRequestId) return
 
       set({
         qrSessionId: data.session_id,
@@ -102,19 +122,29 @@ export const useAuthStore = create<AuthState>((set, get) => ({
         qrStatus: 'waiting',
       })
 
-      // Start automatic polling every 2.5 seconds
+      // H-4: Clean any existing interval right before starting the new one
+      if (pollInterval) {
+        clearInterval(pollInterval)
+        pollInterval = null
+      }
       pollInterval = setInterval(() => {
         get().pollQrSession()
       }, 2500)
     } catch (err: any) {
-      set({ qrStatus: 'idle', error: err.message || 'Failed to start QR login' })
+      if (err.name === 'AbortError') return
+      if (requestId !== currentQrRequestId) return
+      set({ qrStatus: 'failed', error: err.message || 'Failed to start QR login' })
+    } finally {
+      if (requestId === currentQrRequestId) {
+        qrAbortController = null
+      }
     }
   },
 
   pollQrSession: async () => {
     const { qrSessionId, qrStatus } = get()
-    if (!qrSessionId || qrStatus === 'confirmed' || qrStatus === 'expired') {
-      if (pollInterval) clearInterval(pollInterval)
+    if (!qrSessionId || qrStatus === 'confirmed' || qrStatus === 'expired' || qrStatus === 'failed') {
+      stopQrPolling()
       return
     }
 
@@ -123,14 +153,14 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       if (!res.ok) {
         if (res.status === 404) {
           set({ qrStatus: 'expired' })
-          if (pollInterval) clearInterval(pollInterval)
+          stopQrPolling()
         }
         return
       }
 
       const data = await res.json()
       if (data.status === 'confirmed') {
-        if (pollInterval) clearInterval(pollInterval)
+        stopQrPolling()
         set({
           qrStatus: 'confirmed',
           scannedUser: data.user,
@@ -138,10 +168,10 @@ export const useAuthStore = create<AuthState>((set, get) => ({
           defaultChannelId: data.default_channel_id || null,
         })
       } else if (data.status === '2fa_required') {
-        if (pollInterval) clearInterval(pollInterval)
+        stopQrPolling()
         set({ qrStatus: '2fa_required' })
       } else if (data.status === 'expired') {
-        if (pollInterval) clearInterval(pollInterval)
+        stopQrPolling()
         set({ qrStatus: 'expired' })
       } else if (data.status === 'waiting') {
         // Token seamlessly auto-refreshed by backend
@@ -204,7 +234,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
         throw new Error(errData.detail || 'Failed to finalize setup')
       }
       const data = await res.json()
-      if (pollInterval) clearInterval(pollInterval)
+      stopQrPolling()
       set({
         isAuthenticated: true,
         authMode: 'qr',
@@ -221,6 +251,8 @@ export const useAuthStore = create<AuthState>((set, get) => ({
   },
 
   loginWithBot: async (botToken, channelId, displayName) => {
+    // H-3: Stop any active QR polling interval when logging in via Bot token
+    stopQrPolling()
     set({ isLoading: true, error: null })
     try {
       const res = await fetch('/api/v1/auth/bot', {
@@ -237,12 +269,16 @@ export const useAuthStore = create<AuthState>((set, get) => ({
         throw new Error(errData.detail || 'Failed to authenticate with Bot Token')
       }
       const data = await res.json()
+      stopQrPolling()
       set({
         isAuthenticated: true,
         authMode: 'bot',
         channelId: data.channel_id,
         user: { display_name: displayName || 'Storage Bot', first_name: 'Bot' },
         isLoading: false,
+        qrSessionId: null,
+        qrUrl: null,
+        qrStatus: 'idle',
       })
     } catch (err: any) {
       set({ isLoading: false, error: err.message })
@@ -251,6 +287,8 @@ export const useAuthStore = create<AuthState>((set, get) => ({
   },
 
   loginWithDeveloper: async (apiId, apiHash, botToken, channelId, displayName) => {
+    // H-3: Stop any active QR polling interval when logging in via Developer mode
+    stopQrPolling()
     set({ isLoading: true, error: null })
     try {
       const res = await fetch('/api/v1/auth/developer', {
@@ -269,12 +307,16 @@ export const useAuthStore = create<AuthState>((set, get) => ({
         throw new Error(errData.detail || 'Failed to connect with custom credentials')
       }
       const data = await res.json()
+      stopQrPolling()
       set({
         isAuthenticated: true,
         authMode: 'developer',
         channelId: data.channel_id,
         user: { display_name: displayName || 'Developer Node', first_name: 'Custom MTProto' },
         isLoading: false,
+        qrSessionId: null,
+        qrUrl: null,
+        qrStatus: 'idle',
       })
     } catch (err: any) {
       set({ isLoading: false, error: err.message })
@@ -283,7 +325,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
   },
 
   logout: async () => {
-    if (pollInterval) clearInterval(pollInterval)
+    stopQrPolling()
     set({ isLoading: true })
     try {
       await fetch('/api/v1/auth/logout', { method: 'POST' })

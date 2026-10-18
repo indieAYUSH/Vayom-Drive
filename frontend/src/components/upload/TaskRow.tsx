@@ -22,12 +22,14 @@ export const TaskRow: React.FC<TaskRowProps> = ({
     switch (task.status) {
       case 'queued':
         return <Badge variant="default">Queued</Badge>
+      case 'buffering':
+        return <Badge variant="info">Buffering to Node</Badge>
       case 'hashing':
         return <Badge variant="info">Hashing SHA256</Badge>
       case 'analyzing':
         return <Badge variant="info">Analyzing</Badge>
       case 'compressing':
-        return <Badge variant="warning">Compressing zstd</Badge>
+        return <Badge variant="warning">Compressing</Badge>
       case 'splitting':
         return <Badge variant="warning">Splitting {task.total_parts} Parts</Badge>
       case 'uploading':
@@ -58,7 +60,7 @@ export const TaskRow: React.FC<TaskRowProps> = ({
         </div>
         <div className="flex items-center gap-1.5">
           {getStatusBadge()}
-          {task.status === 'uploading' && (
+          {(task.status === 'uploading' || task.status === 'buffering') && (
             <button
               onClick={() => onPause(task.id)}
               className="p-1 text-[#888888] hover:text-[#ffffff] border border-transparent hover:border-[#333333]"
@@ -67,7 +69,7 @@ export const TaskRow: React.FC<TaskRowProps> = ({
               <Pause size={12} />
             </button>
           )}
-          {task.status === 'paused' && (
+          {(task.status === 'paused' || task.status === 'rate_limited') && (
             <button
               onClick={() => onResume(task.id)}
               className="p-1 text-[#888888] hover:text-[#ffffff] border border-transparent hover:border-[#333333]"
@@ -92,32 +94,103 @@ export const TaskRow: React.FC<TaskRowProps> = ({
       <div className="w-full h-1.5 bg-[#202020] overflow-hidden">
         <div
           className={`h-full transition-all duration-200 ${
-            task.status === 'done' ? 'bg-[#22c55e]' : 'bg-[#ffffff]'
+            task.status === 'done'
+              ? 'bg-[#22c55e]'
+              : task.status === 'hashing' || task.status === 'analyzing' || task.status === 'splitting' || task.status === 'verifying'
+              ? 'bg-[#3b82f6] animate-pulse w-full'
+              : 'bg-[#ffffff]'
           }`}
-          style={{ width: `${task.progress_percent}%` }}
+          style={
+            task.status === 'hashing' || task.status === 'analyzing' || task.status === 'splitting' || task.status === 'verifying'
+              ? undefined
+              : { width: `${Math.min(100, Math.max(0, task.progress_percent))}%` }
+          }
         />
       </div>
 
-      {/* Speed & Size Stats */}
+      {/* Speed, Stage & Size Stats */}
       <div className="flex items-center justify-between text-[10px] text-[#777777]">
-        <span>
-          {formatBytes(task.uploaded_bytes)} / {formatBytes(task.size_bytes)} ({task.progress_percent}%)
-        </span>
-        {task.status === 'uploading' && task.speed_bps > 0 && (
-          <span className="text-[#3b82f6]">
-            {formatSpeed(task.speed_bps)} • ETA {task.eta_seconds}s
-          </span>
-        )}
-        {task.status === 'verifying' && (
-          <span className="text-[#f59e0b] animate-pulse">
-            Syncing catalog...
-          </span>
-        )}
-        {task.status === 'rate_limited' && (
-          <span className="text-[#f59e0b] animate-pulse">
-            Safeguarding Account...
-          </span>
-        )}
+        <div className="flex items-center gap-1.5 truncate">
+          {task.status === 'buffering' && (
+            <span>
+              Buffering: {formatBytes(task.uploaded_bytes)} / {formatBytes(task.size_bytes)} ({task.progress_percent}%)
+            </span>
+          )}
+
+          {(task.status === 'hashing' || task.status === 'analyzing' || task.status === 'splitting') && (
+            <span>
+              Processing: {task.stage || 'Optimizing media on node...'}
+            </span>
+          )}
+
+          {task.status === 'uploading' && (
+            <>
+              <span>
+                Cloud Upload: {formatBytes(task.uploaded_bytes)} / {formatBytes(task.size_bytes)} ({task.progress_percent}%)
+              </span>
+              {task.stage && (
+                <span className="text-[#888888] truncate hidden sm:inline">• {task.stage}</span>
+              )}
+            </>
+          )}
+
+          {task.status === 'verifying' && (
+            <span>
+              Catalog WAL: Syncing encrypted index to Telegram...
+            </span>
+          )}
+
+          {task.status === 'done' && (
+            <span>
+              {formatBytes(task.size_bytes)} • Completed
+            </span>
+          )}
+
+          {(task.status === 'queued' || task.status === 'paused' || task.status === 'failed' || task.status === 'rate_limited') && (
+            <span>
+              {formatBytes(task.uploaded_bytes)} / {formatBytes(task.size_bytes)}
+              {task.stage ? ` • ${task.stage}` : ''}
+            </span>
+          )}
+        </div>
+
+        <div className="flex items-center gap-1.5 shrink-0">
+          {task.status === 'buffering' && task.speed_bps > 0 && (
+            <span className="text-[#3b82f6]">
+              {formatSpeed(task.speed_bps)} • Gateway
+            </span>
+          )}
+
+          {task.status === 'uploading' && task.speed_bps > 0 && (
+            <span className="text-[#3b82f6]">
+              {formatSpeed(task.speed_bps)} • ETA {task.eta_seconds}s
+            </span>
+          )}
+
+          {task.status === 'hashing' && (
+            <span className="text-[#3b82f6] animate-pulse">Hashing SHA-256</span>
+          )}
+
+          {task.status === 'analyzing' && (
+            <span className="text-[#3b82f6] animate-pulse">Extracting Metadata</span>
+          )}
+
+          {task.status === 'splitting' && (
+            <span className="text-[#f59e0b] animate-pulse">Splitting Parts</span>
+          )}
+
+          {task.status === 'verifying' && (
+            <span className="text-[#f59e0b] animate-pulse">Syncing Catalog</span>
+          )}
+
+          {task.status === 'rate_limited' && (
+            <span className="text-[#f59e0b] animate-pulse">Safeguarding Account</span>
+          )}
+
+          {task.status === 'done' && (
+            <span className="text-[#22c55e]">Completed</span>
+          )}
+        </div>
       </div>
 
       {/* Error or Cooldown Notice */}

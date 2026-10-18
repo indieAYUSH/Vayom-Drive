@@ -86,14 +86,15 @@ interface VaultState {
   restoreFromTrash: (ids: string[]) => Promise<void>
   purgeFiles: (ids: string[]) => Promise<void>
   emptyTrash: () => Promise<void>
-  createAlbum: (name: string, description?: string) => Promise<void>
+  createAlbum: (name: string, description?: string) => Promise<any>
+  addFilesToAlbum: (albumId: string, fileIds: string[]) => Promise<void>
   rebuildIndex: () => Promise<{ status: string; restored_envelopes: number }>
   cleanupIncomplete: (fileId: string) => Promise<void>
 }
 
 const getInitialStarred = (): string[] => {
   try {
-    const raw = localStorage.getItem('televault_starred')
+    const raw = localStorage.getItem('vayom_starred') || localStorage.getItem('televault_starred')
     return raw ? JSON.parse(raw) : []
   } catch {
     return []
@@ -147,7 +148,7 @@ export const useVaultStore = create<VaultState>((set, get) => ({
       const exists = state.starredIds.includes(id)
       const updated = exists ? state.starredIds.filter((item) => item !== id) : [...state.starredIds, id]
       try {
-        localStorage.setItem('televault_starred', JSON.stringify(updated))
+        localStorage.setItem('vayom_starred', JSON.stringify(updated))
       } catch {}
       return { starredIds: updated }
     }),
@@ -386,9 +387,16 @@ export const useVaultStore = create<VaultState>((set, get) => ({
   },
 
   createAlbum: async (name, description) => {
-    await api.createAlbum(name, description)
+    const album = await api.createAlbum(name, description)
     set({ isCreateAlbumModalOpen: false })
     await get().fetchAlbums()
+    return album
+  },
+
+  addFilesToAlbum: async (albumId, fileIds) => {
+    await Promise.all(fileIds.map((id) => api.addFileToAlbum(albumId, id)))
+    set({ selectedIds: [], isCreateAlbumModalOpen: false })
+    await Promise.all([get().fetchFiles(), get().fetchAlbums()])
   },
 
   rebuildIndex: async () => {

@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react'
+import React, { useState, useEffect, useRef } from 'react'
 import { QRCodeSVG } from 'qrcode.react'
 import { useAuthStore } from '../store/useAuthStore'
 import { Shield, QrCode, Bot, Terminal, RefreshCw, Key, ExternalLink, ArrowRight, CheckCircle2, AlertTriangle } from 'lucide-react'
@@ -52,11 +52,21 @@ export const LoginView: React.FC = () => {
     return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`
   }
 
+  // Guard against duplicate / retry storms for QR session initiation
+  const hasAttemptedRef = useRef(false)
+
   useEffect(() => {
-    if (activeTab === 'qr' && qrStatus === 'idle') {
+    if (activeTab === 'qr' && qrStatus === 'idle' && !hasAttemptedRef.current) {
+      hasAttemptedRef.current = true
       startQrSession()
     }
   }, [activeTab, qrStatus, startQrSession])
+
+  useEffect(() => {
+    if (activeTab !== 'qr') {
+      hasAttemptedRef.current = false
+    }
+  }, [activeTab])
 
   useEffect(() => {
     if (!qrExpiresAt) return
@@ -199,12 +209,33 @@ export const LoginView: React.FC = () => {
                 <Badge variant="success">RECOMMENDED</Badge>
               </div>
 
-              {/* State: Awaiting Scan or Expired */}
-              {(qrStatus === 'waiting' || qrStatus === 'idle' || qrStatus === 'expired') && (
+              {/* State: Awaiting Scan, Expired, or Failed */}
+              {(qrStatus === 'waiting' || qrStatus === 'idle' || qrStatus === 'expired' || qrStatus === 'failed') && (
                 <div className="flex flex-col sm:flex-row items-center gap-6">
                   {/* QR Box */}
                   <div className="w-52 h-52 bg-[#000000] border-2 border-[#333333] p-3 flex flex-col items-center justify-center relative flex-shrink-0">
-                    {qrStatus === 'expired' || (qrStatus === 'waiting' && timeLeft === 0) ? (
+                    {qrStatus === 'failed' ? (
+                      <div className="w-full h-full bg-[#0d0d0d] p-3 flex flex-col items-center justify-center text-center space-y-2.5">
+                        <div className="w-7 h-7 rounded-full bg-[#1f0a0a] border border-[#ef4444] flex items-center justify-center text-[#ef4444]">
+                          <AlertTriangle size={14} />
+                        </div>
+                        <div>
+                          <div className="text-[11px] font-bold text-[#ef4444] uppercase tracking-wider">Connection Failed</div>
+                          <div className="text-[10px] text-[#777777] mt-0.5 line-clamp-2">{error || 'Could not start QR session'}</div>
+                        </div>
+                        <Button
+                          variant="secondary"
+                          size="sm"
+                          onClick={() => {
+                            hasAttemptedRef.current = true
+                            startQrSession()
+                          }}
+                          className="w-full text-[10px] py-1 flex items-center justify-center gap-1"
+                        >
+                          <RefreshCw size={11} /> Retry Connection
+                        </Button>
+                      </div>
+                    ) : qrStatus === 'expired' || (qrStatus === 'waiting' && timeLeft === 0) ? (
                       <div className="w-full h-full bg-[#0d0d0d] p-3 flex flex-col items-center justify-center text-center space-y-2.5">
                         <div className="w-7 h-7 rounded-full bg-[#1f0a0a] border border-[#ef4444] flex items-center justify-center text-[#ef4444]">
                           <AlertTriangle size={14} />
@@ -213,7 +244,15 @@ export const LoginView: React.FC = () => {
                           <div className="text-[11px] font-bold text-[#ef4444] uppercase tracking-wider">Session Expired</div>
                           <div className="text-[10px] text-[#777777] mt-0.5">5-minute window ended</div>
                         </div>
-                        <Button variant="secondary" size="sm" onClick={startQrSession} className="w-full text-[10px] py-1 flex items-center justify-center gap-1">
+                        <Button
+                          variant="secondary"
+                          size="sm"
+                          onClick={() => {
+                            hasAttemptedRef.current = true
+                            startQrSession()
+                          }}
+                          className="w-full text-[10px] py-1 flex items-center justify-center gap-1"
+                        >
                           <RefreshCw size={11} /> New QR Code
                         </Button>
                       </div>
@@ -248,14 +287,23 @@ export const LoginView: React.FC = () => {
 
                     <div className="pt-2 flex items-center justify-between text-[11px] text-[#666666] border-t border-[#1c1c1c]">
                       <div className="flex items-center gap-1.5">
-                        <span className={`w-1.5 h-1.5 rounded-full ${timeLeft > 0 && qrStatus !== 'expired' ? 'bg-[#22c55e] animate-pulse' : 'bg-[#ef4444]'}`} />
-                        <span>Expires in: <strong className="text-[#ffffff] font-bold tracking-wider">{formatTime(timeLeft)}</strong></span>
+                        <span className={`w-1.5 h-1.5 rounded-full ${timeLeft > 0 && qrStatus !== 'expired' && qrStatus !== 'failed' ? 'bg-[#22c55e] animate-pulse' : 'bg-[#ef4444]'}`} />
+                        <span>
+                          {qrStatus === 'failed' ? (
+                            <strong className="text-[#ef4444] font-bold tracking-wider">Connection Error</strong>
+                          ) : (
+                            <>Expires in: <strong className="text-[#ffffff] font-bold tracking-wider">{formatTime(timeLeft)}</strong></>
+                          )}
+                        </span>
                       </div>
                       <button
-                        onClick={startQrSession}
+                        onClick={() => {
+                          hasAttemptedRef.current = true
+                          startQrSession()
+                        }}
                         className="text-[#22c55e] hover:underline flex items-center gap-1 font-mono text-[11px]"
                       >
-                        <RefreshCw size={11} /> Refresh
+                        <RefreshCw size={11} /> {qrStatus === 'failed' ? 'Retry' : 'Refresh'}
                       </button>
                     </div>
                   </div>
@@ -395,7 +443,15 @@ export const LoginView: React.FC = () => {
               {qrStatus === 'expired' && (
                 <div className="text-center py-8 space-y-4">
                   <div className="text-xs text-[#888888]">QR session expired due to inactivity.</div>
-                  <Button onClick={startQrSession} variant="primary" size="sm" icon={<RefreshCw size={12} />}>
+                  <Button
+                    onClick={() => {
+                      hasAttemptedRef.current = true
+                      startQrSession()
+                    }}
+                    variant="primary"
+                    size="sm"
+                    icon={<RefreshCw size={12} />}
+                  >
                     Generate New QR Code
                   </Button>
                 </div>

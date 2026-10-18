@@ -1,12 +1,13 @@
 import asyncio
 import logging
 import httpx
+import re
 from pathlib import Path
 from contextlib import asynccontextmanager
-from fastapi import FastAPI
+from fastapi import FastAPI, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from .config import settings
 from .db.connection import init_db, get_db
 from .storage.client import storage_client
@@ -67,8 +68,12 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"Auto-rebuild on startup encountered: {e}")
 
-    # Launch background keep-alive heartbeat task
-    heartbeat_task = asyncio.create_task(heartbeat_loop())
+    # Launch background keep-alive heartbeat task (F-7: only when a ping target is configured)
+    heartbeat_task = None
+    if settings.PING_URL:
+        heartbeat_task = asyncio.create_task(heartbeat_loop())
+    else:
+        logger.info("Heartbeat loop disabled (PING_URL not set).")
 
     # Start Workstation Folder Watcher
     await workstation_watcher.start()
@@ -78,11 +83,12 @@ async def lifespan(app: FastAPI):
     # Shutdown:
     logger.info("Shutting down Vayom Drive...")
     await workstation_watcher.stop()
-    heartbeat_task.cancel()
-    try:
-        await heartbeat_task
-    except asyncio.CancelledError:
-        pass
+    if heartbeat_task:
+        heartbeat_task.cancel()
+        try:
+            await heartbeat_task
+        except asyncio.CancelledError:
+            pass
     await storage_client.disconnect()
 
 app = FastAPI(
@@ -92,14 +98,97 @@ app = FastAPI(
     lifespan=lifespan
 )
 
-# Enable CORS for cross-origin local and remote frontends
+# A-1: Replace wide-open CORS allow_origins=["*"] with explicit trusted origins
+# Allows local web app, Vite dev servers, and Tauri desktop protocol
+DEFAULT_ALLOWED_ORIGINS = [
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+    "http://localhost:8000",
+    "http://127.0.0.1:8000",
+    "tauri://localhost",
+    "http://tauri.localhost",
+    "https://tauri.localhost",
+]
+custom_origins = [o.strip() for o in getattr(settings, "CORS_ALLOWED_ORIGINS", []) if o.strip()]
+trusted_origins = list(dict.fromkeys(DEFAULT_ALLOWED_ORIGINS + custom_origins))
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=trusted_origins,
+    allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+@app.middleware("http")
+async def enforce_api_security(request: Request, call_next):
+    """
+    A-1 Security Middleware:
+    1. Origin Protection: Blocks cross-origin requests from untrusted external origins to /api/ routes (CSRF defense).
+    2. Host Header Validation: Blocks external / spoofed host headers when bound to loopback.
+    3. Token Authentication: Supports per-install local API token validation (or strict mode if configured).
+    """
+    path = request.url.path
+    if path.startswith("/api/") and not path.startswith("/api/v1/s/"):
+        origin = request.headers.get("origin")
+        if origin:
+            origin_clean = origin.rstrip("/").lower()
+            trusted_clean = [o.rstrip("/").lower() for o in trusted_origins]
+            is_trusted = (
+                origin_clean in trusted_clean
+                or re.match(r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$", origin_clean) is not None
+            )
+            if not is_trusted:
+                host = request.headers.get("host")
+                if host and (origin_clean == f"http://{host.lower()}" or origin_clean == f"https://{host.lower()}"):
+                    is_trusted = True
+
+            if not is_trusted:
+                logger.warning(f"A-1: Blocked cross-origin access from untrusted origin: {origin} to {path}")
+                return JSONResponse(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    content={"detail": "Forbidden: Cross-origin access from this origin is forbidden."}
+                )
+
+        # Host header validation: when bound to loopback, block external host spoofing
+        if getattr(settings, "HOST", "127.0.0.1") in ("127.0.0.1", "localhost"):
+            raw_host = request.headers.get("host", "").split(":")[0].strip().lower()
+            if raw_host:
+                is_valid_host = (
+                    raw_host in ("127.0.0.1", "localhost", "::1", "testserver")
+                    or raw_host.startswith("127.")
+                    or any(raw_host == o.split("://")[-1].split(":")[0].lower() for o in trusted_origins)
+                )
+                if not is_valid_host:
+                    logger.warning(f"A-1: Blocked request with untrusted host header: {raw_host}")
+                    return JSONResponse(
+                        status_code=status.HTTP_403_FORBIDDEN,
+                        content={"detail": "Forbidden: Non-loopback Host header is denied."}
+                    )
+
+        # Optional strict per-install API token enforcement
+        if getattr(settings, "REQUIRE_API_AUTH", False):
+            auth_header = request.headers.get("authorization", "")
+            api_key = request.headers.get("x-api-key", "")
+            token = auth_header[7:].strip() if auth_header.lower().startswith("bearer ") else auth_header.strip()
+            if not token and api_key:
+                token = api_key.strip()
+
+            valid_tokens = {
+                getattr(settings, "LOCAL_API_TOKEN", ""),
+                getattr(settings, "SESSION_SECRET", ""),
+                getattr(settings, "ADMIN_PASSWORD", "")
+            }
+            valid_tokens = {t for t in valid_tokens if t}
+
+            if not token or token not in valid_tokens:
+                return JSONResponse(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    content={"detail": "Unauthorized: Valid API authentication token required."}
+                )
+
+    return await call_next(request)
 
 # Include REST API endpoints
 app.include_router(api_router)
@@ -124,7 +213,8 @@ if FRONTEND_DIST.exists():
             raise HTTPException(status_code=404, detail="API route not found")
         # Serve static file if exists (e.g. manifest.webmanifest, sw.js), else fallback to index.html
         potential_file = (FRONTEND_DIST / full_path).resolve()
-        if potential_file.is_file() and str(potential_file).startswith(str(FRONTEND_DIST.resolve())):
+        # F-1: is_relative_to blocks sibling-prefix traversal (e.g. /dist-evil) that startswith allowed
+        if potential_file.is_file() and potential_file.is_relative_to(FRONTEND_DIST.resolve()):
             return FileResponse(potential_file)
         return FileResponse(FRONTEND_DIST / "index.html")
 else:

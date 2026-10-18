@@ -142,6 +142,70 @@ export const api = {
     return res.json()
   },
 
+  async initUpload(params: {
+    filename: string
+    total_size: number
+    mime_type?: string
+    total_parts?: number
+    nonce?: string
+    encryption?: string
+  }): Promise<{
+    file_id: string
+    filename: string
+    total_parts: number
+    upload_status: string
+    nonce?: string
+    encryption?: string
+  }> {
+    const form = new FormData()
+    form.append('filename', params.filename)
+    form.append('total_size', String(params.total_size))
+    if (params.mime_type) form.append('mime_type', params.mime_type)
+    if (params.total_parts) form.append('total_parts', String(params.total_parts))
+    if (params.nonce) form.append('nonce', params.nonce)
+    if (params.encryption) form.append('encryption', params.encryption)
+
+    const res = await fetch(`${API_BASE}/upload/init`, {
+      method: 'POST',
+      body: form,
+    })
+    if (!res.ok) throw new Error(`Failed to initialize upload: ${res.statusText}`)
+    return res.json()
+  },
+
+  uploadChunk(
+    formData: FormData,
+    onProgress?: (loaded: number, total: number) => void
+  ): { xhr: XMLHttpRequest; promise: Promise<{ file_id: string; part_index: number; uploaded_parts: number; total_parts: number; is_completed: boolean; status: string }> } {
+    const xhr = new XMLHttpRequest()
+    const promise = new Promise<any>((resolve, reject) => {
+      if (onProgress) {
+        xhr.upload.onprogress = (e) => {
+          if (e.lengthComputable) {
+            onProgress(e.loaded, e.total)
+          }
+        }
+      }
+      xhr.onload = () => {
+        if (xhr.status >= 200 && xhr.status < 300) {
+          try {
+            resolve(JSON.parse(xhr.responseText))
+          } catch {
+            resolve({ status: 'completed' })
+          }
+        } else {
+          reject(new Error(`Chunk upload failed with status ${xhr.status}: ${xhr.responseText}`))
+        }
+      }
+      xhr.onerror = () => reject(new Error('Network error during chunk upload'))
+      xhr.onabort = () => reject(new Error('Chunk upload aborted'))
+
+      xhr.open('POST', `${API_BASE}/upload/chunk`)
+      xhr.send(formData)
+    })
+    return { xhr, promise }
+  },
+
   async getUploadStatus(fileId: string): Promise<{
     file_id: string
     filename: string

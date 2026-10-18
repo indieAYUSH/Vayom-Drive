@@ -12,10 +12,10 @@ try:
 except Exception:
     aes_ctr_decrypt = None
 
-# Cryptographic and binary invariants from update.md Section 0 & Section 3
-DEFAULT_CHUNK_SIZE: int = 512 * 1024       # 512 KiB (multiple of 4096, divides 1 MiB)
-DEFAULT_MAX_206_BYTES: int = 16 * 1024 * 1024  # 16 MiB default capping for HTTP 206
-MAX_CACHE_CHUNKS: int = 128                # 128 * 512 KiB = 64 MiB max RAM cache
+# Cryptographic and binary invariants: 2 MiB / 4 MiB streaming segments (Netflix/YouTube standard)
+DEFAULT_CHUNK_SIZE: int = 2 * 1024 * 1024       # 2 MiB chunks (multiple of 512 KiB MTProto blocks)
+DEFAULT_MAX_206_BYTES: int = 4 * 1024 * 1024   # 4 MiB max single HTTP 206 response capping
+MAX_CACHE_CHUNKS: int = 64                      # 64 * 2 MiB = 128 MiB max RAM cache
 
 
 @dataclass
@@ -84,42 +84,18 @@ def parse_and_clamp_range(
 
     header = range_header.strip()
     if not header.startswith("bytes="):
-        # Malformed header -> fallback to full content 200 OK
-        return RangeSpec(
-            start=0,
-            end=total_size - 1,
-            total_size=total_size,
-            content_length=total_size,
-            is_range=False,
-            is_satisfiable=True,
-            is_capped=False
-        )
+        # Malformed header unit -> 416 Range Not Satisfiable
+        return RangeSpec(0, 0, total_size, 0, is_range=True, is_satisfiable=False, is_capped=False)
 
     ranges_str = header[len("bytes="):].strip()
 
-    # Reject multi-range (e.g. "bytes=0-10,20-30") per update.md specification
+    # Reject multi-range (e.g. "bytes=0-10,20-30") -> 416 Range Not Satisfiable
     if "," in ranges_str:
-        return RangeSpec(
-            start=0,
-            end=total_size - 1,
-            total_size=total_size,
-            content_length=total_size,
-            is_range=False,
-            is_satisfiable=True,
-            is_capped=False
-        )
+        return RangeSpec(0, 0, total_size, 0, is_range=True, is_satisfiable=False, is_capped=False)
 
     parts = ranges_str.split("-")
     if len(parts) != 2:
-        return RangeSpec(
-            start=0,
-            end=total_size - 1,
-            total_size=total_size,
-            content_length=total_size,
-            is_range=False,
-            is_satisfiable=True,
-            is_capped=False
-        )
+        return RangeSpec(0, 0, total_size, 0, is_range=True, is_satisfiable=False, is_capped=False)
 
     start_str, end_str = parts[0].strip(), parts[1].strip()
 
@@ -133,7 +109,7 @@ def parse_and_clamp_range(
             start = max(0, total_size - suffix_len)
             end = total_size - 1
         except ValueError:
-            return RangeSpec(0, total_size - 1, total_size, total_size, is_range=False, is_satisfiable=True)
+            return RangeSpec(0, 0, total_size, 0, is_range=True, is_satisfiable=False)
 
     # Case 2: Open-ended range `bytes=a-`
     elif start_str and not end_str:
@@ -143,7 +119,7 @@ def parse_and_clamp_range(
                 return RangeSpec(start, total_size - 1, total_size, 0, is_range=True, is_satisfiable=False)
             end = total_size - 1
         except ValueError:
-            return RangeSpec(0, total_size - 1, total_size, total_size, is_range=False, is_satisfiable=True)
+            return RangeSpec(0, 0, total_size, 0, is_range=True, is_satisfiable=False)
 
     # Case 3: Explicit range `bytes=a-b`
     elif start_str and end_str:
@@ -154,11 +130,11 @@ def parse_and_clamp_range(
                 return RangeSpec(start, end_val, total_size, 0, is_range=True, is_satisfiable=False)
             end = min(end_val, total_size - 1)
         except ValueError:
-            return RangeSpec(0, total_size - 1, total_size, total_size, is_range=False, is_satisfiable=True)
+            return RangeSpec(0, 0, total_size, 0, is_range=True, is_satisfiable=False)
 
     else:
-        # Invalid format `bytes=-`
-        return RangeSpec(0, total_size - 1, total_size, total_size, is_range=False, is_satisfiable=True)
+        # Invalid format `bytes=-` -> 416 Range Not Satisfiable
+        return RangeSpec(0, 0, total_size, 0, is_range=True, is_satisfiable=False)
 
     # Invariant: Cap single 206 responses to max_chunk_bytes (e.g. 16 MiB)
     # The client/player will send subsequent range requests for remaining bytes
@@ -188,13 +164,17 @@ class LRUChunkCache:
     """
     def __init__(self, max_chunks: int = MAX_CACHE_CHUNKS):
         self.max_chunks = max_chunks
-        self._cache: OrderedDict[Tuple[int, int], bytes] = OrderedDict()
-        self._in_flight: Dict[Tuple[int, int], asyncio.Future[bytes]] = {}
+        self._cache: OrderedDict[Tuple[Any, int], bytes] = OrderedDict()
+        self._in_flight: Dict[Tuple[Any, int], asyncio.Future[bytes]] = {}
         self._lock = asyncio.Lock()
+
+    def contains(self, key: Tuple[Any, int]) -> bool:
+        """Returns True if the chunk is cached or actively in-flight."""
+        return key in self._cache or key in self._in_flight
 
     async def get_or_fetch(
         self,
-        key: Tuple[int, int],
+        key: Tuple[Any, int],
         fetcher_coro_fn
     ) -> bytes:
         """
@@ -219,7 +199,7 @@ class LRUChunkCache:
 
         return await fut
 
-    async def _execute_fetch(self, key: Tuple[int, int], fetcher_coro_fn, fut: asyncio.Future[bytes]):
+    async def _execute_fetch(self, key: Tuple[Any, int], fetcher_coro_fn, fut: asyncio.Future[bytes]):
         try:
             chunk_data = await fetcher_coro_fn()
             async with self._lock:
@@ -227,18 +207,28 @@ class LRUChunkCache:
                 self._cache.move_to_end(key)
                 if len(self._cache) > self.max_chunks:
                     self._cache.popitem(last=False)  # Evict LRU
-                self._in_flight.pop(key, None)
             if not fut.done():
                 fut.set_result(chunk_data)
+        except asyncio.CancelledError:
+            # C-6: a cancelled fetch must resolve its waiters — never leave a dangling future
+            if not fut.done():
+                fut.cancel()
+            raise
         except Exception as e:
-            async with self._lock:
-                self._in_flight.pop(key, None)
             if not fut.done():
                 fut.set_exception(e)
+        finally:
+            # C-6: always deregister the in-flight key, on every exit path
+            async with self._lock:
+                self._in_flight.pop(key, None)
 
     async def clear(self):
         async with self._lock:
             self._cache.clear()
+            # C-6: resolve outstanding waiters instead of orphaning their futures
+            for fut in self._in_flight.values():
+                if not fut.done():
+                    fut.cancel()
             self._in_flight.clear()
 
     def size(self) -> int:
@@ -321,7 +311,8 @@ class MP4MoovResolver:
         Scans initial bytes for 'moov' atom. If absent, probes the tail of the file
         (up to 2 MB from EOF) to locate and parse the trailing 'moov' atom.
         """
-        if total_size < 16:
+        # C-7: files with no recorded parts must not crash on parts[0]
+        if not parts or total_size < 16:
             return {"is_mp4": False, "has_moov": False, "faststart": False}
 
         # 1. Fetch initial 64 KB to scan for ftyp, moov, mdat
@@ -450,7 +441,7 @@ class StreamingEngine:
 
         try:
             sorted_parts = sorted(parts, key=lambda p: p.get("byte_offset", 0))
-            for part in sorted_parts:
+            for part_idx, part in enumerate(sorted_parts):
                 p_start = part["byte_offset"]
                 p_end = p_start + part["part_size_bytes"] - 1
 
@@ -469,13 +460,14 @@ class StreamingEngine:
                 # Stream using chunk-aligned fetching with LRU cache & single-flight
                 curr_offset = slice_start
                 while curr_offset <= slice_end:
-                    # Invariant: fetch aligned to 512 KB boundary
+                    # Invariant: fetch aligned to chunk_size boundary
                     chunk_aligned_offset = (curr_offset // self.chunk_size) * self.chunk_size
                     offset_within_chunk = curr_offset - chunk_aligned_offset
                     chunk_limit = min(self.chunk_size, part["part_size_bytes"] - chunk_aligned_offset)
 
                     msg_id = part["telegram_message_id"]
-                    cache_key = (msg_id, chunk_aligned_offset)
+                    part_key = part.get("id") or str(msg_id)
+                    cache_key = (part_key, chunk_aligned_offset)
 
                     # Fetch chunk via LRU cache (with single-flight coalescing)
                     async def _fetch_upstream() -> bytes:
@@ -487,7 +479,7 @@ class StreamingEngine:
                             access_hash=part.get("telegram_access_hash"),
                             offset=chunk_aligned_offset,
                             limit=chunk_limit,
-                            chunk_size=min(self.chunk_size, 64 * 1024)
+                            chunk_size=min(self.chunk_size, 512 * 1024)
                         ):
                             buf.extend(raw_block)
                         return bytes(buf)
@@ -495,6 +487,46 @@ class StreamingEngine:
                     chunk_bytes = await self.cache.get_or_fetch(cache_key, _fetch_upstream)
                     if not chunk_bytes:
                         break
+
+                    # Lookahead: asynchronously prefetch up to 2 chunks ahead (4-6 MiB pipeline)
+                    def _make_prefetch(t_msg_id: int, t_part: dict, target_off: int, target_lim: int):
+                        async def _prefetch_coro() -> bytes:
+                            p_buf = bytearray()
+                            async for p_block in storage_client.stream_part_bytes(
+                                message_id=t_msg_id,
+                                channel_id=t_part.get("telegram_channel_id"),
+                                file_id=t_part.get("telegram_file_id"),
+                                access_hash=t_part.get("telegram_access_hash"),
+                                offset=target_off,
+                                limit=target_lim,
+                                chunk_size=min(self.chunk_size, 512 * 1024)
+                            ):
+                                p_buf.extend(p_block)
+                            return bytes(p_buf)
+                        return _prefetch_coro
+
+                    for lookahead_step in (1, 2):
+                        ahead_offset = chunk_aligned_offset + lookahead_step * self.chunk_size
+                        if ahead_offset < part["part_size_bytes"]:
+                            ahead_cache_key = (part_key, ahead_offset)
+                            if not self.cache.contains(ahead_cache_key):
+                                ahead_limit = min(self.chunk_size, part["part_size_bytes"] - ahead_offset)
+                                asyncio.create_task(self.cache.get_or_fetch(
+                                    ahead_cache_key,
+                                    _make_prefetch(msg_id, part, ahead_offset, ahead_limit)
+                                ))
+                        elif part_idx + 1 < len(sorted_parts):
+                            # Cross-part lookahead: prefetch the start of the next 1.9 GB slice in large files (e.g. 50 GB)
+                            next_p = sorted_parts[part_idx + 1]
+                            next_msg_id = next_p["telegram_message_id"]
+                            next_part_key = next_p.get("id") or str(next_msg_id)
+                            next_cache_key = (next_part_key, 0)
+                            if not self.cache.contains(next_cache_key):
+                                next_lim = min(self.chunk_size, next_p["part_size_bytes"])
+                                asyncio.create_task(self.cache.get_or_fetch(
+                                    next_cache_key,
+                                    _make_prefetch(next_msg_id, next_p, 0, next_lim)
+                                ))
 
                     # Invariant 1: Decrypt chunk if encrypted with AES-256-CTR
                     if encryption == "ctr" and nonce and key and aes_ctr_decrypt:

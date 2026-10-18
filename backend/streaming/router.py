@@ -2,6 +2,7 @@ import logging
 from typing import Optional
 from fastapi import APIRouter, Header, HTTPException, Query, Response, Request, status
 from fastapi.responses import StreamingResponse, JSONResponse
+from ..api.routes import format_content_disposition
 from ..config import settings
 from ..db.connection import get_db
 from ..storage.client import storage_client
@@ -22,14 +23,16 @@ def verify_loopback_security(request: Request, token: Optional[str] = None):
     Enforces localhost loopback security invariant from update.md Section 0:
     'Bind to 127.0.0.1 only. Require a random token in the URL path and reject any Host header that isn’t the loopback origin.'
     """
-    host = request.headers.get("host", "").split(":")[0]
-    # Allowed loopback origins: localhost, 127.0.0.1, ::1
-    is_loopback = host in ("127.0.0.1", "localhost", "::1", "0.0.0.0")
+    host = request.headers.get("host", "").split(":")[0].strip().lower()
+    # Allowed loopback origins: localhost, 127.0.0.1, ::1, or 127.x.x.x (and testserver in tests)
+    is_loopback = host in ("127.0.0.1", "localhost", "::1", "testserver") or host.startswith("127.")
+    if not is_loopback:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied: non-loopback host origin")
 
-    # In strict desktop mode or when a loopback token is provided, validate it
-    loopback_token = getattr(settings, "STREAM_LOOPBACK_TOKEN", None)
+    # In strict desktop mode or when a loopback token is configured, validate it
+    loopback_token = getattr(settings, "STREAM_LOOPBACK_TOKEN", "")
     if loopback_token and token != loopback_token:
-        raise HTTPException(status_code=403, detail="Unauthorized loopback access token")
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Unauthorized loopback access token")
 
 
 @router.api_route("/virtual-stream/{file_id}", methods=["GET", "HEAD"])
@@ -47,12 +50,11 @@ async def virtual_stream_file(
     - Enforces 16 MiB 206 capping to keep playback buffer sliding (<100MB RAM)
     - Prevents truncated payloads
     """
-    # Verify loopback origin if in desktop loopback mode
-    if token:
-        verify_loopback_security(request, token)
+    # Verify loopback origin and token security
+    verify_loopback_security(request, token)
 
     async with get_db() as db:
-        cursor = await db.execute("SELECT * FROM files WHERE id = ?", (file_id,))
+        cursor = await db.execute("SELECT * FROM files WHERE id = ? AND is_deleted = 0", (file_id,))
         file_row = await cursor.fetchone()
         if not file_row:
             raise HTTPException(status_code=404, detail="File not found")
@@ -82,7 +84,7 @@ async def virtual_stream_file(
     headers = {
         "Accept-Ranges": "bytes",
         "Content-Length": str(range_spec.content_length),
-        "Content-Disposition": f'inline; filename="{filename}"'
+        "Content-Disposition": format_content_disposition(filename)
     }
 
     if range_spec.is_range:
@@ -123,15 +125,21 @@ async def virtual_stream_file(
 
 
 @router.get("/files/{file_id}/moov")
-async def get_mp4_moov_info(file_id: str):
+async def get_mp4_moov_info(
+    file_id: str,
+    request: Request,
+    token: Optional[str] = Query(None)
+):
     """
     MP4 'moov' atom resolver endpoint adhering to update.md Section 3:
     Detects if MP4 has FastStart ('moov' at front) or is trailing ('moov' at tail).
     Extracts atom locations so video players can seek immediately without downloading
     gigabytes of intermediate video frames.
     """
+    verify_loopback_security(request, token)
+
     async with get_db() as db:
-        cursor = await db.execute("SELECT * FROM files WHERE id = ?", (file_id,))
+        cursor = await db.execute("SELECT * FROM files WHERE id = ? AND is_deleted = 0", (file_id,))
         file_row = await cursor.fetchone()
         if not file_row:
             raise HTTPException(status_code=404, detail="File not found")
@@ -152,14 +160,20 @@ async def get_mp4_moov_info(file_id: str):
 
 
 @router.get("/files/{file_id}/moov/bytes")
-async def get_mp4_moov_bytes(file_id: str):
+async def get_mp4_moov_bytes(
+    file_id: str,
+    request: Request,
+    token: Optional[str] = Query(None)
+):
     """
     Directly streams the raw MP4 'moov' atom box bytes.
     Allows video players and demuxers to obtain codec and index tables instantly
     without downloading gigabytes of intermediate video frames.
     """
+    verify_loopback_security(request, token)
+
     async with get_db() as db:
-        cursor = await db.execute("SELECT * FROM files WHERE id = ?", (file_id,))
+        cursor = await db.execute("SELECT * FROM files WHERE id = ? AND is_deleted = 0", (file_id,))
         file_row = await cursor.fetchone()
         if not file_row:
             raise HTTPException(status_code=404, detail="File not found")
@@ -193,7 +207,7 @@ async def get_mp4_moov_bytes(file_id: str):
         "Accept-Ranges": "bytes",
         "Content-Length": str(moov_size),
         "Content-Range": f"bytes {moov_offset}-{moov_offset + moov_size - 1}/{total_size}",
-        "Content-Disposition": f'inline; filename="{file_item["filename"]}.moov"'
+        "Content-Disposition": format_content_disposition(f"{file_item['filename']}.moov")
     }
 
     return StreamingResponse(

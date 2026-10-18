@@ -14,7 +14,8 @@ import {
   ZoomIn, 
   ZoomOut,
   Maximize2,
-  Star
+  Star,
+  ExternalLink
 } from 'lucide-react'
 import { Button } from '../common/Button'
 import { formatBytes } from '../../utils/format'
@@ -200,6 +201,16 @@ export const LightboxModal: React.FC<LightboxModalProps> = ({
           </Button>
 
           <Button
+            variant="outline"
+            size="sm"
+            onClick={() => window.open(item.preview_url || `/api/v1/files/${item.id}/download`, '_blank')}
+            icon={<ExternalLink size={13} />}
+            title="Open stream in native player or new browser tab"
+          >
+            <span className="hidden sm:inline">Native</span>
+          </Button>
+
+          <Button
             variant={showMetadata ? 'secondary' : 'outline'}
             size="sm"
             onClick={() => setShowMetadata(!showMetadata)}
@@ -248,7 +259,7 @@ export const LightboxModal: React.FC<LightboxModalProps> = ({
         >
           {item.file_category === 'video' ? (
             <VideoPlayer
-              src={item.preview_url || `/api/v1/files/${item.id}/download`}
+              src={item.preview_url || `/api/v1/virtual-stream/${item.id}`}
               poster={item.thumbnail_url}
               filename={item.filename}
             />

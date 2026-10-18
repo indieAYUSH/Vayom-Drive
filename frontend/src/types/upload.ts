@@ -1,5 +1,6 @@
 export type UploadStatus = 
   | 'queued' 
+  | 'buffering'
   | 'hashing' 
   | 'analyzing' 
   | 'compressing' 
@@ -21,8 +22,10 @@ export interface UploadTask {
   speed_bps: number
   eta_seconds: number
   status: UploadStatus
+  stage?: string
   current_part: number
   total_parts: number
+  server_file_id?: string
   error_message?: string
   created_at: number
 }

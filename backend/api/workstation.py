@@ -1,15 +1,21 @@
 import logging
+import sqlite3
 import uuid
 from pathlib import Path
 from typing import Optional, List, Dict, Any
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Depends
 from pydantic import BaseModel
 
 from ..db.connection import get_db
 from ..workstation.watcher import workstation_watcher
+from ..workstation.security import verify_workstation_auth, validate_watch_folder_path
 
 logger = logging.getLogger("vayom.api.workstation")
-router = APIRouter(prefix="/api/v1/workstation", tags=["workstation"])
+router = APIRouter(
+    prefix="/api/v1/workstation",
+    tags=["workstation"],
+    dependencies=[Depends(verify_workstation_auth)]
+)
 
 
 class CreateWatchFolderRequest(BaseModel):
@@ -59,36 +65,45 @@ async def list_watch_folders() -> List[Dict[str, Any]]:
 @router.post("/watch-folders")
 async def create_watch_folder(req: CreateWatchFolderRequest) -> Dict[str, Any]:
     """Registers a new local watch folder for automated media ingestion."""
-    resolved_path = Path(req.path).expanduser().resolve()
-    if not resolved_path.exists():
-        raise HTTPException(status_code=400, detail=f"Directory path does not exist: {req.path}")
-    if not resolved_path.is_dir():
-        raise HTTPException(status_code=400, detail=f"Path is not a directory: {req.path}")
+    try:
+        resolved_path = validate_watch_folder_path(req.path)
+    except (ValueError, FileNotFoundError, NotADirectoryError) as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
     folder_id = f"wf_{uuid.uuid4().hex[:12]}"
     label = req.label.strip() if req.label and req.label.strip() else resolved_path.name or str(resolved_path)
 
     async with get_db() as db:
+        # I-17: Validate the target album up-front so ingestion never fails on a late FK error
+        if req.target_album_id:
+            cur = await db.execute("SELECT 1 FROM albums WHERE id = ?", (req.target_album_id,))
+            if not await cur.fetchone():
+                raise HTTPException(status_code=404, detail="Target album not found")
+
         # Check if already registered
         cur = await db.execute("SELECT id FROM watch_folders WHERE path = ?", (str(resolved_path),))
         if await cur.fetchone():
             raise HTTPException(status_code=409, detail="This directory path is already being watched.")
 
-        await db.execute(
-            """
-            INSERT INTO watch_folders (
-                id, path, label, target_album_id, auto_delete_local, is_active
-            ) VALUES (?, ?, ?, ?, ?, 1)
-            """,
-            (
-                folder_id,
-                str(resolved_path),
-                label,
-                req.target_album_id,
-                1 if req.auto_delete_local else 0
+        # I-23: SELECT-then-INSERT is racy — concurrent POSTs on the same path raise IntegrityError
+        try:
+            await db.execute(
+                """
+                INSERT INTO watch_folders (
+                    id, path, label, target_album_id, auto_delete_local, is_active
+                ) VALUES (?, ?, ?, ?, ?, 1)
+                """,
+                (
+                    folder_id,
+                    str(resolved_path),
+                    label,
+                    req.target_album_id,
+                    1 if req.auto_delete_local else 0
+                )
             )
-        )
-        await db.commit()
+            await db.commit()
+        except sqlite3.IntegrityError:
+            raise HTTPException(status_code=409, detail="This directory path is already being watched.")
 
     # Dynamic reload in watcher engine
     await workstation_watcher.reload()
@@ -113,6 +128,12 @@ async def update_watch_folder(folder_id: str, req: UpdateWatchFolderRequest) -> 
         row = await cur.fetchone()
         if not row:
             raise HTTPException(status_code=404, detail="Watch folder not found")
+
+        # I-17: Validate a newly supplied target album before persisting it
+        if req.target_album_id:
+            cur = await db.execute("SELECT 1 FROM albums WHERE id = ?", (req.target_album_id,))
+            if not await cur.fetchone():
+                raise HTTPException(status_code=404, detail="Target album not found")
 
         current = dict(row)
         label = req.label if req.label is not None else current["label"]
@@ -156,7 +177,7 @@ async def scan_watch_folder(folder_id: str) -> Dict[str, Any]:
     try:
         count = await workstation_watcher.scan_folder(folder_id)
         return {"status": "scan_started", "folder_id": folder_id, "queued_files": count}
-    except ValueError as e:
+    except (ValueError, FileNotFoundError, NotADirectoryError) as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         logger.error(f"Error rescanning watch folder {folder_id}: {e}")

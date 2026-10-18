@@ -1,4 +1,4 @@
-import React from 'react'
+import React, { useState } from 'react'
 import { FileItem } from '../../types/vault'
 import { Checkbox } from '../common/Checkbox'
 import { Badge } from '../common/Badge'
@@ -21,6 +21,7 @@ export const MediaCard: React.FC<MediaCardProps> = ({
 }) => {
   const { starredIds, toggleStar, setActiveAudioItem, cleanupIncomplete } = useVaultStore()
   const isStarred = starredIds.includes(item.id)
+  const [thumbError, setThumbError] = useState(false)
 
   const isAudio =
     item.file_category === 'audio' ||
@@ -107,11 +108,12 @@ export const MediaCard: React.FC<MediaCardProps> = ({
         onClick={handleCardClick}
         className="w-full aspect-square bg-[#080808] overflow-hidden flex items-center justify-center cursor-pointer relative"
       >
-        {item.thumbnail_url || (item.file_category === 'image' && item.preview_url) ? (
+        {!thumbError && (item.thumbnail_url || (item.file_category === 'image' && item.preview_url)) ? (
           <img
             src={item.thumbnail_url || item.preview_url}
             alt={item.filename}
             loading="lazy"
+            onError={() => setThumbError(true)}
             draggable={false}
             onDragStart={(e) => e.preventDefault()}
             className="w-full h-full object-cover transition-transform duration-200 group-hover:scale-[1.02] select-none"

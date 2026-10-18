@@ -28,6 +28,8 @@ CREATE TABLE IF NOT EXISTS files (
 );
 
 CREATE INDEX IF NOT EXISTS idx_files_created ON files(created_at DESC);
+-- I-16: composite index for the hottest list query: WHERE is_deleted = 0 ORDER BY created_at DESC
+CREATE INDEX IF NOT EXISTS idx_files_active_created ON files(is_deleted, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_files_category ON files(file_category);
 CREATE INDEX IF NOT EXISTS idx_files_deleted ON files(is_deleted);
 CREATE INDEX IF NOT EXISTS idx_files_status ON files(upload_status);
@@ -62,6 +64,8 @@ CREATE TABLE IF NOT EXISTS albums (
     cover_file_id TEXT REFERENCES files(id) ON DELETE SET NULL,
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
+-- I-16: FK ON DELETE SET NULL lookup index (avoids full albums scan on file delete)
+CREATE INDEX IF NOT EXISTS idx_albums_cover ON albums(cover_file_id);
 
 CREATE TABLE IF NOT EXISTS file_albums (
     file_id TEXT NOT NULL REFERENCES files(id) ON DELETE CASCADE,
@@ -95,6 +99,8 @@ CREATE TABLE IF NOT EXISTS share_links (
     is_revoked INTEGER NOT NULL DEFAULT 0,
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
+-- I-16: FK ON DELETE CASCADE lookup index (avoids full share_links scan on file delete)
+CREATE INDEX IF NOT EXISTS idx_share_links_file ON share_links(file_id);
 
 -- Active User Sessions
 CREATE TABLE IF NOT EXISTS sessions (
@@ -126,3 +132,5 @@ CREATE TABLE IF NOT EXISTS watch_folder_events (
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 CREATE INDEX IF NOT EXISTS idx_watch_events_folder ON watch_folder_events(folder_id, created_at DESC);
+-- I-16: FK ON DELETE SET NULL lookup index (avoids full watch_folder_events scan on every file delete)
+CREATE INDEX IF NOT EXISTS idx_watch_events_file ON watch_folder_events(file_id);

@@ -3,9 +3,12 @@ import time
 import asyncio
 import json
 import logging
+import uuid
+import shutil
+from pathlib import Path
 from typing import Optional, Callable, AsyncIterator, Any, Union
 from telethon import TelegramClient, events
-from telethon.errors import FloodWaitError
+from telethon.errors import FloodWaitError, FileReferenceExpiredError, FilerefUpgradeNeededError
 from telethon.tl.types import MessageMediaDocument
 from ..config import settings
 from .session import RobustSQLiteSession
@@ -21,6 +24,45 @@ class TelegramStorageClient:
         self._flood_wait_until: float = 0.0
         # Anti-Ban Invariant 4: Limit upload concurrency to 3-4 parallel workers
         self._upload_semaphore = asyncio.Semaphore(3)
+        self._catalog_lock = asyncio.Lock()
+        self.last_pinned_catalog_msg_id: Optional[int] = None
+        self.last_backup_catalog_msg_id: Optional[int] = None
+        self.last_saved_catalog_msg_id: Optional[int] = None
+        self._load_catalog_state()
+
+    def _catalog_state_path(self) -> Path:
+        return settings.DATA_DIR / "catalog_state.json"
+
+    def _load_catalog_state(self):
+        try:
+            path = self._catalog_state_path()
+            if path.exists():
+                data = json.loads(path.read_text(encoding="utf-8"))
+                self.last_pinned_catalog_msg_id = data.get("last_pinned_msg_id")
+                self.last_backup_catalog_msg_id = data.get("last_backup_msg_id")
+                self.last_saved_catalog_msg_id = data.get("last_saved_msg_id")
+        except Exception as e:
+            logger.warning(f"Could not load catalog state: {e}")
+
+    def _save_catalog_state(self):
+        try:
+            settings.DATA_DIR.mkdir(parents=True, exist_ok=True)
+            path = self._catalog_state_path()
+            temp_path = settings.DATA_DIR / f"catalog_state_{uuid.uuid4().hex}.tmp"
+            data = {
+                "last_pinned_msg_id": self.last_pinned_catalog_msg_id,
+                "last_backup_msg_id": self.last_backup_catalog_msg_id,
+                "last_saved_msg_id": self.last_saved_catalog_msg_id
+            }
+            temp_path.write_text(json.dumps(data), encoding="utf-8")
+            os.replace(temp_path, path)
+        except Exception as e:
+            logger.warning(f"Could not persist catalog state: {e}")
+            if 'temp_path' in locals() and temp_path.exists():
+                try:
+                    temp_path.unlink()
+                except Exception:
+                    pass
 
     def set_flood_wait(self, seconds: int):
         """Sets or extends the flood wait period in seconds."""
@@ -79,7 +121,16 @@ class TelegramStorageClient:
         """Initializes and authenticates the Telethon client (User MTProto or Bot MTProto)."""
         async with self._lock:
             if self._is_connected and self.client:
-                return
+                if hasattr(self.client, "is_connected") and not self.client.is_connected():
+                    logger.info("Client marked connected but socket disconnected. Reconnecting...")
+                    try:
+                        await self.client.connect()
+                        if self.client.is_connected():
+                            return
+                    except Exception as e:
+                        logger.warning(f"Fast reconnect failed: {e}")
+                else:
+                    return
 
             settings.load_auth_config()
 
@@ -117,6 +168,23 @@ class TelegramStorageClient:
                 logger.info("No active auth session. Awaiting user login.")
                 self._is_connected = False
 
+    async def ensure_connected(self):
+        """Ensures active Telegram MTProto connection; auto-reconnects if dropped."""
+        if not self._is_connected or not self.client:
+            await self.connect()
+            return
+
+        if hasattr(self.client, "is_connected") and not self.client.is_connected():
+            logger.info("Telegram connection dropped. Restoring MTProto socket...")
+            try:
+                await self.client.connect()
+                if self.client.is_connected():
+                    self._is_connected = True
+                    return
+            except Exception as e:
+                logger.warning(f"Reconnection attempt failed: {e}. Performing full reconnect...")
+            await self.reconnect()
+
     async def disconnect(self):
         """Cleanly disconnects the Telegram MTProto client."""
         async with self._lock:
@@ -147,6 +215,7 @@ class TelegramStorageClient:
         Automatically catches and respects FloodWait rate limits.
         Returns dict with message_id, channel_id, file_id, access_hash.
         """
+        await self.ensure_connected()
         if not self._is_connected or not self.client:
             # Full-fidelity offline mock mode: persists part to mock_blobs
             import shutil
@@ -231,12 +300,13 @@ class TelegramStorageClient:
         access_hash: Optional[str] = None,
         offset: int = 0,
         limit: Optional[int] = None,
-        chunk_size: int = 64 * 1024
+        chunk_size: int = 512 * 1024
     ) -> AsyncIterator[bytes]:
         """
         Streams a byte slice of a document from Telegram without loading the whole file into RAM.
-        Uses in-memory media reference cache to prevent rate limits during rapid video scrubbing.
+        Uses in-memory media reference cache with automatic FileReference refresh and retry resilience.
         """
+        await self.ensure_connected()
         if not self._is_connected or not self.client:
             mock_dir = settings.DATA_DIR / "mock_blobs"
             blob_path = mock_dir / f"{message_id}.bin"
@@ -257,42 +327,114 @@ class TelegramStorageClient:
 
         target_channel_str = str(channel_id or settings.TELEGRAM_CHANNEL_ID)
         cache_key = (target_channel_str, message_id)
+        channel = int(target_channel_str)
 
-        # 1. Check in-memory media cache (avoids repeated Telegram RPC calls on Range requests)
+        async def get_fresh_media():
+            for m_attempt in range(3):
+                await self.ensure_connected()
+                await self._wait_if_flooded()
+                try:
+                    msg = await self.client.get_messages(channel, ids=message_id)
+                    if msg and msg.media:
+                        if len(self._media_cache) > 500:
+                            self._media_cache.pop(next(iter(self._media_cache)))
+                        self._media_cache[cache_key] = msg.media
+                        return msg.media
+                except FloodWaitError as e:
+                    penalty = e.seconds + 2
+                    self.set_flood_wait(penalty)
+                    logger.warning(f"FloodWait when getting message {message_id}: sleeping {penalty}s (X + 2 rule)")
+                    await asyncio.sleep(penalty)
+                    continue
+                except Exception as e:
+                    err_str = str(e)
+                    if "FLOOD_WAIT_" in err_str:
+                        import re
+                        match = re.search(r"FLOOD_WAIT_(\d+)", err_str)
+                        wait_sec = int(match.group(1)) if match else 10
+                        penalty = wait_sec + 2
+                        self.set_flood_wait(penalty)
+                        logger.warning(f"FloodWait text when getting message {message_id}: sleeping {penalty}s...")
+                        await asyncio.sleep(penalty)
+                        continue
+                    logger.warning(f"Error getting message {message_id}: {e}. Reconnecting...")
+                    await self.ensure_connected()
+                    await asyncio.sleep(0.5)
+            raise FileNotFoundError(f"Message {message_id} not found in channel {channel}")
+
         media = self._media_cache.get(cache_key)
         if not media:
-            await self._wait_if_flooded()
-            channel = int(target_channel_str)
+            media = await get_fresh_media()
+
+        bytes_sent = 0
+        curr_offset = offset
+        max_retries = 5
+
+        for attempt in range(max_retries):
             try:
-                message = await self.client.get_messages(channel, ids=message_id)
+                await self._wait_if_flooded()
+                # Telethon iter_download streams chunks directly from Telegram DC sockets
+                async for chunk in self.client.iter_download(
+                    media,
+                    offset=curr_offset,
+                    request_size=chunk_size,
+                    chunk_size=chunk_size
+                ):
+                    # Check global rate limits before yielding each chunk
+                    await self._wait_if_flooded()
+
+                    if limit is not None and bytes_sent + len(chunk) > limit:
+                        remaining = limit - bytes_sent
+                        yield chunk[:remaining]
+                        bytes_sent += remaining
+                        return
+
+                    yield chunk
+                    bytes_sent += len(chunk)
+                    curr_offset += len(chunk)
+
+                # Successful stream completion
+                return
+
             except FloodWaitError as e:
                 penalty = e.seconds + 2
                 self.set_flood_wait(penalty)
-                logger.warning(f"FloodWait when getting message {message_id}: sleeping {penalty}s (X + 2 rule)")
+                logger.warning(f"FloodWait during iter_download for msg {message_id} at offset {curr_offset}: sleeping {penalty}s (X + 2 rule)...")
                 await asyncio.sleep(penalty)
-                message = await self.client.get_messages(channel, ids=message_id)
-            if not message or not message.media:
-                raise FileNotFoundError(f"Message {message_id} not found in channel {channel}")
-            media = message.media
-            if len(self._media_cache) > 500:
-                self._media_cache.pop(next(iter(self._media_cache)))
-            self._media_cache[cache_key] = media
+                continue
 
-        await self._wait_if_flooded()
-        # 2. Telethon iter_download streams chunks directly from Telegram DC sockets
-        bytes_sent = 0
-        async for chunk in self.client.iter_download(
-            media,
-            offset=offset,
-            request_size=chunk_size
-        ):
-            if limit is not None and bytes_sent + len(chunk) > limit:
-                remaining = limit - bytes_sent
-                yield chunk[:remaining]
-                break
+            except (FileReferenceExpiredError, FilerefUpgradeNeededError) as e:
+                logger.warning(f"FileReference expired for msg {message_id} at {curr_offset}: {e}. Refreshing message...")
+                self._media_cache.pop(cache_key, None)
+                media = await get_fresh_media()
+                continue
 
-            yield chunk
-            bytes_sent += len(chunk)
+            except Exception as e:
+                err_str = str(e)
+                if "FLOOD_WAIT_" in err_str:
+                    import re
+                    match = re.search(r"FLOOD_WAIT_(\d+)", err_str)
+                    wait_sec = int(match.group(1)) if match else 10
+                    penalty = wait_sec + 2
+                    self.set_flood_wait(penalty)
+                    logger.warning(f"FloodWait text during iter_download for msg {message_id} at {curr_offset}: sleeping {penalty}s...")
+                    await asyncio.sleep(penalty)
+                    continue
+
+                if "filereference" in err_str.lower() or "file reference" in err_str.lower():
+                    logger.warning(f"File reference error for msg {message_id}: {e}. Refreshing message...")
+                    self._media_cache.pop(cache_key, None)
+                    media = await get_fresh_media()
+                    continue
+
+                logger.warning(
+                    f"iter_download error for msg {message_id} at {curr_offset} "
+                    f"(attempt {attempt + 1}/{max_retries}): {e}. Reconnecting..."
+                )
+                await self.ensure_connected()
+                if attempt == max_retries - 1:
+                    raise
+                await asyncio.sleep(0.5)
 
     async def get_pinned_catalog(self) -> Optional[dict]:
         """
@@ -340,6 +482,9 @@ class TelegramStorageClient:
                     if message and message.media and getattr(message.media, "document", None):
                         raw_bytes = await self.client.download_media(message, bytes)
                         if raw_bytes:
+                            if str(target_chat) == str(settings.TELEGRAM_CHANNEL_ID):
+                                self.last_pinned_catalog_msg_id = pinned_id
+                                self._save_catalog_state()
                             return json.loads(raw_bytes.decode("utf-8"))
 
                 # Fallback: Scan recent 10 messages for VAYOM:CATALOG envelope
@@ -350,10 +495,16 @@ class TelegramStorageClient:
                         if msg.media and getattr(msg.media, "document", None):
                             raw_bytes = await self.client.download_media(msg, bytes)
                             if raw_bytes:
+                                if str(target_chat) == str(settings.TELEGRAM_CHANNEL_ID):
+                                    self.last_pinned_catalog_msg_id = msg.id
+                                    self._save_catalog_state()
                                 return json.loads(raw_bytes.decode("utf-8"))
                         elif "{" in text and text.endswith("}"):
                             try:
                                 json_part = text[text.index("{"):]
+                                if str(target_chat) == str(settings.TELEGRAM_CHANNEL_ID):
+                                    self.last_pinned_catalog_msg_id = msg.id
+                                    self._save_catalog_state()
                                 return json.loads(json_part)
                             except Exception:
                                 pass
@@ -399,103 +550,173 @@ class TelegramStorageClient:
     async def save_and_pin_catalog(self, catalog_data: dict, old_pinned_id: Optional[int] = None) -> int:
         """
         Saves and pins the compacted master catalog (index.json) to the private channel WAL.
+        Serializes catalog writes and mirrors via an asyncio lock.
         Automatically mirrors to:
         1. Local persistent snapshot (vault_catalog_backup.json) for offline recovery.
         2. Secondary backup channel (if configured).
         3. Saved Messages ('me') (if in QR user session).
+        Removes previous pinned catalog messages to avoid spam and accumulation.
         """
-        # Always maintain local snapshot for zero-cloud disaster recovery
-        try:
-            backup_snapshot = settings.DATA_DIR / "vault_catalog_backup.json"
-            backup_snapshot.write_text(json.dumps(catalog_data, indent=2), encoding="utf-8")
-        except Exception as e:
-            logger.warning(f"Could not write local catalog snapshot: {e}")
-
-        # 1. Offline mock mode handling
-        if not self._is_connected or not self.client:
-            mock_dir = settings.DATA_DIR / "mock_blobs"
-            mock_dir.mkdir(parents=True, exist_ok=True)
-            cat_file = mock_dir / "pinned_catalog.json"
-            cat_file.write_text(json.dumps(catalog_data, indent=2), encoding="utf-8")
-            logger.info("Saved mock pinned catalog index.json")
-            return 999999
-
-        await self._wait_if_flooded()
-        channel = int(settings.TELEGRAM_CHANNEL_ID)
-        temp_catalog = settings.DATA_DIR / "index.json"
-        try:
-            # Serialize compacted JSON
-            temp_catalog.write_text(json.dumps(catalog_data, separators=(",", ":")), encoding="utf-8")
-            summary = {
-                "version": "1.0",
-                "updated_at": catalog_data.get("updated_at", ""),
-                "total_files": catalog_data.get("total_files", len(catalog_data.get("files", []))),
-                "total_bytes": catalog_data.get("total_bytes", 0)
-            }
-            caption = f"VAYOM:CATALOG:v1:{json.dumps(summary)}"
-
-            # 1. Upload & Pin to Primary Channel
-            msg = await self.client.send_file(
-                channel,
-                str(temp_catalog),
-                caption=caption,
-                force_document=True
-            )
+        async with self._catalog_lock:
+            # Always maintain local snapshot for zero-cloud disaster recovery (atomic write)
+            backup_tmp = None
             try:
-                await self.client.pin_message(channel, msg.id, notify=False)
-                logger.info(f"Pinned new master catalog message {msg.id} in primary channel.")
-            except Exception as pin_err:
-                logger.warning(f"Could not pin catalog in primary channel: {pin_err}")
+                settings.DATA_DIR.mkdir(parents=True, exist_ok=True)
+                backup_snapshot = settings.DATA_DIR / "vault_catalog_backup.json"
+                backup_tmp = settings.DATA_DIR / f"vault_catalog_backup_{uuid.uuid4().hex}.tmp"
+                backup_tmp.write_text(json.dumps(catalog_data, indent=2), encoding="utf-8")
+                os.replace(backup_tmp, backup_snapshot)
+            except Exception as e:
+                logger.warning(f"Could not write local catalog snapshot: {e}")
+                if backup_tmp and backup_tmp.exists():
+                    try:
+                        backup_tmp.unlink()
+                    except Exception:
+                        pass
 
-            if old_pinned_id and old_pinned_id != msg.id:
+            # 1. Offline mock mode handling
+            if not self._is_connected or not self.client:
+                mock_dir = settings.DATA_DIR / "mock_blobs"
+                mock_dir.mkdir(parents=True, exist_ok=True)
+                cat_file = mock_dir / "pinned_catalog.json"
+                cat_tmp = mock_dir / f"pinned_catalog_{uuid.uuid4().hex}.tmp"
                 try:
-                    await self.client.delete_messages(channel, [old_pinned_id])
-                except Exception as err:
-                    logger.warning(f"Could not delete old pinned catalog message {old_pinned_id}: {err}")
+                    cat_tmp.write_text(json.dumps(catalog_data, indent=2), encoding="utf-8")
+                    os.replace(cat_tmp, cat_file)
+                finally:
+                    if cat_tmp.exists():
+                        try:
+                            cat_tmp.unlink()
+                        except Exception:
+                            pass
+                logger.info("Saved mock pinned catalog index.json")
+                self.last_pinned_catalog_msg_id = 999999
+                self._save_catalog_state()
+                return 999999
 
-            # 2. Mirror to Secondary Backup Channel if configured
-            if settings.TELEGRAM_BACKUP_CHANNEL_ID:
-                try:
-                    b_chan = int(settings.TELEGRAM_BACKUP_CHANNEL_ID)
-                    b_msg = await self.client.send_file(
-                        b_chan,
-                        str(temp_catalog),
-                        caption=f"VAYOM:CATALOG:MIRROR:v1:{json.dumps(summary)}",
-                        force_document=True
-                    )
-                    await self.client.pin_message(b_chan, b_msg.id, notify=False)
-                    logger.info(f"Mirrored master catalog to backup channel {b_chan}")
-                except Exception as b_err:
-                    logger.warning(f"Failed to mirror catalog to backup channel: {b_err}")
+            await self._wait_if_flooded()
+            channel = int(settings.TELEGRAM_CHANNEL_ID)
 
-            # 3. Mirror to Saved Messages ('me') in QR user mode
-            if settings.AUTH_MODE == "qr" and settings.AUTO_MIRROR_SAVED_MESSAGES:
+            # Determine target old pinned message to delete
+            target_old_pinned_id = old_pinned_id if old_pinned_id is not None else self.last_pinned_catalog_msg_id
+            if target_old_pinned_id is None:
                 try:
-                    await self.client.send_file(
-                        "me",
-                        str(temp_catalog),
-                        caption=f"VAYOM:CATALOG:MIRROR:v1:{json.dumps(summary)}",
-                        force_document=True
-                    )
-                    logger.info("Mirrored master catalog to Telegram Saved Messages ('me').")
-                except Exception as s_err:
-                    logger.warning(f"Could not mirror catalog to Saved Messages: {s_err}")
+                    from telethon.tl.functions.channels import GetFullChannelRequest
+                    full_channel = await self.client(GetFullChannelRequest(channel))
+                    target_old_pinned_id = getattr(full_channel.full_chat, "pinned_msg_id", None)
+                except Exception as e:
+                    logger.debug(f"Could not query existing pinned message ID from Telegram channel: {e}")
 
-            return msg.id
-        except FloodWaitError as e:
-            penalty = e.seconds + 2
-            self.set_flood_wait(penalty)
-            logger.warning(f"FloodWait when saving pinned catalog: sleeping {penalty}s (X + 2 rule)")
-            raise
-        except Exception as e:
-            logger.error(f"Error pinning master catalog: {e}")
-            raise
-        finally:
-            if temp_catalog.exists():
+            if target_old_pinned_id is not None:
+                if type(target_old_pinned_id) is not int:
+                    if isinstance(target_old_pinned_id, str) and (target_old_pinned_id.isdigit() or (target_old_pinned_id.startswith("-") and target_old_pinned_id[1:].isdigit())):
+                        target_old_pinned_id = int(target_old_pinned_id)
+                    else:
+                        target_old_pinned_id = None
+
+            # Use isolated unique directory for catalog file upload to prevent temp collisions
+            unique_token = uuid.uuid4().hex
+            temp_dir = settings.DATA_DIR / f"catalog_tmp_{unique_token}"
+            temp_dir.mkdir(parents=True, exist_ok=True)
+            temp_catalog = temp_dir / "index.json"
+            temp_write = temp_dir / f"index_{unique_token}.tmp"
+
+            try:
+                # Serialize compacted JSON atomically
+                temp_write.write_text(json.dumps(catalog_data, separators=(",", ":")), encoding="utf-8")
+                os.replace(temp_write, temp_catalog)
+
+                summary = {
+                    "version": "1.0",
+                    "updated_at": catalog_data.get("updated_at", ""),
+                    "total_files": catalog_data.get("total_files", len(catalog_data.get("files", []))),
+                    "total_bytes": catalog_data.get("total_bytes", 0)
+                }
+                caption = f"VAYOM:CATALOG:v1:{json.dumps(summary)}"
+
+                # 1. Upload & Pin to Primary Channel
+                msg = await self.client.send_file(
+                    channel,
+                    str(temp_catalog),
+                    caption=caption,
+                    force_document=True
+                )
                 try:
-                    temp_catalog.unlink()
-                except Exception:
-                    pass
+                    await self.client.pin_message(channel, msg.id, notify=False)
+                    logger.info(f"Pinned new master catalog message {msg.id} in primary channel.")
+                except Exception as pin_err:
+                    logger.warning(f"Could not pin catalog in primary channel: {pin_err}")
+
+                # Clean up old pinned catalog message from primary channel
+                if target_old_pinned_id and target_old_pinned_id != msg.id:
+                    try:
+                        await self.client.delete_messages(channel, [target_old_pinned_id])
+                        logger.info(f"Deleted old pinned catalog message {target_old_pinned_id} from primary channel.")
+                    except Exception as err:
+                        logger.warning(f"Could not delete old pinned catalog message {target_old_pinned_id}: {err}")
+
+                self.last_pinned_catalog_msg_id = msg.id
+
+                # 2. Mirror to Secondary Backup Channel if configured
+                if settings.TELEGRAM_BACKUP_CHANNEL_ID:
+                    try:
+                        b_chan = int(settings.TELEGRAM_BACKUP_CHANNEL_ID)
+                        target_old_b_id = self.last_backup_catalog_msg_id
+                        b_msg = await self.client.send_file(
+                            b_chan,
+                            str(temp_catalog),
+                            caption=f"VAYOM:CATALOG:MIRROR:v1:{json.dumps(summary)}",
+                            force_document=True
+                        )
+                        try:
+                            await self.client.pin_message(b_chan, b_msg.id, notify=False)
+                            logger.info(f"Mirrored master catalog to backup channel {b_chan}")
+                        except Exception as b_pin_err:
+                            logger.warning(f"Could not pin catalog in backup channel: {b_pin_err}")
+
+                        if target_old_b_id and target_old_b_id != b_msg.id:
+                            try:
+                                await self.client.delete_messages(b_chan, [target_old_b_id])
+                                logger.info(f"Deleted old backup catalog message {target_old_b_id}")
+                            except Exception as b_del_err:
+                                logger.warning(f"Could not delete old backup catalog message {target_old_b_id}: {b_del_err}")
+                        self.last_backup_catalog_msg_id = b_msg.id
+                    except Exception as b_err:
+                        logger.warning(f"Failed to mirror catalog to backup channel: {b_err}")
+
+                # 3. Mirror to Saved Messages ('me') in QR user mode
+                if settings.AUTH_MODE == "qr" and settings.AUTO_MIRROR_SAVED_MESSAGES:
+                    try:
+                        target_old_s_id = self.last_saved_catalog_msg_id
+                        s_msg = await self.client.send_file(
+                            "me",
+                            str(temp_catalog),
+                            caption=f"VAYOM:CATALOG:MIRROR:v1:{json.dumps(summary)}",
+                            force_document=True
+                        )
+                        logger.info("Mirrored master catalog to Telegram Saved Messages ('me').")
+                        if target_old_s_id and target_old_s_id != s_msg.id:
+                            try:
+                                await self.client.delete_messages("me", [target_old_s_id])
+                                logger.info(f"Deleted old saved messages catalog {target_old_s_id}")
+                            except Exception as s_del_err:
+                                logger.warning(f"Could not delete old saved messages catalog {target_old_s_id}: {s_del_err}")
+                        self.last_saved_catalog_msg_id = s_msg.id
+                    except Exception as s_err:
+                        logger.warning(f"Could not mirror catalog to Saved Messages: {s_err}")
+
+                self._save_catalog_state()
+                return msg.id
+            except FloodWaitError as e:
+                penalty = e.seconds + 2
+                self.set_flood_wait(penalty)
+                logger.warning(f"FloodWait when saving pinned catalog: sleeping {penalty}s (X + 2 rule)")
+                raise
+            except Exception as e:
+                logger.error(f"Error pinning master catalog: {e}")
+                raise
+            finally:
+                shutil.rmtree(temp_dir, ignore_errors=True)
 
     async def check_channel_health(self) -> dict:
         """

@@ -15,7 +15,8 @@ def calculate_sha256(file_path: Path) -> str:
 def split_file_if_needed(
     file_path: Path,
     max_part_bytes: int = settings.MAX_PART_BYTES,
-    output_dir: Optional[Path] = None
+    output_dir: Optional[Path] = None,
+    precomputed_sha: Optional[str] = None
 ) -> List[Dict[str, Any]]:
     """
     Checks if a file exceeds max_part_bytes (default 1.9 GB).
@@ -25,7 +26,7 @@ def split_file_if_needed(
     """
     total_size = os.path.getsize(file_path)
     if total_size <= max_part_bytes:
-        sha = calculate_sha256(file_path)
+        sha = precomputed_sha or calculate_sha256(file_path)
         return [{
             "part_index": 0,
             "byte_offset": 0,
@@ -57,6 +58,17 @@ def split_file_if_needed(
                     h.update(buffer)
                     dst.write(buffer)
                     bytes_written += len(buffer)
+
+            # I-3: never let a truncated/unreadable source spin the outer loop forever
+            if bytes_written < slice_size:
+                try:
+                    part_path.unlink(missing_ok=True)
+                except Exception:
+                    pass
+                raise IOError(
+                    f"Unexpected EOF while splitting '{file_path.name}' "
+                    f"(part {part_index}: wrote {bytes_written} of {slice_size} bytes; source truncated?)"
+                )
 
             parts.append({
                 "part_index": part_index,
