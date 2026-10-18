@@ -1,5 +1,7 @@
 import json
 import asyncio
+import logging
+from datetime import datetime
 from pathlib import Path
 from typing import Optional, Tuple, Dict, Any
 from PIL import Image, ExifTags
@@ -8,6 +10,8 @@ from ..config import settings
 # I-2: pin Pillow's decompression-bomb guard explicitly (same threshold as Pillow's default).
 # Image decodes now run inside worker threads, so this cap is the memory-safety backstop.
 Image.MAX_IMAGE_PIXELS = 89_478_485
+
+logger = logging.getLogger("vayom.index.metadata")
 
 
 def detect_file_category(mime_type: str, filename: str) -> str:
@@ -39,8 +43,12 @@ def generate_webp_thumbnail(
             # Handle phone/camera EXIF orientation tags automatically
             img = ImageOps.exif_transpose(img)
 
+            # I-26: 16-bit integer / float modes (I;16, I;16B/L/N, I, F) are rejected by
+            # older libwebp/Pillow builds — normalise them to RGB before encoding.
+            if img.mode.startswith("I;16") or img.mode in ("I", "F"):
+                img = img.convert("RGB")
             # Convert unsupported color modes (e.g. CMYK, palette) to RGB/RGBA
-            if img.mode in ("CMYK", "P", "1"):
+            elif img.mode in ("CMYK", "P", "1"):
                 img = img.convert("RGB")
             elif img.mode == "LA":
                 img = img.convert("RGBA")
@@ -55,7 +63,10 @@ def generate_webp_thumbnail(
                 optimize=True
             )
             return True
-    except Exception:
+    except Exception as e:
+        # I-26: never swallow silently — log the source path so systematic thumbnail
+        # failures (unsupported mode, corrupt file, decode cap) are diagnosable.
+        logger.warning(f"Failed to generate WebP thumbnail for {image_path}: {e}")
         return False
 
 
@@ -203,6 +214,41 @@ def extract_image_exif(image_path: Path) -> Dict[str, Any]:
                 width, height = height, width
             metadata["dimensions"] = {"width": width, "height": height}
 
+            # I-13: capture timestamp + GPS coordinates for the timeline/map surfaces
+            dt_raw = named_exif.get("DateTimeOriginal") or named_exif.get("DateTime")
+            if isinstance(dt_raw, str) and dt_raw.strip():
+                try:
+                    metadata["taken_at"] = datetime.strptime(dt_raw.strip(), "%Y:%m:%d %H:%M:%S").isoformat()
+                except ValueError:
+                    pass
+
+            try:
+                gps_ifd = exif.get_ifd(ExifTags.IFD.GPSInfo) or {}
+            except Exception:
+                gps_ifd = {}
+
+            def _gps_degrees(value) -> Optional[float]:
+                try:
+                    deg, minute, sec = value
+                    return float(deg) + float(minute) / 60.0 + float(sec) / 3600.0
+                except Exception:
+                    return None
+
+            def _gps_ref(value, default: str) -> str:
+                if isinstance(value, bytes):
+                    value = value.decode("ascii", "ignore")
+                return str(value or default).strip().upper()
+
+            gps_lat = _gps_degrees(gps_ifd.get(2))
+            gps_lon = _gps_degrees(gps_ifd.get(4))
+            if gps_lat is not None and gps_lon is not None:
+                if _gps_ref(gps_ifd.get(1), "N").startswith("S"):
+                    gps_lat = -gps_lat
+                if _gps_ref(gps_ifd.get(3), "E").startswith("W"):
+                    gps_lon = -gps_lon
+                metadata["latitude"] = round(gps_lat, 6)
+                metadata["longitude"] = round(gps_lon, 6)
+
             # Tags from keywords / comments
             tags = []
             if make:
@@ -321,6 +367,17 @@ async def extract_video_metadata(video_path: Path) -> Dict[str, Any]:
             dur = 0.0
         if dur > 0:
             metadata["duration_seconds"] = round(dur, 2)
+
+        try:
+            raw_br = video_stream.get("bit_rate") or format_info.get("bit_rate")
+            if raw_br:
+                metadata["bitrate"] = int(raw_br)
+        except (TypeError, ValueError):
+            pass
+
+        format_name = format_info.get("format_name", "")
+        if format_name:
+            metadata["container"] = format_name.split(",")[0].strip()
 
         # Device make / model detection (Sony, DJI, Apple, GoPro)
         raw_tags = dict(format_info.get("tags", {}))
