@@ -12,9 +12,9 @@ try:
 except Exception:
     aes_ctr_decrypt = None
 
-# Cryptographic and binary invariants: 2 MiB / 4 MiB streaming segments (Netflix/YouTube standard)
+# Cryptographic and binary invariants: 2 MiB / 16 MiB streaming segments (Netflix/YouTube standard)
 DEFAULT_CHUNK_SIZE: int = 2 * 1024 * 1024       # 2 MiB chunks (multiple of 512 KiB MTProto blocks)
-DEFAULT_MAX_206_BYTES: int = 4 * 1024 * 1024   # 4 MiB max single HTTP 206 response capping
+DEFAULT_MAX_206_BYTES: int = 16 * 1024 * 1024   # 16 MiB max single HTTP 206 response capping
 MAX_CACHE_CHUNKS: int = 64                      # 64 * 2 MiB = 128 MiB max RAM cache
 
 
@@ -39,7 +39,7 @@ class RangeSpec:
 def parse_and_clamp_range(
     range_header: Optional[str],
     total_size: int,
-    max_chunk_bytes: int = DEFAULT_MAX_206_BYTES
+    max_chunk_bytes: Optional[int] = DEFAULT_MAX_206_BYTES
 ) -> RangeSpec:
     """
     Parses and clamps HTTP Range requests according to RFC 7233 / 9110 and update.md invariants:
@@ -140,7 +140,7 @@ def parse_and_clamp_range(
     # The client/player will send subsequent range requests for remaining bytes
     is_capped = False
     requested_length = end - start + 1
-    if requested_length > max_chunk_bytes:
+    if max_chunk_bytes is not None and requested_length > max_chunk_bytes:
         end = start + max_chunk_bytes - 1
         is_capped = True
 
@@ -251,6 +251,35 @@ class MP4AtomInfo:
         }
 
 
+async def stream_part_source(
+    part: dict,
+    offset: int,
+    limit: Optional[int],
+    chunk_size: int,
+    storage_client
+) -> AsyncIterator[bytes]:
+    """
+    Unified part source streamer: checks part['storage_backend'].
+    If non-telegram (nas, s3, nextcloud), routes via stream_part_bytes_universal.
+    Otherwise uses storage_client.stream_part_bytes directly.
+    """
+    if part.get("storage_backend") and part.get("storage_backend") != "telegram":
+        from ..storage.manager import stream_part_bytes_universal
+        async for chunk in stream_part_bytes_universal(part, offset=offset, limit=limit, chunk_size=chunk_size):
+            yield chunk
+    else:
+        async for chunk in storage_client.stream_part_bytes(
+            message_id=part.get("telegram_message_id", 0),
+            channel_id=part.get("telegram_channel_id"),
+            file_id=part.get("telegram_file_id"),
+            access_hash=part.get("telegram_access_hash"),
+            offset=offset,
+            limit=limit,
+            chunk_size=chunk_size
+        ):
+            yield chunk
+
+
 class MP4MoovResolver:
     """
     Inspects ISO Base Media File Format (MP4/MOV) boxes.
@@ -321,13 +350,12 @@ class MP4MoovResolver:
 
         # Read first probe_head_size bytes from Part 0
         part0 = parts[0]
-        async for chunk in storage_client.stream_part_bytes(
-            message_id=part0["telegram_message_id"],
-            channel_id=part0.get("telegram_channel_id"),
-            file_id=part0.get("telegram_file_id"),
-            access_hash=part0.get("telegram_access_hash"),
+        async for chunk in stream_part_source(
+            part=part0,
             offset=0,
-            limit=probe_head_size
+            limit=probe_head_size,
+            chunk_size=probe_head_size,
+            storage_client=storage_client
         ):
             head_bytes.extend(chunk)
 
@@ -364,13 +392,12 @@ class MP4MoovResolver:
             if part_slice_len <= 0:
                 continue
 
-            async for chunk in storage_client.stream_part_bytes(
-                message_id=p["telegram_message_id"],
-                channel_id=p.get("telegram_channel_id"),
-                file_id=p.get("telegram_file_id"),
-                access_hash=p.get("telegram_access_hash"),
+            async for chunk in stream_part_source(
+                part=p,
                 offset=part_slice_start,
-                limit=part_slice_len
+                limit=part_slice_len,
+                chunk_size=part_slice_len,
+                storage_client=storage_client
             ):
                 tail_bytes.extend(chunk)
 
@@ -472,14 +499,12 @@ class StreamingEngine:
                     # Fetch chunk via LRU cache (with single-flight coalescing)
                     async def _fetch_upstream() -> bytes:
                         buf = bytearray()
-                        async for raw_block in storage_client.stream_part_bytes(
-                            message_id=msg_id,
-                            channel_id=part.get("telegram_channel_id"),
-                            file_id=part.get("telegram_file_id"),
-                            access_hash=part.get("telegram_access_hash"),
+                        async for raw_block in stream_part_source(
+                            part=part,
                             offset=chunk_aligned_offset,
                             limit=chunk_limit,
-                            chunk_size=min(self.chunk_size, 512 * 1024)
+                            chunk_size=min(self.chunk_size, 512 * 1024),
+                            storage_client=storage_client
                         ):
                             buf.extend(raw_block)
                         return bytes(buf)
@@ -488,24 +513,22 @@ class StreamingEngine:
                     if not chunk_bytes:
                         break
 
-                    # Lookahead: asynchronously prefetch up to 2 chunks ahead (4-6 MiB pipeline)
-                    def _make_prefetch(t_msg_id: int, t_part: dict, target_off: int, target_lim: int):
+                    # Lookahead: asynchronously prefetch up to 4 chunks ahead (8 MiB pipeline)
+                    def _make_prefetch(t_part: dict, target_off: int, target_lim: int):
                         async def _prefetch_coro() -> bytes:
                             p_buf = bytearray()
-                            async for p_block in storage_client.stream_part_bytes(
-                                message_id=t_msg_id,
-                                channel_id=t_part.get("telegram_channel_id"),
-                                file_id=t_part.get("telegram_file_id"),
-                                access_hash=t_part.get("telegram_access_hash"),
+                            async for p_block in stream_part_source(
+                                part=t_part,
                                 offset=target_off,
                                 limit=target_lim,
-                                chunk_size=min(self.chunk_size, 512 * 1024)
+                                chunk_size=min(self.chunk_size, 512 * 1024),
+                                storage_client=storage_client
                             ):
                                 p_buf.extend(p_block)
                             return bytes(p_buf)
                         return _prefetch_coro
 
-                    for lookahead_step in (1, 2):
+                    for lookahead_step in (1, 2, 3, 4):
                         ahead_offset = chunk_aligned_offset + lookahead_step * self.chunk_size
                         if ahead_offset < part["part_size_bytes"]:
                             ahead_cache_key = (part_key, ahead_offset)
@@ -513,19 +536,19 @@ class StreamingEngine:
                                 ahead_limit = min(self.chunk_size, part["part_size_bytes"] - ahead_offset)
                                 asyncio.create_task(self.cache.get_or_fetch(
                                     ahead_cache_key,
-                                    _make_prefetch(msg_id, part, ahead_offset, ahead_limit)
+                                    _make_prefetch(part, ahead_offset, ahead_limit)
                                 ))
                         elif part_idx + 1 < len(sorted_parts):
-                            # Cross-part lookahead: prefetch the start of the next 1.9 GB slice in large files (e.g. 50 GB)
+                            # Cross-part lookahead: prefetch the start of the next slice
                             next_p = sorted_parts[part_idx + 1]
-                            next_msg_id = next_p["telegram_message_id"]
-                            next_part_key = next_p.get("id") or str(next_msg_id)
+                            next_msg_id = next_p.get("telegram_message_id", 0)
+                            next_part_key = next_p.get("id") or str(next_msg_id) or str(part_idx + 1)
                             next_cache_key = (next_part_key, 0)
                             if not self.cache.contains(next_cache_key):
                                 next_lim = min(self.chunk_size, next_p["part_size_bytes"])
                                 asyncio.create_task(self.cache.get_or_fetch(
                                     next_cache_key,
-                                    _make_prefetch(next_msg_id, next_p, 0, next_lim)
+                                    _make_prefetch(next_p, 0, next_lim)
                                 ))
 
                     # Invariant 1: Decrypt chunk if encrypted with AES-256-CTR

@@ -42,9 +42,9 @@ async def list_watch_folders() -> List[Dict[str, Any]]:
                 wf.id, wf.path, wf.label, wf.target_album_id, wf.auto_delete_local, 
                 wf.is_active, wf.last_synced_at, wf.created_at,
                 COUNT(wfe.id) AS total_events,
-                SUM(CASE WHEN wfe.status = 'synced' THEN 1 ELSE 0 END) AS synced_count,
-                SUM(CASE WHEN wfe.status = 'syncing' THEN 1 ELSE 0 END) AS syncing_count,
-                SUM(CASE WHEN wfe.status = 'failed' THEN 1 ELSE 0 END) AS failed_count
+                COALESCE(SUM(CASE WHEN wfe.status = 'synced' THEN 1 ELSE 0 END), 0) AS synced_count,
+                COALESCE(SUM(CASE WHEN wfe.status = 'syncing' THEN 1 ELSE 0 END), 0) AS syncing_count,
+                COALESCE(SUM(CASE WHEN wfe.status = 'failed' THEN 1 ELSE 0 END), 0) AS failed_count
             FROM watch_folders wf
             LEFT JOIN watch_folder_events wfe ON wf.id = wfe.folder_id
             GROUP BY wf.id

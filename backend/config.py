@@ -24,9 +24,10 @@ class Settings:
     MAX_CONCURRENT_UPLOADS: int = int(os.getenv("MAX_CONCURRENT_UPLOADS", "3"))
     CHUNK_PACING_MS: int = int(os.getenv("CHUNK_PACING_MS", "25"))
 
-    # Security & Admin
-    ADMIN_PASSWORD: str = os.getenv("ADMIN_PASSWORD", "vayom123")
-    SESSION_SECRET: str = os.getenv("SESSION_SECRET", "vayom_drive_secret_key_change_in_prod")
+    # Security & Admin (F-4: No hardcoded default credentials; empty unless explicitly set)
+    ADMIN_PASSWORD: str = os.getenv("ADMIN_PASSWORD", "")
+    SESSION_SECRET: str = os.getenv("SESSION_SECRET", "")
+    ENABLE_SHARE_LINKS: bool = os.getenv("ENABLE_SHARE_LINKS", "false").lower() == "true"
     STREAM_LOOPBACK_TOKEN: str = os.getenv("STREAM_LOOPBACK_TOKEN", "")
     LOCAL_API_TOKEN: str = os.getenv("LOCAL_API_TOKEN", "")
     REQUIRE_API_AUTH: bool = os.getenv("REQUIRE_API_AUTH", "false").lower() == "true"
@@ -36,6 +37,8 @@ class Settings:
         else []
     )
     ENCRYPTION_ENABLED: bool = os.getenv("ENCRYPTION_ENABLED", "false").lower() == "true"
+    VAULT_PASSPHRASE: str = os.getenv("VAULT_PASSPHRASE", "")
+    VAULT_SALT: bytes = os.getenv("VAULT_SALT", "vayom_vault_salt_default").encode("utf-8")
 
     # Server Binding (A-1: Default bind to loopback 127.0.0.1 instead of 0.0.0.0)
     HOST: str = os.getenv("HOST", "127.0.0.1")
@@ -46,6 +49,26 @@ class Settings:
     DB_PATH: Path = DATA_DIR / "vayom.db"
     UPLOAD_TEMP_DIR: Path = DATA_DIR / "uploads"
     THUMBNAIL_DIR: Path = DATA_DIR / "thumbnails"
+    NAS_VAULT_ROOT: Path = Path(os.getenv("NAS_VAULT_ROOT", str(DATA_DIR / "nas_vault")))
+    DEFAULT_STORAGE_BACKEND: str = os.getenv("DEFAULT_STORAGE_BACKEND", "telegram")
+
+    # S3 / MinIO / Cloudflare R2 Storage Settings
+    S3_ENDPOINT_URL: Optional[str] = os.getenv("S3_ENDPOINT_URL", "")
+    S3_ACCESS_KEY_ID: str = os.getenv("S3_ACCESS_KEY_ID", "")
+    S3_SECRET_ACCESS_KEY: str = os.getenv("S3_SECRET_ACCESS_KEY", "")
+    S3_BUCKET_NAME: str = os.getenv("S3_BUCKET_NAME", "")
+    S3_REGION_NAME: str = os.getenv("S3_REGION_NAME", "us-east-1")
+    S3_VAULT_PREFIX: str = os.getenv("S3_VAULT_PREFIX", "vayom_vault")
+
+    # Nextcloud WebDAV Storage Settings
+    NEXTCLOUD_WEBDAV_URL: str = os.getenv("NEXTCLOUD_WEBDAV_URL", "")
+    NEXTCLOUD_USERNAME: str = os.getenv("NEXTCLOUD_USERNAME", "")
+    NEXTCLOUD_APP_PASSWORD: str = os.getenv("NEXTCLOUD_APP_PASSWORD", "")
+    NEXTCLOUD_VAULT_PREFIX: str = os.getenv("NEXTCLOUD_VAULT_PREFIX", "vayom_vault")
+
+    # Pro Licensing
+    VAYOM_LICENSE_KEY: str = os.getenv("VAYOM_LICENSE_KEY", "")
+    VAYOM_DEV_LICENSE: str = os.getenv("VAYOM_DEV_LICENSE", "")
 
     # Workstation Security Settings
     WORKSTATION_ALLOWED_ROOTS: List[str] = (
@@ -54,16 +77,17 @@ class Settings:
         else [
             str(Path.home()),
             "/media",
+            "/run/media",
             "/mnt",
             "/Volumes",
             tempfile.gettempdir(),
         ]
     )
 
-    # File Slicing Limits
-    # 1.90 GB default to safely stay under Telegram's 2,000 MB limit
-    MAX_PART_BYTES: int = int(os.getenv("MAX_PART_BYTES", "1900000000"))
-    ALLOW_LOSSY_VIDEO: bool = os.getenv("ALLOW_LOSSY_VIDEO", "false").lower() == "true"
+    # File Slicing Limits (2-MiB aligned boundaries: exact multiples of 2 MiB, 512 KiB, and 4096 bytes)
+    STANDARD_PART_BYTES: int = 1887436800  # 900 * 2 MiB (~1.887 GB, stays safely under Telegram 2000 MB limit)
+    PREMIUM_PART_BYTES: int = 3879731200   # 1850 * 2 MiB (~3.880 GB, stays safely under Telegram 4000 MB limit)
+    MAX_PART_BYTES: int = int(os.getenv("MAX_PART_BYTES", str(STANDARD_PART_BYTES)))
 
     # Cloud & Heartbeat Settings
     HEARTBEAT_INTERVAL_SECONDS: int = 600  # 10 minutes
@@ -79,6 +103,7 @@ class Settings:
         self.DATA_DIR.mkdir(parents=True, exist_ok=True)
         self.UPLOAD_TEMP_DIR.mkdir(parents=True, exist_ok=True)
         self.THUMBNAIL_DIR.mkdir(parents=True, exist_ok=True)
+        self.NAS_VAULT_ROOT.mkdir(parents=True, exist_ok=True)
 
     _custom_auth_config_file: Optional[Path] = None
 
@@ -119,9 +144,9 @@ class Settings:
                 # F-2: premium upgrades slicing to 4 GB, but the limit must fall back
                 # to the standard 1.9 GB whenever premium is absent or has expired.
                 if self.USER_PROFILE.get("is_premium"):
-                    self.MAX_PART_BYTES = 3900000000  # 4 GB chunks for Telegram Premium users!
+                    self.MAX_PART_BYTES = self.PREMIUM_PART_BYTES  # Aligned 3,879,731,200 bytes for Telegram Premium users!
                 else:
-                    self.MAX_PART_BYTES = int(os.getenv("MAX_PART_BYTES", "1900000000"))
+                    self.MAX_PART_BYTES = int(os.getenv("MAX_PART_BYTES", str(self.STANDARD_PART_BYTES)))
                 return
             except Exception as e:
                 # F-3: never silently swallow a corrupt/unreadable config — move it aside
@@ -146,8 +171,20 @@ class Settings:
         import json
         if "local_api_token" not in data and self.LOCAL_API_TOKEN:
             data["local_api_token"] = self.LOCAL_API_TOKEN
-        self.auth_config_file.write_text(json.dumps(data, indent=2), encoding="utf-8")
-        # A-5: restrict permissions — the file contains api_hash/bot_token
+        self.auth_config_file.parent.mkdir(parents=True, exist_ok=True)
+        # A-5: create file directly with 0o600 permissions so credentials are never world-readable
+        payload = json.dumps(data, indent=2).encode("utf-8")
+        flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+        fd = os.open(str(self.auth_config_file), flags, 0o600)
+        try:
+            with open(fd, "wb", closefd=True) as f:
+                f.write(payload)
+        except Exception:
+            try:
+                os.close(fd)
+            except Exception:
+                pass
+            raise
         try:
             os.chmod(self.auth_config_file, 0o600)
         except Exception:
@@ -168,8 +205,8 @@ class Settings:
         self.TELEGRAM_BACKUP_CHANNEL_ID = ""
         self.SESSION_NAME = "vayom_bot"
         self.LOCAL_API_TOKEN = ""
-        # F-2: logout must not leave a premium-inflated 4 GB slice limit behind
-        self.MAX_PART_BYTES = int(os.getenv("MAX_PART_BYTES", "1900000000"))
+        # F-2: logout must not leave a premium-inflated slice limit behind
+        self.MAX_PART_BYTES = int(os.getenv("MAX_PART_BYTES", str(self.STANDARD_PART_BYTES)))
 
 settings = Settings()
 settings.ensure_directories()

@@ -40,7 +40,8 @@ async def virtual_stream_file(
     file_id: str,
     request: Request,
     range_header: Optional[str] = Header(None, alias="Range"),
-    token: Optional[str] = Query(None)
+    token: Optional[str] = Query(None),
+    proxy: Optional[bool] = Query(False)
 ):
     """
     Virtual streaming engine endpoint adhering to update.md Section 3:
@@ -60,6 +61,18 @@ async def virtual_stream_file(
             raise HTTPException(status_code=404, detail="File not found")
 
         file_item = dict(file_row)
+
+        # If proxy stream requested and ready, resolve to child proxy
+        if proxy and file_item.get("kind") == "original":
+            p_cur = await db.execute(
+                "SELECT * FROM files WHERE proxy_of = ? AND is_deleted = 0 AND upload_status = 'completed'",
+                (file_id,)
+            )
+            p_row = await p_cur.fetchone()
+            if p_row:
+                file_item = dict(p_row)
+                file_id = file_item["id"]
+
         p_cursor = await db.execute(
             "SELECT * FROM file_parts WHERE file_id = ? ORDER BY part_index ASC",
             (file_id,)
@@ -107,6 +120,9 @@ async def virtual_stream_file(
                 key = bytes.fromhex(clean_key)
             except ValueError:
                 pass
+    if key is None:
+        from ..crypto import vault_manager
+        key = vault_manager.get_key()
 
     return StreamingResponse(
         streaming_engine.stream_range(
@@ -224,5 +240,13 @@ async def get_mp4_moov_bytes(
 
 
 # Root-level router for direct browser / virtual-stream paths
+# F-4: Excluded from OpenAPI schema and marked deprecated to avoid publishing duplicate route surfaces;
+# canonical route is /api/v1/virtual-stream/{file_id}.
 root_router = APIRouter()
-root_router.add_api_route("/virtual-stream/{file_id}", virtual_stream_file, methods=["GET", "HEAD"])
+root_router.add_api_route(
+    "/virtual-stream/{file_id}",
+    virtual_stream_file,
+    methods=["GET", "HEAD"],
+    include_in_schema=False,
+    deprecated=True
+)

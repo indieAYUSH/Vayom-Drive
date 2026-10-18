@@ -78,6 +78,9 @@ async def get_auth_status():
 
 async def _auto_refresh_tokens(session_id: str, qr_login, session_end_time: float, wait_done_event: asyncio.Event):
     """Background coroutine to refresh MTProto token before it expires, keeping QR valid for full session."""
+    consecutive_errors = 0
+    max_recreate_retries = 5
+
     while time.time() < session_end_time and not wait_done_event.is_set():
         session = _active_qr_sessions.get(session_id)
         if not session or session.get("status") != "waiting":
@@ -91,8 +94,9 @@ async def _auto_refresh_tokens(session_id: str, qr_login, session_end_time: floa
         else:
             time_to_expiry = 25.0
 
-        # Sleep until ~3 seconds before individual token expiry
-        sleep_duration = max(2.0, time_to_expiry - 3.0)
+        # Sleep until ~3 seconds before individual token expiry, with minimum floor of 3.0s
+        # (prevents hot-looping if token expiry is in the past)
+        sleep_duration = max(3.0, time_to_expiry - 3.0)
         try:
             await asyncio.wait_for(wait_done_event.wait(), timeout=sleep_duration)
             break
@@ -104,12 +108,21 @@ async def _auto_refresh_tokens(session_id: str, qr_login, session_end_time: floa
 
         try:
             await qr_login.recreate()
+            consecutive_errors = 0
             if session_id in _active_qr_sessions:
                 _active_qr_sessions[session_id]["url"] = qr_login.url
                 logger.info(f"Telegram MTProto QR token refreshed for session {session_id}")
         except Exception as e:
-            logger.warning(f"Error recreating QR token for {session_id}: {e}")
-            await asyncio.sleep(3.0)
+            consecutive_errors += 1
+            backoff = min(30.0, 3.0 * (2 ** (consecutive_errors - 1)))
+            logger.warning(
+                f"Error recreating QR token for {session_id} "
+                f"({consecutive_errors}/{max_recreate_retries}): {e}. Backing off {backoff:.1f}s"
+            )
+            if consecutive_errors >= max_recreate_retries:
+                logger.error(f"Max recreate retries exceeded for QR session {session_id}; aborting refresh loop.")
+                break
+            await asyncio.sleep(backoff)
 
 
 async def _monitor_qr(session_id: str, qr_login, client: TelegramClient, session_end_time: float):
@@ -186,6 +199,11 @@ async def _monitor_qr(session_id: str, qr_login, client: TelegramClient, session
         logger.info(f"QR login session {session_id} expired or cancelled: {e}")
         if session_id in _active_qr_sessions:
             _active_qr_sessions[session_id]["status"] = "expired"
+        try:
+            if client and hasattr(client, "is_connected") and client.is_connected():
+                await client.disconnect()
+        except Exception:
+            pass
     finally:
         wait_done_event.set()
         if not refresh_task.done():
@@ -279,6 +297,27 @@ async def poll_qr_login(session_id: str):
     # If past total session expiry and still waiting, mark expired
     if session["status"] == "waiting" and time.time() >= session.get("session_expires_at", 0):
         session["status"] = "expired"
+
+    if session["status"] == "expired":
+        client = session.get("client")
+        if client and hasattr(client, "is_connected") and client.is_connected():
+            try:
+                await client.disconnect()
+            except Exception:
+                pass
+        mon_task = session.get("monitor_task")
+        if mon_task and not mon_task.done():
+            mon_task.cancel()
+        _active_qr_sessions.pop(session_id, None)
+        return {
+            "status": "expired",
+            "url": None,
+            "expires_at": session.get("session_expires_at"),
+            "confirmed_at": None,
+            "user": None,
+            "channels": None,
+            "default_channel_id": None
+        }
 
     return {
         "status": session["status"],
@@ -438,11 +477,41 @@ async def finalize_qr_login(body: QRFinalizeRequest):
         return result
 
 
+async def _validate_channel_for_bot(client: TelegramClient, channel_id_raw: Any) -> str:
+    """
+    Validates that the provided channel_id is numeric and that the bot has access
+    and posting permissions in the channel.
+    Raises ValueError on invalid/unreachable/unpostable channel.
+    """
+    chan_str = str(channel_id_raw or "").strip()
+    if not chan_str:
+        raise ValueError("Channel ID cannot be empty.")
+    try:
+        chan_int = int(chan_str)
+    except ValueError:
+        raise ValueError(f"Channel ID must be numeric (e.g. -100xxxxxxxxxx), received '{chan_str}'.")
+
+    try:
+        entity = await client.get_entity(chan_int)
+    except Exception as err:
+        raise ValueError(f"Could not reach or resolve storage channel {chan_int}: {err}")
+
+    # Check postability
+    if getattr(entity, "broadcast", False):
+        is_creator = getattr(entity, "creator", False)
+        admin_rights = getattr(entity, "admin_rights", None)
+        can_post = is_creator or (admin_rights is not None and getattr(admin_rights, "post_messages", True))
+        if not can_post:
+            raise ValueError(f"Bot lacks administrator posting permissions in broadcast channel '{chan_str}'.")
+
+    return str(chan_int)
+
+
 @router.post("/bot")
 async def login_with_bot(body: BotLoginRequest):
     """
     Connects to Telegram using a dedicated Bot Token and Channel ID.
-    Validates credentials and connects node.
+    Validates credentials and verifies that the storage channel is reachable and postable.
     """
     temp_client = TelegramClient(
         str(settings.DATA_DIR / "vayom_bot"),
@@ -451,21 +520,20 @@ async def login_with_bot(body: BotLoginRequest):
     )
     try:
         await temp_client.start(bot_token=body.bot_token)
-        # Test channel access
-        try:
-            chan_int = int(body.channel_id)
-            await temp_client.get_entity(chan_int)
-        except Exception as err:
-            logger.warning(f"Could not verify channel entity during bot login: {err}")
+        verified_channel_id = await _validate_channel_for_bot(temp_client, body.channel_id)
         await temp_client.disconnect()
     except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Invalid Bot Token or Telegram error: {e}")
+        try:
+            await temp_client.disconnect()
+        except Exception:
+            pass
+        raise HTTPException(status_code=400, detail=f"Bot login failed: {e}")
 
     config_payload = {
         "auth_mode": "bot",
         "session_name": "vayom_bot",
         "bot_token": body.bot_token,
-        "channel_id": str(body.channel_id),
+        "channel_id": verified_channel_id,
         "user_profile": {
             "display_name": body.display_name or "Storage Bot",
             "first_name": "Bot",
@@ -474,13 +542,14 @@ async def login_with_bot(body: BotLoginRequest):
     }
     settings.save_auth_config(config_payload)
     await storage_client.reconnect()
-    return {"success": True, "channel_id": body.channel_id}
+    return {"success": True, "channel_id": verified_channel_id}
 
 
 @router.post("/developer")
 async def login_with_developer(body: DeveloperLoginRequest):
     """
     Sovereign Developer Mode: Configures custom API_ID, API_HASH, Bot Token, and Channel ID.
+    Validates credentials and verifies that the storage channel is reachable and postable.
     """
     temp_client = TelegramClient(
         str(settings.DATA_DIR / "vayom_bot"),
@@ -489,9 +558,14 @@ async def login_with_developer(body: DeveloperLoginRequest):
     )
     try:
         await temp_client.start(bot_token=body.bot_token)
+        verified_channel_id = await _validate_channel_for_bot(temp_client, body.channel_id)
         await temp_client.disconnect()
     except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Failed to connect with custom credentials: {e}")
+        try:
+            await temp_client.disconnect()
+        except Exception:
+            pass
+        raise HTTPException(status_code=400, detail=f"Developer login failed: {e}")
 
     config_payload = {
         "auth_mode": "developer",
@@ -499,7 +573,7 @@ async def login_with_developer(body: DeveloperLoginRequest):
         "api_id": body.api_id,
         "api_hash": body.api_hash,
         "bot_token": body.bot_token,
-        "channel_id": str(body.channel_id),
+        "channel_id": verified_channel_id,
         "user_profile": {
             "display_name": body.display_name or "Developer Node",
             "first_name": "Custom MTProto",

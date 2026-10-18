@@ -11,10 +11,11 @@ from fastapi.responses import FileResponse, JSONResponse
 from .config import settings
 from .db.connection import init_db, get_db
 from .storage.client import storage_client
-from .api.routes import router as api_router, perform_rebuild_index
+from .api.routes import router as api_router, perform_rebuild_index, load_persistent_storage_configs
 from .api.auth import router as auth_router
 from .api.workstation import router as workstation_router
 from .workstation.watcher import workstation_watcher
+from .transcoding.manager import transcoding_manager
 from .streaming.router import router as streaming_router, root_router as streaming_root_router
 
 logging.basicConfig(
@@ -49,6 +50,14 @@ async def lifespan(app: FastAPI):
     await init_db()
     logger.info("Database initialized with WAL mode.")
 
+    # Load persistent S3 & Nextcloud configs if present
+    await load_persistent_storage_configs()
+
+    # Load persistent vault key if stored
+    from .crypto import vault_manager
+    if vault_manager.load_stored_key():
+        logger.info("Vault encryption unlocked automatically from stored workstation key.")
+
     # Connect to Telegram MTProto
     try:
         await storage_client.connect()
@@ -75,13 +84,15 @@ async def lifespan(app: FastAPI):
     else:
         logger.info("Heartbeat loop disabled (PING_URL not set).")
 
-    # Start Workstation Folder Watcher
+    # Start Workstation Folder Watcher & Transcoding Manager
     await workstation_watcher.start()
+    await transcoding_manager.start()
 
     yield
 
     # Shutdown:
     logger.info("Shutting down Vayom Drive...")
+    await transcoding_manager.stop()
     await workstation_watcher.stop()
     if heartbeat_task:
         heartbeat_task.cancel()
@@ -199,6 +210,9 @@ app.include_router(streaming_root_router)
 
 @app.get("/s/{token}")
 async def redirect_share(token: str):
+    if not getattr(settings, "ENABLE_SHARE_LINKS", False):
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404, detail="Share links feature is disabled in v1")
     from fastapi.responses import RedirectResponse
     return RedirectResponse(url=f"/api/v1/s/{token}")
 
