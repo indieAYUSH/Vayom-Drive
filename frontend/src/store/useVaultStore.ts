@@ -1,6 +1,7 @@
 import { create } from 'zustand'
-import { FileItem, AlbumItem, StorageMetrics, FileCategory } from '../types/vault'
+import { FileItem, AlbumItem, StorageMetrics, LicenseStatus } from '../types/vault'
 import { api } from '../services/api'
+import { useAuthStore } from './useAuthStore'
 
 interface VaultState {
   // Data
@@ -9,6 +10,7 @@ interface VaultState {
   trashCount: number
   albums: AlbumItem[]
   metrics: StorageMetrics
+  license: LicenseStatus | null
   isLoading: boolean
   error: string | null
 
@@ -17,8 +19,6 @@ interface VaultState {
   primaryMode: 'photos' | 'drive'
   selectedAlbumId: string | null
   selectedTag: string | null
-  searchQuery: string
-  activeCategoryFilter: FileCategory | 'all'
   timelineGroupByDate: boolean
   driveViewMode: 'grid' | 'table'
 
@@ -37,24 +37,25 @@ interface VaultState {
 
   // Modals & Overlays
   lightboxItem: FileItem | null
+  lightboxItems: FileItem[] | null
   isCommandBarOpen: boolean
-  isUploadModalOpen: boolean
   isCreateAlbumModalOpen: boolean
 
   // Data Actions
   fetchFiles: () => Promise<void>
+  refreshCatalog: () => Promise<void>
   fetchMetrics: () => Promise<void>
   fetchAlbums: () => Promise<void>
   fetchTrashCount: () => Promise<void>
   init: () => Promise<void>
+  fetchLicense: () => Promise<void>
+  activateLicense: (key: string) => Promise<boolean>
 
   // Navigation Actions
   setActiveTab: (tab: VaultState['activeTab']) => void
   setPrimaryMode: (mode: 'photos' | 'drive') => void
   setSelectedAlbumId: (id: string | null) => void
   setSelectedTag: (tag: string | null) => void
-  setSearchQuery: (query: string) => void
-  setCategoryFilter: (category: FileCategory | 'all') => void
   setTimelineGroupByDate: (group: boolean) => void
   setDriveViewMode: (mode: 'grid' | 'table') => void
   setSelectedCamera: (camera: string | null) => void
@@ -72,13 +73,12 @@ interface VaultState {
   selectAll: (ids?: string[]) => void
   clearSelection: () => void
 
-  openLightbox: (item: FileItem) => void
+  openLightbox: (item: FileItem, contextList?: FileItem[]) => void
   closeLightbox: () => void
   nextLightbox: () => void
   prevLightbox: () => void
 
   setCommandBarOpen: (open: boolean) => void
-  setUploadModalOpen: (open: boolean) => void
   setCreateAlbumModalOpen: (open: boolean) => void
 
   // File mutations
@@ -92,14 +92,36 @@ interface VaultState {
   cleanupIncomplete: (fileId: string) => Promise<void>
 }
 
-const getInitialStarred = (): string[] => {
+// H-26: Starred ids are validated and namespaced per account/channel so two
+// Telegram accounts on the same browser profile don't share favorites.
+const STARRED_KEY_PREFIX = 'vayom_starred:'
+const STARRED_MIGRATED_FLAG = 'vayom_starred:migrated'
+
+const starredNamespace = (auth = useAuthStore.getState()): string =>
+  auth.channelId || (auth.user?.id != null ? String(auth.user.id) : 'default')
+
+const sanitizeStarred = (raw: string): string[] => {
   try {
-    const raw = localStorage.getItem('vayom_starred') || localStorage.getItem('televault_starred')
-    return raw ? JSON.parse(raw) : []
+    const parsed = JSON.parse(raw)
+    return Array.isArray(parsed) ? parsed.filter((x): x is string => typeof x === 'string') : []
   } catch {
     return []
   }
 }
+
+// Returns null when the namespaced key has never been written (caller may migrate legacy data)
+const readNamespacedStarred = (namespace: string): string[] | null => {
+  try {
+    const raw = localStorage.getItem(`${STARRED_KEY_PREFIX}${namespace}`)
+    return raw === null ? null : sanitizeStarred(raw)
+  } catch {
+    return null
+  }
+}
+
+// H-10: Request sequencing & cancellation to prevent stale-wins race conditions
+let fetchFilesController: AbortController | null = null
+let currentFetchEpoch = 0
 
 export const useVaultStore = create<VaultState>((set, get) => ({
   files: [],
@@ -114,6 +136,7 @@ export const useVaultStore = create<VaultState>((set, get) => ({
     telegram_messages: 0,
     online_status: 'online',
   },
+  license: null,
   isLoading: false,
   error: null,
 
@@ -121,8 +144,6 @@ export const useVaultStore = create<VaultState>((set, get) => ({
   primaryMode: 'photos',
   selectedAlbumId: null,
   selectedTag: null,
-  searchQuery: '',
-  activeCategoryFilter: 'all',
   timelineGroupByDate: true,
   driveViewMode: 'grid',
 
@@ -131,13 +152,13 @@ export const useVaultStore = create<VaultState>((set, get) => ({
   selectedResolution: null,
   selectedLens: null,
 
-  starredIds: getInitialStarred(),
+  starredIds: [],
   activeAudioItem: null,
 
   selectedIds: [],
   lightboxItem: null,
+  lightboxItems: null,
   isCommandBarOpen: false,
-  isUploadModalOpen: false,
   isCreateAlbumModalOpen: false,
 
   setPrimaryMode: (mode) => set({ primaryMode: mode }),
@@ -148,27 +169,33 @@ export const useVaultStore = create<VaultState>((set, get) => ({
       const exists = state.starredIds.includes(id)
       const updated = exists ? state.starredIds.filter((item) => item !== id) : [...state.starredIds, id]
       try {
-        localStorage.setItem('vayom_starred', JSON.stringify(updated))
+        localStorage.setItem(`${STARRED_KEY_PREFIX}${starredNamespace()}`, JSON.stringify(updated))
       } catch {}
       return { starredIds: updated }
     }),
   setActiveAudioItem: (item) => set({ activeAudioItem: item }),
 
   fetchFiles: async () => {
+    if (fetchFilesController) {
+      fetchFilesController.abort()
+    }
+    fetchFilesController = new AbortController()
+    const signal = fetchFilesController.signal
+    const epoch = ++currentFetchEpoch
+
     try {
-      const { activeTab, selectedAlbumId, selectedTag, searchQuery, activeCategoryFilter } = get()
+      const { activeTab, selectedAlbumId, selectedTag } = get()
       const isTrash = activeTab === 'trash'
 
       if (isTrash) {
-        const files = await api.listFiles({ is_deleted: true, limit: 1000 })
+        const files = await api.listFiles({ is_deleted: true, limit: 1000 }, { signal })
+        if (epoch !== currentFetchEpoch || signal.aborted) return
         set({ files, trashCount: files.length, error: null })
         return
       }
 
       let cat: string | undefined = undefined
-      if (activeCategoryFilter !== 'all') {
-        cat = activeCategoryFilter
-      } else if (activeTab === 'images') cat = 'image'
+      if (activeTab === 'images') cat = 'image'
       else if (activeTab === 'videos') cat = 'video'
       else if (activeTab === 'documents') cat = 'document'
       else if (activeTab === 'archives') cat = 'archive'
@@ -178,17 +205,13 @@ export const useVaultStore = create<VaultState>((set, get) => ({
         category: cat,
         tag: selectedTag || undefined,
         album_id: isFolderTab && selectedAlbumId ? selectedAlbumId : undefined,
-        q: searchQuery.trim() || undefined,
         is_deleted: false,
         limit: 1000,
-      })
+      }, { signal })
 
-      const isGeneralAll =
-        activeTab === 'all' &&
-        !selectedAlbumId &&
-        !selectedTag &&
-        !searchQuery.trim() &&
-        activeCategoryFilter === 'all'
+      if (epoch !== currentFetchEpoch || signal.aborted) return
+
+      const isGeneralAll = activeTab === 'all' && !selectedAlbumId && !selectedTag
 
       set((state) => ({
         files,
@@ -196,8 +219,17 @@ export const useVaultStore = create<VaultState>((set, get) => ({
         error: null,
       }))
     } catch (err: any) {
+      if (err?.name === 'AbortError' || epoch !== currentFetchEpoch) return
       set({ error: err.message || 'Failed to fetch files' })
     }
+  },
+
+  // H-28: Refresh the unfiltered vault-wide catalog (drives sidebar counts) on upload completion
+  refreshCatalog: async () => {
+    try {
+      const catalog = await api.listFiles({ is_deleted: false, limit: 1000 })
+      set({ catalogFiles: catalog })
+    } catch {}
   },
 
   fetchTrashCount: async () => {
@@ -228,17 +260,19 @@ export const useVaultStore = create<VaultState>((set, get) => ({
   init: async () => {
     set({ isLoading: true })
     try {
-      const [allActive, deleted, metrics, albums] = await Promise.allSettled([
+      const [allActive, deleted, metrics, albums, license] = await Promise.allSettled([
         api.listFiles({ is_deleted: false, limit: 1000 }),
         api.listFiles({ is_deleted: true, limit: 1000 }),
         api.getMetrics(),
         api.listAlbums(),
+        api.getLicenseStatus(),
       ])
 
       const activeFiles = allActive.status === 'fulfilled' ? allActive.value : []
       const trashFiles = deleted.status === 'fulfilled' ? deleted.value : []
       const metricsData = metrics.status === 'fulfilled' ? metrics.value : get().metrics
       const albumsData = albums.status === 'fulfilled' ? albums.value : []
+      const licenseData = license.status === 'fulfilled' ? license.value : null
 
       set({
         catalogFiles: activeFiles,
@@ -246,6 +280,7 @@ export const useVaultStore = create<VaultState>((set, get) => ({
         trashCount: trashFiles.length,
         metrics: metricsData,
         albums: albumsData,
+        license: licenseData,
         isLoading: false,
         error: null,
       })
@@ -254,7 +289,34 @@ export const useVaultStore = create<VaultState>((set, get) => ({
     }
   },
 
+  fetchLicense: async () => {
+    try {
+      const license = await api.getLicenseStatus()
+      set({ license })
+    } catch (err) {
+      console.error('Failed to fetch license status', err)
+    }
+  },
+
+  activateLicense: async (key: string) => {
+    try {
+      const res = await api.activateLicense(key)
+      if (res.license) {
+        set({ license: res.license })
+        return true
+      }
+      return false
+    } catch (err) {
+      console.error('Failed to activate license', err)
+      throw err
+    }
+  },
+
   setActiveTab: (tab) => {
+    const prev = get()
+    // H-36: skip the redundant refetch when the effective query is unchanged
+    const queryUnchanged =
+      prev.activeTab === tab && prev.selectedAlbumId === null && prev.selectedTag === null
     set({
       activeTab: tab,
       selectedAlbumId: null,
@@ -265,27 +327,21 @@ export const useVaultStore = create<VaultState>((set, get) => ({
       selectedResolution: null,
       selectedLens: null
     })
-    get().fetchFiles()
+    if (!queryUnchanged) get().fetchFiles()
   },
 
   setSelectedAlbumId: (id) => {
+    const prev = get()
+    const queryUnchanged = prev.selectedAlbumId === id && prev.activeTab === 'folders'
     set({ selectedAlbumId: id, activeTab: 'folders', selectedIds: [] })
-    get().fetchFiles()
+    if (!queryUnchanged) get().fetchFiles()
   },
 
   setSelectedTag: (tag) => {
+    const prev = get()
+    const queryUnchanged = prev.selectedTag === tag
     set({ selectedTag: tag, selectedIds: [] })
-    get().fetchFiles()
-  },
-
-  setSearchQuery: (query) => {
-    set({ searchQuery: query })
-    get().fetchFiles()
-  },
-
-  setCategoryFilter: (category) => {
-    set({ activeCategoryFilter: category })
-    get().fetchFiles()
+    if (!queryUnchanged) get().fetchFiles()
   },
 
   setSelectedCamera: (camera) => set({ selectedCamera: camera }),
@@ -327,21 +383,21 @@ export const useVaultStore = create<VaultState>((set, get) => ({
 
   clearSelection: () => set({ selectedIds: [] }),
 
-  openLightbox: (item) => set({ lightboxItem: item }),
-  closeLightbox: () => set({ lightboxItem: null }),
+  openLightbox: (item, contextList) => set({ lightboxItem: item, lightboxItems: contextList ?? null }),
+  closeLightbox: () => set({ lightboxItem: null, lightboxItems: null }),
   nextLightbox: () => {
-    const { files, lightboxItem } = get()
+    const { files, lightboxItem, lightboxItems } = get()
     if (!lightboxItem) return
-    const activeList = files.filter((f) => !f.is_deleted)
+    const activeList = lightboxItems && lightboxItems.length > 0 ? lightboxItems : files.filter((f) => !f.is_deleted)
     const currentIndex = activeList.findIndex((f) => f.id === lightboxItem.id)
     if (currentIndex >= 0 && currentIndex < activeList.length - 1) {
       set({ lightboxItem: activeList[currentIndex + 1] })
     }
   },
   prevLightbox: () => {
-    const { files, lightboxItem } = get()
+    const { files, lightboxItem, lightboxItems } = get()
     if (!lightboxItem) return
-    const activeList = files.filter((f) => !f.is_deleted)
+    const activeList = lightboxItems && lightboxItems.length > 0 ? lightboxItems : files.filter((f) => !f.is_deleted)
     const currentIndex = activeList.findIndex((f) => f.id === lightboxItem.id)
     if (currentIndex > 0) {
       set({ lightboxItem: activeList[currentIndex - 1] })
@@ -349,7 +405,6 @@ export const useVaultStore = create<VaultState>((set, get) => ({
   },
 
   setCommandBarOpen: (open) => set({ isCommandBarOpen: open }),
-  setUploadModalOpen: (open) => set({ isUploadModalOpen: open }),
   setCreateAlbumModalOpen: (open) => set({ isCreateAlbumModalOpen: open }),
 
   moveToTrash: async (ids) => {
@@ -388,7 +443,6 @@ export const useVaultStore = create<VaultState>((set, get) => ({
 
   createAlbum: async (name, description) => {
     const album = await api.createAlbum(name, description)
-    set({ isCreateAlbumModalOpen: false })
     await get().fetchAlbums()
     return album
   },
@@ -410,3 +464,34 @@ export const useVaultStore = create<VaultState>((set, get) => ({
     await Promise.all([get().fetchFiles(), get().fetchMetrics()])
   },
 }))
+
+// H-26: Reload (or clear) starred ids whenever the active account/channel changes.
+// Legacy global keys are migrated once, then writes are namespaced per account.
+useAuthStore.subscribe((state, prev) => {
+  const sessionChanged =
+    state.isAuthenticated !== prev.isAuthenticated || state.channelId !== prev.channelId
+  if (!sessionChanged) return
+
+  if (!state.isAuthenticated) {
+    useVaultStore.setState({ starredIds: [] })
+    return
+  }
+
+  const namespace = starredNamespace(state)
+  let ids = readNamespacedStarred(namespace)
+  if (ids === null) {
+    // First login for this namespace: migrate legacy global stars once
+    let legacy: string | null = null
+    let alreadyMigrated = false
+    try {
+      legacy = localStorage.getItem('vayom_starred') ?? localStorage.getItem('televault_starred')
+      alreadyMigrated = localStorage.getItem(STARRED_MIGRATED_FLAG) !== null
+    } catch {}
+    ids = legacy !== null && !alreadyMigrated ? sanitizeStarred(legacy) : []
+    try {
+      localStorage.setItem(`${STARRED_KEY_PREFIX}${namespace}`, JSON.stringify(ids))
+      localStorage.setItem(STARRED_MIGRATED_FLAG, '1')
+    } catch {}
+  }
+  useVaultStore.setState({ starredIds: ids })
+})

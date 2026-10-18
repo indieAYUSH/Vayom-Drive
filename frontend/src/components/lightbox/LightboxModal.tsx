@@ -55,7 +55,7 @@ export const LightboxModal: React.FC<LightboxModalProps> = ({
 
   const handleDownload = () => {
     if (!item) return
-    const url = item.preview_url || item.thumbnail_url || `/api/v1/files/${item.id}/download`
+    const url = `/api/v1/files/${item.id}/download`
     if (url) {
       const a = document.createElement('a')
       a.href = url
@@ -68,7 +68,11 @@ export const LightboxModal: React.FC<LightboxModalProps> = ({
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (!item) return
-      if (e.key === 'Escape') onClose()
+      if (e.key === 'Escape') {
+        // H-30: close the Info drawer first if it is open, before closing the lightbox
+        if (showMetadata) setShowMetadata(false)
+        else onClose()
+      }
       else if (e.key === 'ArrowRight') onNext()
       else if (e.key === 'ArrowLeft') onPrev()
       else if (e.key === 'i' || e.key === 'I') setShowMetadata((prev) => !prev)
@@ -82,7 +86,7 @@ export const LightboxModal: React.FC<LightboxModalProps> = ({
 
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [item, onClose, onNext, onPrev, onMoveToTrash])
+  }, [item, onClose, onNext, onPrev, onMoveToTrash, showMetadata])
 
   // Reset zoom on item change
   useEffect(() => {
@@ -259,6 +263,8 @@ export const LightboxModal: React.FC<LightboxModalProps> = ({
         >
           {item.file_category === 'video' ? (
             <VideoPlayer
+              key={item.id}
+              item={item}
               src={item.preview_url || `/api/v1/virtual-stream/${item.id}`}
               poster={item.thumbnail_url}
               filename={item.filename}
@@ -266,6 +272,7 @@ export const LightboxModal: React.FC<LightboxModalProps> = ({
           ) : item.file_category === 'image' ? (
             <div className="w-full h-full flex items-center justify-center overflow-auto">
               <img
+                key={item.id}
                 src={item.preview_url || item.thumbnail_url || `/api/v1/files/${item.id}/download`}
                 alt={item.filename}
                 draggable={false}
@@ -275,7 +282,7 @@ export const LightboxModal: React.FC<LightboxModalProps> = ({
               />
             </div>
           ) : (
-            <DocPreview item={item} onDownload={handleDownload} />
+            <DocPreview key={item.id} item={item} onDownload={handleDownload} />
           )}
         </div>
 

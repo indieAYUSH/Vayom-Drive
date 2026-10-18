@@ -59,6 +59,19 @@ export interface FileItem {
   exif?: ExifMetadata
   gps?: GpsCoordinates
   duration_seconds?: number
+  kind?: 'original' | 'proxy'
+  proxy_of?: string | null
+  proxy_id?: string | null
+  proxy_url?: string | null
+  proxy_status?: 'none' | 'queued' | 'encoding' | 'uploading' | 'ready' | 'failed' | 'unavailable_no_source' | 'skipped_small'
+  proxy_profile?: string | null
+  proxy_size_bytes?: number | null
+  video_bitrate_bps?: number | null
+  width?: number | null
+  height?: number | null
+  codec?: string | null
+  container?: string | null
+  duration_s?: number | null
   tags: string[]
   albums: string[]
   folders?: string[]
@@ -69,6 +82,18 @@ export interface FileItem {
   created_at: string
   is_deleted: boolean
   deleted_at?: string
+  storage_backend?: 'telegram' | 'nas' | 's3' | 'nextcloud'
+}
+
+export type StorageBackend = 'telegram' | 'nas' | 's3' | 'nextcloud'
+
+export interface LicenseStatus {
+  is_pro: boolean
+  tier: 'free' | 'pro'
+  features: string[]
+  issued_to?: string | null
+  expires_at?: number | null
+  license_id?: string | null
 }
 
 export interface AlbumItem {
@@ -77,22 +102,6 @@ export interface AlbumItem {
   description?: string
   cover_url?: string
   file_count: number
-  created_at: string
-}
-
-export type FolderItem = AlbumItem
-
-export interface ShareLinkItem {
-  id: string
-  token: string
-  file_id: string
-  filename: string
-  file_size: number
-  expires_at: string
-  max_views?: number
-  view_count: number
-  has_password: boolean
-  is_revoked: boolean
   created_at: string
 }
 

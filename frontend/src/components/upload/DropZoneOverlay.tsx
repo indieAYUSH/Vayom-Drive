@@ -94,6 +94,14 @@ export const DropZoneOverlay: React.FC = () => {
 
     const handleDragLeave = (e: DragEvent) => {
       e.preventDefault()
+      // H-37: leaving the window entirely (relatedTarget === null) ends the drag —
+      // also clear a wedged internal-drag flag so external drops keep working
+      if (e.relatedTarget === null) {
+        isInternalDrag = false
+        dragCounter = 0
+        setIsDragging(false)
+        return
+      }
       if (isInternalDrag) return
 
       dragCounter--

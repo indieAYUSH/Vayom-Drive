@@ -16,19 +16,25 @@ export const BulkActionBar: React.FC = () => {
 
   const handleBatchDownload = () => {
     const selectedFiles = files.filter((f) => selectedIds.includes(f.id))
-    selectedFiles.forEach((file) => {
-      const url = file.preview_url || file.thumbnail_url
-      if (url) {
+    // H-33: fall back to the download endpoint instead of silently skipping items,
+    // and stagger the anchor clicks so the browser doesn't throttle parallel downloads
+    const downloads = selectedFiles.map((file) => ({
+      url: `/api/v1/files/${file.id}/download`,
+      filename: file.filename,
+    }))
+    downloads.forEach((d, index) => {
+      setTimeout(() => {
         const a = document.createElement('a')
-        a.href = url
-        a.download = file.filename
+        a.href = d.url
+        a.download = d.filename
         a.click()
-      }
+      }, index * 250)
     })
   }
 
   const handleDelete = () => {
-    moveToTrash(selectedIds)
+    // H-17: surface failures instead of an unhandled rejection
+    moveToTrash(selectedIds).catch((err: any) => alert(err?.message || 'Failed to move items to trash'))
   }
 
   return (

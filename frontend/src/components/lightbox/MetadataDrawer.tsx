@@ -11,11 +11,28 @@ interface MetadataDrawerProps {
 
 export const MetadataDrawer: React.FC<MetadataDrawerProps> = ({ item, onClose }) => {
   const [copiedSha, setCopiedSha] = React.useState(false)
+  const copiedTimeoutRef = React.useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  React.useEffect(() => {
+    return () => {
+      if (copiedTimeoutRef.current) {
+        clearTimeout(copiedTimeoutRef.current)
+        copiedTimeoutRef.current = null
+      }
+    }
+  }, [])
 
   const copySha = () => {
-    navigator.clipboard.writeText(item.sha256)
+    try {
+      navigator.clipboard.writeText(item.sha256).catch((err: unknown) => {
+        console.warn('Clipboard write failed:', err)
+      })
+    } catch (err) {
+      console.warn('Clipboard unavailable:', err)
+    }
     setCopiedSha(true)
-    setTimeout(() => setCopiedSha(false), 1500)
+    if (copiedTimeoutRef.current) clearTimeout(copiedTimeoutRef.current)
+    copiedTimeoutRef.current = setTimeout(() => setCopiedSha(false), 1500)
   }
 
   const formatSize = (bytes: number) => {

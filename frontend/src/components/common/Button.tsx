@@ -15,7 +15,7 @@ export const Button: React.FC<ButtonProps> = ({
   disabled,
   ...props
 }) => {
-  const baseStyles = 'inline-flex items-center justify-center font-mono font-medium transition-colors border select-none cursor-pointer disabled:cursor-not-allowed disabled:opacity-40 uppercase tracking-wider text-xs'
+  const baseStyles = 'inline-flex items-center justify-center font-sans font-medium transition-colors border select-none cursor-pointer disabled:cursor-not-allowed disabled:opacity-40 text-xs tracking-normal'
 
   const variants = {
     primary: 'bg-[#ffffff] text-[#000000] border-[#ffffff] hover:bg-[#e5e5e5] active:bg-[#cccccc]',

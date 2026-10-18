@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react'
+import React, { useState, useEffect, useRef } from 'react'
 import { api } from '../../services/api'
 import { useVaultStore } from '../../store/useVaultStore'
 import { WatchFolder, WatchFolderEvent } from '../../types/vault'
@@ -6,6 +6,7 @@ import {
   FolderSync,
   FolderPlus,
   Play,
+  Pause,
   Trash2,
   AlertCircle,
   CheckCircle2,
@@ -24,6 +25,8 @@ export const WatchFolderManager: React.FC = () => {
   const [isLoading, setIsLoading] = useState(false)
   const [isAdding, setIsAdding] = useState(false)
   const [scanningId, setScanningId] = useState<string | null>(null)
+  const [togglingId, setTogglingId] = useState<string | null>(null)
+  const isMountedRef = useRef(true)
 
   // Form State
   const [path, setPath] = useState('')
@@ -39,6 +42,8 @@ export const WatchFolderManager: React.FC = () => {
         api.listWatchFolders(),
         api.listWatchEvents(undefined, 20),
       ])
+      // H-32: don't write state after unmount
+      if (!isMountedRef.current) return
       setFolders(fList)
       setEvents(eList)
     } catch (err: any) {
@@ -47,11 +52,14 @@ export const WatchFolderManager: React.FC = () => {
   }
 
   useEffect(() => {
+    isMountedRef.current = true
     loadData()
-    const timer = setInterval(() => {
-      api.listWatchEvents(undefined, 20).then(setEvents).catch(() => {})
-    }, 10000)
-    return () => clearInterval(timer)
+    // H-32: refresh folders AND events on the poll so counts don't drift
+    const timer = setInterval(loadData, 10000)
+    return () => {
+      isMountedRef.current = false
+      clearInterval(timer)
+    }
   }, [])
 
   const handleCreateFolder = async (e: React.FormEvent) => {
@@ -102,6 +110,19 @@ export const WatchFolderManager: React.FC = () => {
       alert(`Error scanning folder: ${err.message}`)
     } finally {
       setScanningId(null)
+    }
+  }
+
+  // H-24: wire the formerly dead updateWatchFolder API into a pause/resume toggle
+  const handleToggleFolder = async (folder: WatchFolder) => {
+    setTogglingId(folder.id)
+    try {
+      await api.updateWatchFolder(folder.id, { is_active: !folder.is_active })
+      await loadData()
+    } catch (err: any) {
+      alert(`Error updating watch folder: ${err.message}`)
+    } finally {
+      setTogglingId(null)
     }
   }
 
@@ -266,6 +287,15 @@ export const WatchFolderManager: React.FC = () => {
                 </div>
 
                 <div className="flex items-center gap-2 flex-shrink-0">
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    onClick={() => handleToggleFolder(f)}
+                    disabled={togglingId === f.id || !f.exists}
+                    icon={f.is_active ? <Pause size={11} /> : <Play size={11} />}
+                  >
+                    {f.is_active ? 'Pause' : 'Resume'}
+                  </Button>
                   <Button
                     variant="secondary"
                     size="sm"

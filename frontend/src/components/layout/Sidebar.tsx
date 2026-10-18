@@ -13,7 +13,8 @@ import {
   Lock,
   Crop,
   Star,
-  Music
+  Music,
+  Cloud
 } from 'lucide-react'
 import { useVaultStore } from '../../store/useVaultStore'
 import { formatBytes } from '../../utils/format'
@@ -62,20 +63,20 @@ export const Sidebar: React.FC = () => {
   }
 
   const navItemClass = (isActive: boolean) => `
-    flex items-center justify-between px-3 py-2 text-xs font-mono select-none cursor-pointer border-l-2 transition-colors
+    flex items-center justify-between px-3 py-2 text-xs font-sans font-medium select-none cursor-pointer border-l-2 transition-colors
     ${isActive 
       ? 'border-[#ffffff] bg-[#141414] text-[#ffffff] font-semibold' 
-      : 'border-transparent text-[#999999] hover:bg-[#0f0f0f] hover:text-[#cccccc]'}
+      : 'border-transparent text-[#a3a3a3] hover:bg-[#0f0f0f] hover:text-[#f0f0f0]'}
   `
 
   return (
     <aside className="w-60 bg-[#080808] border-r border-[#282828] flex flex-col justify-between h-[calc(100vh-3.5rem)] flex-shrink-0 select-none">
       {/* Top Nav Tree */}
       <div className="overflow-y-auto py-3 space-y-6">
-        {/* Google Photos Section */}
+        {/* Media Library Section */}
         <div>
-          <div className="px-3 pb-1 text-[10px] font-mono uppercase tracking-widest text-[#555555]">
-            Photos & Media
+          <div className="px-3 pb-1.5 text-[11px] font-sans font-semibold uppercase tracking-wider text-[#888888]">
+            Media Library
           </div>
           <div className="space-y-0.5">
             <div 
@@ -86,7 +87,7 @@ export const Sidebar: React.FC = () => {
                 <Clock size={14} />
                 <span>Timeline</span>
               </div>
-              <span className="text-[10px] text-[#555555]">
+              <span className="text-[11px] font-mono text-[#737373]">
                 {catalog.length}
               </span>
             </div>
@@ -99,7 +100,7 @@ export const Sidebar: React.FC = () => {
                 <ImageIcon size={14} />
                 <span>Photos</span>
               </div>
-              <span className="text-[10px] text-[#555555]">
+              <span className="text-[11px] font-mono text-[#737373]">
                 {catalog.filter(f => f.file_category === 'image' && !isScreenshotFile(f)).length}
               </span>
             </div>
@@ -112,7 +113,7 @@ export const Sidebar: React.FC = () => {
                 <Crop size={14} />
                 <span>Screenshots</span>
               </div>
-              <span className="text-[10px] text-[#555555]">
+              <span className="text-[11px] font-mono text-[#737373]">
                 {catalog.filter(f => isScreenshotFile(f)).length}
               </span>
             </div>
@@ -125,7 +126,7 @@ export const Sidebar: React.FC = () => {
                 <Video size={14} />
                 <span>Videos</span>
               </div>
-              <span className="text-[10px] text-[#555555]">
+              <span className="text-[11px] font-mono text-[#737373]">
                 {catalog.filter(f => f.file_category === 'video').length}
               </span>
             </div>
@@ -138,17 +139,17 @@ export const Sidebar: React.FC = () => {
                 <Star size={14} />
                 <span>Starred</span>
               </div>
-              <span className="text-[10px] text-[#555555]">
+              <span className="text-[11px] font-mono text-[#737373]">
                 {catalog.filter(f => starredIds.includes(f.id)).length}
               </span>
             </div>
           </div>
         </div>
 
-        {/* Google Drive Section */}
+        {/* Files & Storage Section */}
         <div>
-          <div className="px-3 pb-1 text-[10px] font-mono uppercase tracking-widest text-[#555555]">
-            Drive & Files
+          <div className="px-3 pb-1.5 text-[11px] font-sans font-semibold uppercase tracking-wider text-[#888888]">
+            Files & Storage
           </div>
           <div className="space-y-0.5">
             <div 
@@ -159,7 +160,7 @@ export const Sidebar: React.FC = () => {
                 <Folder size={14} />
                 <span>Folders</span>
               </div>
-              <span className="text-[10px] text-[#555555]">
+              <span className="text-[11px] font-mono text-[#737373]">
                 {albums.length}
               </span>
             </div>
@@ -170,9 +171,9 @@ export const Sidebar: React.FC = () => {
             >
               <div className="flex items-center gap-2.5">
                 <FileText size={14} />
-                <span>Documents & Code</span>
+                <span>Documents</span>
               </div>
-              <span className="text-[10px] text-[#555555]">
+              <span className="text-[11px] font-mono text-[#737373]">
                 {catalog.filter(f => f.file_category === 'document').length}
               </span>
             </div>
@@ -183,9 +184,9 @@ export const Sidebar: React.FC = () => {
             >
               <div className="flex items-center gap-2.5">
                 <Music size={14} />
-                <span>Audio Tracks</span>
+                <span>Audio</span>
               </div>
-              <span className="text-[10px] text-[#555555]">
+              <span className="text-[11px] font-mono text-[#737373]">
                 {catalog.filter(f => isAudioFile(f)).length}
               </span>
             </div>
@@ -196,9 +197,9 @@ export const Sidebar: React.FC = () => {
             >
               <div className="flex items-center gap-2.5">
                 <Archive size={14} />
-                <span>Archives & Split</span>
+                <span>Archives</span>
               </div>
-              <span className="text-[10px] text-[#555555]">
+              <span className="text-[11px] font-mono text-[#737373]">
                 {catalog.filter(f => f.file_category === 'archive' || f.is_split).length}
               </span>
             </div>
@@ -207,7 +208,7 @@ export const Sidebar: React.FC = () => {
 
         {/* Folders List Section */}
         <div>
-          <div className="px-3 pb-1 flex items-center justify-between text-[10px] font-mono uppercase tracking-widest text-[#555555]">
+          <div className="px-3 pb-1.5 flex items-center justify-between text-[11px] font-sans font-semibold uppercase tracking-wider text-[#888888]">
             <span 
               onClick={() => { setActiveTab('folders'); setSelectedAlbumId(null); }}
               className="cursor-pointer hover:text-[#ffffff] transition-colors"
@@ -234,7 +235,7 @@ export const Sidebar: React.FC = () => {
                   <Folder size={14} />
                   <span className="truncate">{folder.name}</span>
                 </div>
-                <span className="text-[10px] text-[#555555]">{folder.file_count}</span>
+                <span className="text-[11px] font-mono text-[#737373]">{folder.file_count}</span>
               </div>
             ))}
           </div>
@@ -243,18 +244,18 @@ export const Sidebar: React.FC = () => {
         {/* Tags Section */}
         {allTags.length > 0 && (
           <div>
-            <div className="px-3 pb-1 text-[10px] font-mono uppercase tracking-widest text-[#555555]">
-              CLIP Labels & Tags
+            <div className="px-3 pb-1.5 text-[11px] font-sans font-semibold uppercase tracking-wider text-[#888888]">
+              Media Tags
             </div>
             <div className="px-3 flex flex-wrap gap-1 mt-1">
               {allTags.slice(0, 12).map((tag) => (
                 <button
                   key={tag}
                   onClick={() => setSelectedTag(selectedTag === tag ? null : tag)}
-                  className={`text-[10px] font-mono px-2 py-0.5 border uppercase transition-colors ${
+                  className={`text-[11px] font-mono px-2 py-0.5 border uppercase transition-colors ${
                     selectedTag === tag
-                      ? 'bg-[#ffffff] text-[#000000] border-[#ffffff]'
-                      : 'bg-[#111111] text-[#888888] border-[#222222] hover:border-[#444444] hover:text-[#e5e5e5]'
+                      ? 'bg-[#ffffff] text-[#000000] border-[#ffffff] font-semibold'
+                      : 'bg-[#111111] text-[#a3a3a3] border-[#222222] hover:border-[#444444] hover:text-[#ffffff]'
                   }`}
                 >
                   #{tag}
@@ -266,7 +267,7 @@ export const Sidebar: React.FC = () => {
 
         {/* Retention & System */}
         <div>
-          <div className="px-3 pb-1 text-[10px] font-mono uppercase tracking-widest text-[#555555]">
+          <div className="px-3 pb-1.5 text-[11px] font-sans font-semibold uppercase tracking-wider text-[#888888]">
             System
           </div>
           <div className="space-y-0.5">
@@ -279,7 +280,7 @@ export const Sidebar: React.FC = () => {
                 <span>Trash</span>
               </div>
               {trashCount > 0 && (
-                <span className="text-[10px] font-mono text-[#ef4444] bg-[#220808] px-1.5 py-0.2 border border-[#441111]">
+                <span className="text-[11px] font-mono text-[#ef4444] bg-[#220808] px-1.5 py-0.2 border border-[#441111]">
                   {trashCount}
                 </span>
               )}
@@ -289,19 +290,19 @@ export const Sidebar: React.FC = () => {
       </div>
 
       {/* Footer Info Box */}
-      <div className="p-3 border-t border-[#222222] bg-[#0c0c0c] font-mono text-[11px] text-[#666666]">
-        <div className="flex items-center justify-between pb-1">
-          <span className="flex items-center gap-1.5 text-[#888888]">
-            <Database size={11} /> Channel WAL
+      <div className="p-3 border-t border-[#222222] bg-[#0c0c0c] text-xs">
+        <div className="flex items-center justify-between pb-1 font-sans">
+          <span className="flex items-center gap-1.5 text-[#cccccc] font-medium text-xs">
+            <Cloud size={13} className="text-[#38bdf8]" /> Cloud Storage
           </span>
-          <span className="text-[#22c55e] flex items-center gap-1.5">
-            <span className="w-1.5 h-1.5 rounded-full bg-[#22c55e] inline-block" />
-            SYNCED
+          <span className="text-[#22c55e] flex items-center gap-1.5 text-[10px] font-mono font-medium">
+            <span className="w-1.5 h-1.5 rounded-full bg-[#22c55e] inline-block animate-pulse" />
+            Connected & Synced
           </span>
         </div>
-        <div className="flex justify-between items-center text-[10px] text-[#888888] pt-1">
-          <span>Synced: <span className="text-[#e5e5e5] font-semibold">{formatBytes(metrics.total_bytes)}</span></span>
-          <span className="text-[#666666]">{metrics.total_files} {metrics.total_files === 1 ? 'file' : 'files'}</span>
+        <div className="flex justify-between items-center text-[11px] text-[#888888] pt-1 font-sans">
+          <span>Synced: <span className="text-[#f0f0f0] font-mono font-semibold">{formatBytes(metrics.total_bytes)}</span></span>
+          <span className="text-[#888888] font-mono">{metrics.total_files} {metrics.total_files === 1 ? 'file' : 'files'}</span>
         </div>
       </div>
     </aside>

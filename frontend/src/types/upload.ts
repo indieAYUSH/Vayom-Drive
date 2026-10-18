@@ -27,5 +27,6 @@ export interface UploadTask {
   total_parts: number
   server_file_id?: string
   error_message?: string
+  storage_backend?: 'telegram' | 'nas' | 's3' | 'nextcloud'
   created_at: number
 }

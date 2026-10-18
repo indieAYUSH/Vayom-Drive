@@ -1,6 +1,6 @@
 import React from 'react'
 import { UploadTask } from '../../types/upload'
-import { Pause, Play, X, Check, AlertCircle } from 'lucide-react'
+import { Pause, Play, X, Check, AlertCircle, RotateCcw } from 'lucide-react'
 import { Badge } from '../common/Badge'
 import { formatBytes, formatSpeed } from '../../utils/format'
 
@@ -8,6 +8,7 @@ interface TaskRowProps {
   task: UploadTask
   onPause: (id: string) => void
   onResume: (id: string) => void
+  onRetry: (id: string) => void
   onCancel: (id: string) => void
 }
 
@@ -15,6 +16,7 @@ export const TaskRow: React.FC<TaskRowProps> = ({
   task,
   onPause,
   onResume,
+  onRetry,
   onCancel
 }) => {
 
@@ -76,6 +78,16 @@ export const TaskRow: React.FC<TaskRowProps> = ({
               title="Resume"
             >
               <Play size={12} />
+            </button>
+          )}
+          {/* H-31: failed tasks can be retried instead of only cancelled */}
+          {task.status === 'failed' && (
+            <button
+              onClick={() => onRetry(task.id)}
+              className="p-1 text-[#888888] hover:text-[#22c55e] border border-transparent hover:border-[#144422]"
+              title="Retry"
+            >
+              <RotateCcw size={12} />
             </button>
           )}
           {task.status !== 'done' && (

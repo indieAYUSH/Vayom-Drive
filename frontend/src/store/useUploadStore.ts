@@ -1,21 +1,24 @@
 import { create } from 'zustand'
 import { UploadTask } from '../types/upload'
+import { AlbumItem } from '../types/vault'
 import { useVaultStore } from './useVaultStore'
 import { api } from '../services/api'
 
 interface UploadState {
   tasks: UploadTask[]
   isTrayOpen: boolean
-  isDraggingOver: boolean
   floodWaitSecondsRemaining: number
 
+  selectedBackend: 'telegram' | 'nas' | 's3' | 'nextcloud'
+  setSelectedBackend: (backend: 'telegram' | 'nas' | 's3' | 'nextcloud') => void
   setTrayOpen: (open: boolean) => void
-  setDraggingOver: (dragging: boolean) => void
   addFilesToUpload: (files: FileList | File[]) => void
   pauseTask: (id: string) => void
   resumeTask: (id: string) => void
+  retryTask: (id: string) => void
   cancelTask: (id: string) => void
   clearCompleted: () => void
+  clearFailed: () => void
 }
 
 // Map of active XMLHttpRequest instances for pause/cancellation
@@ -27,6 +30,29 @@ const MAX_CONCURRENT_UPLOADS = 3
 let floodWaitCooldownUntil = 0
 let floodWaitTimeoutId: any = null
 let floodWaitTickerId: any = null
+
+// H-16: share one in-flight album-create promise per folder name so concurrent
+// completions from the same directory drop cannot create duplicate albums
+const albumCreatePromises = new Map<string, Promise<AlbumItem>>()
+
+function findOrCreateAlbum(folderName: string): Promise<AlbumItem> {
+  const key = folderName.toLowerCase()
+  const existing = useVaultStore.getState().albums.find((a) => a.name.toLowerCase() === key)
+  if (existing) {
+    albumCreatePromises.delete(key)
+    return Promise.resolve(existing)
+  }
+  let promise = albumCreatePromises.get(key)
+  if (!promise) {
+    promise = api.createAlbum(folderName).then((newAlbum) => {
+      useVaultStore.getState().fetchAlbums()
+      return newAlbum
+    })
+    promise.catch(() => albumCreatePromises.delete(key))
+    albumCreatePromises.set(key, promise)
+  }
+  return promise
+}
 
 function updateFloodWaitTicker() {
   const now = Date.now()
@@ -147,19 +173,20 @@ function processQueue() {
 export const useUploadStore = create<UploadState>((set, get) => ({
   tasks: [],
   isTrayOpen: true,
-  isDraggingOver: false,
   floodWaitSecondsRemaining: 0,
+  selectedBackend: 'telegram',
 
+  setSelectedBackend: (backend) => set({ selectedBackend: backend }),
   setTrayOpen: (open) => set({ isTrayOpen: open }),
-  setDraggingOver: (dragging) => set({ isDraggingOver: dragging }),
 
   addFilesToUpload: (fileInput) => {
     const fileArray = Array.from(fileInput)
     if (fileArray.length === 0) return
 
+    const currentBackend = get().selectedBackend
     const newTasks: UploadTask[] = fileArray.map((file) => {
-      const isLarge = file.size > 1900000000
-      const totalParts = isLarge ? Math.ceil(file.size / 1900000000) : 1
+      const isLarge = file.size > 1887436800
+      const totalParts = (isLarge && currentBackend === 'telegram') ? Math.ceil(file.size / 1887436800) : 1
       return {
         id: `upl-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
         file,
@@ -172,6 +199,7 @@ export const useUploadStore = create<UploadState>((set, get) => ({
         status: 'queued',
         current_part: 1,
         total_parts: totalParts,
+        storage_backend: currentBackend,
         created_at: Date.now(),
       }
     })
@@ -245,9 +273,29 @@ export const useUploadStore = create<UploadState>((set, get) => ({
     processQueue()
   },
 
+  // H-31: Re-queue a failed task so the worker pool retries it
+  // (chunked uploads resume from known parts via server_file_id)
+  retryTask: (id) => {
+    const task = get().tasks.find((t) => t.id === id)
+    if (!task || task.status === 'done') return
+    set((state) => ({
+      tasks: state.tasks.map((t) =>
+        t.id === id ? { ...t, status: 'queued', error_message: undefined, speed_bps: 0, eta_seconds: 0 } : t
+      ),
+      isTrayOpen: true,
+    }))
+    processQueue()
+  },
+
   clearCompleted: () =>
     set((state) => ({
       tasks: state.tasks.filter((t) => t.status !== 'done'),
+    })),
+
+  // H-31: Drop failed tasks (and their retained multi-GB File objects) from memory
+  clearFailed: () =>
+    set((state) => ({
+      tasks: state.tasks.filter((t) => t.status !== 'failed'),
     })),
 }))
 
@@ -454,17 +502,10 @@ function executeRealUpload(taskId: string) {
           const rel = (task.file as any).webkitRelativePath as string
           const parts = rel.split('/')
           if (parts.length > 1) {
-            const folderName = parts[0]
-            const albums = useVaultStore.getState().albums
-            const existing = albums.find((a) => a.name.toLowerCase() === folderName.toLowerCase())
-            if (existing) {
-              api.addFileToAlbum(existing.id, json.file_id).catch(() => {})
-            } else {
-              api.createAlbum(folderName).then((newAlb) => {
-                useVaultStore.getState().fetchAlbums()
-                api.addFileToAlbum(newAlb.id, json.file_id).catch(() => {})
-              }).catch(() => {})
-            }
+            // H-16: concurrent completions from one directory drop share a single create
+            findOrCreateAlbum(parts[0])
+              .then((album) => api.addFileToAlbum(album.id, json.file_id).catch(() => {}))
+              .catch(() => {})
           }
         }
       } catch {}
@@ -473,6 +514,7 @@ function executeRealUpload(taskId: string) {
       useVaultStore.getState().fetchFiles()
       useVaultStore.getState().fetchAlbums()
       useVaultStore.getState().fetchMetrics()
+      useVaultStore.getState().refreshCatalog()
       processQueue()
     } else {
       // Anti-Ban Invariant 5: Strict Global FloodWait Handling in Frontend Queue
@@ -496,6 +538,21 @@ function executeRealUpload(taskId: string) {
           speed_bps: 0,
         })
         scheduleFloodWaitCooldown(cooldownUntil)
+        return
+      }
+
+      if (xhr.status === 402) {
+        let msg = 'Pro license required for this storage destination.'
+        try {
+          const err = JSON.parse(xhr.responseText)
+          if (err.detail?.message) msg = err.detail.message
+        } catch {}
+        updateTask({
+          status: 'failed',
+          error_message: msg,
+          speed_bps: 0,
+        })
+        processQueue()
         return
       }
 
@@ -531,6 +588,9 @@ function executeRealUpload(taskId: string) {
 
   xhr.open('POST', `/api/v1/upload?task_id=${encodeURIComponent(taskId)}`)
   xhr.setRequestHeader('X-Task-ID', taskId)
+  if (task.storage_backend) {
+    xhr.setRequestHeader('X-Storage-Backend', task.storage_backend)
+  }
   xhr.send(formData)
 }
 
@@ -546,7 +606,7 @@ async function executeChunkedUpload(taskId: string) {
   if (!task) return
 
   const file = task.file
-  const PART_SIZE = 1900000000 // 1.9 GB slice per Telegram max part size
+  const PART_SIZE = 1887436800 // 900 * 2 MiB boundary, exact multiple of 2 MiB, 512 KiB, 4096 bytes
   const totalParts = Math.max(1, Math.ceil(file.size / PART_SIZE))
 
   let fileId = task.server_file_id
@@ -689,6 +749,7 @@ async function executeChunkedUpload(taskId: string) {
   useVaultStore.getState().fetchFiles()
   useVaultStore.getState().fetchAlbums()
   useVaultStore.getState().fetchMetrics()
+  useVaultStore.getState().refreshCatalog()
   processQueue()
 }
 

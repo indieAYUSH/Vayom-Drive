@@ -1,4 +1,5 @@
 import React, { useState } from 'react'
+import type { FileItem } from '../types/vault'
 import { useVaultStore } from '../store/useVaultStore'
 import { VirtualizedGrid } from '../components/gallery/VirtualizedGrid'
 import { TableView } from '../components/gallery/TableView'
@@ -57,7 +58,7 @@ export const GalleryView: React.FC = () => {
     )
   }
 
-  // Filter items
+  // H-13: Filter items ensuring category filters do not bypass workstation metadata filters
   const displayItems = React.useMemo(() => {
     return files.filter((item) => {
       if (item.is_deleted) return false
@@ -66,19 +67,15 @@ export const GalleryView: React.FC = () => {
         if (!inAlbum) return false
       }
       if (selectedTag && !item.tags.includes(selectedTag)) return false
-      if (activeTab === 'starred') return starredIds.includes(item.id)
-      if (activeTab === 'audio') return isAudio(item)
-      if (activeTab === 'screenshots') {
-        return item.file_category === 'image' && isScreenshot(item)
-      }
-      if (activeTab === 'images') {
-        return item.file_category === 'image' && !isScreenshot(item)
-      }
-      if (activeTab === 'videos') return item.file_category === 'video'
-      if (activeTab === 'documents') return item.file_category === 'document'
-      if (activeTab === 'archives') return item.file_category === 'archive' || item.is_split
+      if (activeTab === 'starred' && !starredIds.includes(item.id)) return false
+      if (activeTab === 'audio' && !isAudio(item)) return false
+      if (activeTab === 'screenshots' && !(item.file_category === 'image' && isScreenshot(item))) return false
+      if (activeTab === 'images' && !(item.file_category === 'image' && !isScreenshot(item))) return false
+      if (activeTab === 'videos' && item.file_category !== 'video') return false
+      if (activeTab === 'documents' && item.file_category !== 'document') return false
+      if (activeTab === 'archives' && !(item.file_category === 'archive' || item.is_split)) return false
 
-      // Workstation Metadata Filters
+      // Workstation Metadata Filters (applies consistently across images, videos, all, etc.)
       if (selectedCamera) {
         const cam = item.exif?.camera_make || item.exif?.make || item.exif?.camera_model || item.exif?.model
         if (!cam || !cam.toLowerCase().includes(selectedCamera.toLowerCase())) return false
@@ -100,6 +97,14 @@ export const GalleryView: React.FC = () => {
     })
   }, [files, activeTab, selectedAlbumId, selectedTag, starredIds, selectedCamera, selectedCodec, selectedResolution, selectedLens])
 
+  // H-14: Scoped lightbox opening using the visible, sorted list
+  const handleOpenLightbox = React.useCallback(
+    (item: FileItem, contextList?: FileItem[]) => {
+      openLightbox(item, contextList || displayItems)
+    },
+    [openLightbox, displayItems]
+  )
+
   return (
     <div className="flex-1 flex flex-col h-full bg-[#000000] overflow-hidden">
       {/* Drive Breadcrumb Navigation when viewing folder */}
@@ -108,7 +113,7 @@ export const GalleryView: React.FC = () => {
       )}
 
       {/* Gallery Header Bar */}
-      <div className="h-12 border-b border-[#282828] bg-[#080808] px-4 flex items-center justify-between flex-shrink-0 font-mono text-xs select-none">
+      <div className="h-12 border-b border-[#282828] bg-[#080808] px-4 flex items-center justify-between flex-shrink-0 font-sans text-xs select-none">
         {/* Left: Section Title or Filter Indicator */}
         <div className="flex items-center gap-2 truncate">
           {selectedAlbumId && (
@@ -118,11 +123,11 @@ export const GalleryView: React.FC = () => {
               title="Back to Folders"
             >
               <ArrowLeft size={13} />
-              <span className="text-[11px]">Folders</span>
+              <span className="text-xs">Folders</span>
             </button>
           )}
 
-          <span className="font-semibold text-[#f0f0f0] uppercase tracking-wider">
+          <span className="font-semibold text-[#f0f0f0] tracking-normal">
             {activeAlbum 
               ? `Folder: ${activeAlbum.name}` 
               : activeTab === 'all' 
@@ -138,7 +143,7 @@ export const GalleryView: React.FC = () => {
                         : `${activeTab} Index`}
           </span>
 
-          <span className="text-[11px] text-[#555555]">
+          <span className="text-[11px] font-mono text-[#888888]">
             ({displayItems.length} {displayItems.length === 1 ? 'file' : 'files'})
           </span>
 
@@ -160,14 +165,14 @@ export const GalleryView: React.FC = () => {
           {selectedIds.length > 0 ? (
             <button
               onClick={clearSelection}
-              className="text-[11px] text-[#999999] hover:text-[#ffffff] px-2 py-1 border border-[#282828]"
+              className="text-xs font-sans text-[#a3a3a3] hover:text-[#ffffff] px-2.5 py-1 border border-[#282828]"
             >
               Clear ({selectedIds.length})
             </button>
           ) : (
             <button
               onClick={() => selectAll(displayItems.map((item) => item.id))}
-              className="text-[11px] text-[#999999] hover:text-[#ffffff] px-2 py-1 border border-[#282828] hover:border-[#444444] hidden sm:inline-block"
+              className="text-xs font-sans text-[#a3a3a3] hover:text-[#ffffff] px-2.5 py-1 border border-[#282828] hover:border-[#444444] hidden sm:inline-block"
             >
               Select All
             </button>
@@ -220,7 +225,7 @@ export const GalleryView: React.FC = () => {
           items={displayItems}
           selectedIds={selectedIds}
           onToggleSelect={toggleSelect}
-          onOpenLightbox={openLightbox}
+          onOpenLightbox={handleOpenLightbox}
           groupByDate={timelineGroupByDate}
         />
       ) : (
@@ -228,8 +233,11 @@ export const GalleryView: React.FC = () => {
           items={displayItems}
           selectedIds={selectedIds}
           onToggleSelect={toggleSelect}
-          onOpenLightbox={openLightbox}
-          onMoveToTrash={moveToTrash}
+          onOpenLightbox={handleOpenLightbox}
+          onMoveToTrash={(ids) => {
+            // H-17: surface failures instead of an unhandled rejection
+            moveToTrash(ids).catch((err: any) => alert(err?.message || 'Failed to move items to trash'))
+          }}
         />
       )}
     </div>

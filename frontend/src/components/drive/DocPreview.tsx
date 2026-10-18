@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react'
+import React, { useState, useEffect, useRef } from 'react'
 import { FileItem } from '../../types/vault'
 import { Button } from '../common/Button'
 import { Download, Copy, Check, FileText, Music, Play, Pause, Volume2, VolumeX } from 'lucide-react'
@@ -13,6 +13,16 @@ export const DocPreview: React.FC<DocPreviewProps> = ({ item, onDownload }) => {
   const [textContent, setTextContent] = useState<string | null>(null)
   const [isLoadingText, setIsLoadingText] = useState(false)
   const [copied, setCopied] = useState(false)
+  const copiedTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  useEffect(() => {
+    return () => {
+      if (copiedTimeoutRef.current) {
+        clearTimeout(copiedTimeoutRef.current)
+        copiedTimeoutRef.current = null
+      }
+    }
+  }, [])
 
   // Audio player state if audio
   const [isPlayingAudio, setIsPlayingAudio] = useState(false)
@@ -60,11 +70,35 @@ export const DocPreview: React.FC<DocPreviewProps> = ({ item, onDownload }) => {
     return () => controller.abort()
   }, [item, isCodeOrText, isPdf, isAudio])
 
+  // H-9: Clean up audio playback when item changes or modal closes
+  useEffect(() => {
+    setIsPlayingAudio(false)
+    setAudioTime(0)
+    setAudioDuration(0)
+
+    return () => {
+      if (audioRef.current) {
+        try {
+          audioRef.current.pause()
+          audioRef.current.removeAttribute('src')
+          audioRef.current.load()
+        } catch {}
+      }
+    }
+  }, [item.id])
+
   const copyText = () => {
     if (!textContent) return
-    navigator.clipboard.writeText(textContent)
+    try {
+      navigator.clipboard.writeText(textContent).catch((err: unknown) => {
+        console.warn('Clipboard write failed:', err)
+      })
+    } catch (err) {
+      console.warn('Clipboard unavailable:', err)
+    }
     setCopied(true)
-    setTimeout(() => setCopied(false), 2000)
+    if (copiedTimeoutRef.current) clearTimeout(copiedTimeoutRef.current)
+    copiedTimeoutRef.current = setTimeout(() => setCopied(false), 2000)
   }
 
   // Audio handlers

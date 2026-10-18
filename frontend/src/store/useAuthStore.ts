@@ -33,6 +33,10 @@ interface AuthState {
   defaultChannelId: string | null
   error: string | null
 
+  // Session Expiry
+  sessionExpired: boolean
+  handleSessionExpired: () => void
+
   // Actions
   checkAuth: () => Promise<boolean>
   startQrSession: () => Promise<void>
@@ -76,6 +80,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
   availableChannels: [],
   defaultChannelId: null,
   error: null,
+  sessionExpired: false,
 
   checkAuth: async () => {
     try {
@@ -339,11 +344,35 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       channelId: null,
       qrSessionId: null,
       qrUrl: null,
+      qrExpiresAt: null,
       qrStatus: 'idle',
       scannedUser: null,
+      availableChannels: [],
+      defaultChannelId: null,
+      error: null,
       isLoading: false,
     })
   },
 
-  clearError: () => set({ error: null }),
+  handleSessionExpired: () => {
+    stopQrPolling()
+    set({
+      isAuthenticated: false,
+      authMode: '',
+      user: null,
+      channelId: null,
+      qrSessionId: null,
+      qrUrl: null,
+      qrExpiresAt: null,
+      qrStatus: 'idle',
+      scannedUser: null,
+      availableChannels: [],
+      defaultChannelId: null,
+      sessionExpired: true,
+      error: 'Session expired. Please log in again to resume access.',
+      isLoading: false,
+    })
+  },
+
+  clearError: () => set({ error: null, sessionExpired: false }),
 }))

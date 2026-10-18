@@ -13,9 +13,12 @@ export const AudioPlayerBar: React.FC = () => {
   const [isMuted, setIsMuted] = useState(false)
 
   useEffect(() => {
+    // H-9: Reset playback state on track change or close
+    setIsPlaying(false)
+    setCurrentTime(0)
+    setDuration(0)
+
     if (!activeAudioItem) {
-      setIsPlaying(false)
-      setCurrentTime(0)
       return
     }
 
@@ -35,6 +38,13 @@ export const AudioPlayerBar: React.FC = () => {
     audio.addEventListener('ended', handleEnded)
 
     return () => {
+      // H-9: Clean up media element completely on track change or unmount
+      try {
+        audio.pause()
+        audio.removeAttribute('src')
+        audio.load()
+      } catch {}
+
       audio.removeEventListener('timeupdate', handleTimeUpdate)
       audio.removeEventListener('loadedmetadata', handleLoadedMetadata)
       audio.removeEventListener('ended', handleEnded)

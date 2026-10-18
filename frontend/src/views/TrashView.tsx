@@ -5,13 +5,22 @@ import { Button } from '../components/common/Button'
 import { Badge } from '../components/common/Badge'
 import { formatBytes } from '../utils/format'
 
+// H-22: compute remaining retention days from the actual deletion date (30-day policy)
+const formatDaysLeft = (deletedAt?: string) => {
+  const ts = deletedAt ? new Date(deletedAt).getTime() : NaN
+  if (Number.isNaN(ts)) return '30 Days Left'
+  const days = Math.max(0, 30 - Math.floor((Date.now() - ts) / 86400000))
+  return `${days} ${days === 1 ? 'Day' : 'Days'} Left`
+}
+
 export const TrashView: React.FC = () => {
   const { files, restoreFromTrash, purgeFiles, emptyTrash } = useVaultStore()
 
   const deletedFiles = files.filter((f) => f.is_deleted)
 
   const handleRestoreAll = () => {
-    restoreFromTrash(deletedFiles.map((f) => f.id))
+    // H-17: surface failures instead of an unhandled rejection
+    restoreFromTrash(deletedFiles.map((f) => f.id)).catch((err: any) => alert(err?.message || 'Failed to restore items'))
   }
 
   const handleEmptyTrash = async () => {
@@ -46,7 +55,7 @@ export const TrashView: React.FC = () => {
             <Button
               variant="danger"
               size="sm"
-              onClick={handleEmptyTrash}
+              onClick={() => { handleEmptyTrash().catch((err: any) => alert(err?.message || 'Failed to empty trash')) }}
               icon={<Trash2 size={12} />}
             >
               Empty Trash
@@ -90,7 +99,7 @@ export const TrashView: React.FC = () => {
                   <div className="text-[10px] text-[#666666] flex items-center gap-2 mt-0.5">
                     <span>{formatBytes(item.size_bytes)}</span>
                     <span>•</span>
-                    <Badge variant="danger">28 Days Left</Badge>
+                    <Badge variant="danger">{formatDaysLeft(item.deleted_at)}</Badge>
                   </div>
                 </div>
               </div>
@@ -99,7 +108,7 @@ export const TrashView: React.FC = () => {
                 <Button
                   variant="secondary"
                   size="sm"
-                  onClick={() => restoreFromTrash([item.id])}
+                  onClick={() => restoreFromTrash([item.id]).catch((err: any) => alert(err?.message || 'Failed to restore item'))}
                   icon={<RotateCcw size={12} />}
                 >
                   Restore
@@ -107,7 +116,12 @@ export const TrashView: React.FC = () => {
                 <Button
                   variant="danger"
                   size="sm"
-                  onClick={() => purgeFiles([item.id])}
+                  onClick={() => {
+                    // H-22: permanent purge requires an explicit confirmation
+                    if (window.confirm(`Permanently purge "${item.filename}"? This cannot be undone.`)) {
+                      purgeFiles([item.id]).catch((err: any) => alert(err?.message || 'Failed to purge item'))
+                    }
+                  }}
                   icon={<Trash2 size={12} />}
                 >
                   Purge

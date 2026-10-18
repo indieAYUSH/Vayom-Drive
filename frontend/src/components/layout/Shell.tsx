@@ -8,6 +8,7 @@ import { CommandBar } from '../search/CommandBar'
 import { BulkActionBar } from '../actions/BulkActionBar'
 import { LightboxModal } from '../lightbox/LightboxModal'
 import { CreateAlbumModal } from '../modals/CreateAlbumModal'
+import { OnboardingModal } from '../modals/OnboardingModal'
 import { GalleryView } from '../../views/GalleryView'
 import { AlbumsView } from '../../views/AlbumsView'
 import { TrashView } from '../../views/TrashView'
@@ -81,6 +82,7 @@ export const Shell: React.FC = () => {
       <CommandBar />
       <BulkActionBar />
       <CreateAlbumModal />
+      <OnboardingModal />
 
       {/* Fullscreen Lightbox / Video Player */}
       <LightboxModal
@@ -88,7 +90,10 @@ export const Shell: React.FC = () => {
         onClose={closeLightbox}
         onNext={nextLightbox}
         onPrev={prevLightbox}
-        onMoveToTrash={(id) => moveToTrash([id])}
+        onMoveToTrash={(id) => {
+          // H-17: surface failures instead of an unhandled rejection
+          moveToTrash([id]).catch((err: any) => alert(err?.message || 'Failed to move item to trash'))
+        }}
       />
 
       {/* Floating Audio Player Bar */}

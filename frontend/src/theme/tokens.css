@@ -1,3 +1,12 @@
+/* Locally Bundled Typography Fonts (SIL Open Font License 1.1) */
+@import '@fontsource/inter/400.css';
+@import '@fontsource/inter/500.css';
+@import '@fontsource/inter/600.css';
+@import '@fontsource/inter/700.css';
+@import '@fontsource/jetbrains-mono/400.css';
+@import '@fontsource/jetbrains-mono/500.css';
+@import '@fontsource/jetbrains-mono/600.css';
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
@@ -5,21 +14,40 @@
 :root {
   --surface-bg: #000000;
   --surface-base: #080808;
-  --surface-panel: #111111;
-  --surface-elevated: #181818;
-  --surface-pressed: #222222;
+  --surface-panel: #0c0c0c;
+  --surface-elevated: #141414;
+  --surface-pressed: #1e1e1e;
   --border-subtle: #1c1c1c;
   --border-default: #282828;
-  --border-focus: #555555;
+  --border-focus: #444444;
   --border-contrast: #ffffff;
+  
+  /* WCAG AA Compliant High-Contrast Typography */
   --text-primary: #f0f0f0;
-  --text-secondary: #999999;
-  --text-muted: #555555;
+  --text-secondary: #a3a3a3;
+  --text-muted: #888888;
+  --text-caption: #737373;
+  
   --accent-active: #ffffff;
-  --status-info: #3b82f6;
-  --status-warning: #eab308;
+  --status-info: #38bdf8;
+  --status-warning: #facc15;
   --status-danger: #ef4444;
   --status-success: #22c55e;
+}
+
+/* Base Typography Tuning */
+body {
+  font-family: 'Inter', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+  font-feature-settings: 'cv02', 'cv03', 'cv04', 'cv11';
+}
+
+/* Monospace Data & Code Tuning */
+code, kbd, samp, pre, .font-mono {
+  font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', monospace;
+  font-variant-numeric: tabular-nums lining-nums;
 }
 
 /* Strict Zero-Radius & Zero Box-Shadow Directive */
@@ -42,7 +70,7 @@
   background: #444444;
 }
 
-/* Selection Color */
+/* High-Contrast Inverted Selection Color */
 ::selection {
   background: #ffffff;
   color: #000000;
@@ -56,4 +84,3 @@ img, svg, video, a {
   -o-user-drag: none;
   user-drag: none;
 }
-

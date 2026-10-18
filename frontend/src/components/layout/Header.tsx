@@ -7,8 +7,8 @@ import { Button } from '../common/Button'
 import { formatBytes } from '../../utils/format'
 
 export const Header: React.FC = () => {
-  const { metrics, setCommandBarOpen, setActiveTab, activeTab, primaryMode, setPrimaryMode } = useVaultStore()
-  const { addFilesToUpload } = useUploadStore()
+  const { metrics, setCommandBarOpen, setActiveTab, activeTab, primaryMode, setPrimaryMode, license } = useVaultStore()
+  const { addFilesToUpload, selectedBackend, setSelectedBackend } = useUploadStore()
   const { user } = useAuthStore()
   const fileInputRef = useRef<HTMLInputElement>(null)
   const folderInputRef = useRef<HTMLInputElement>(null)
@@ -50,13 +50,13 @@ export const Header: React.FC = () => {
           <div className="w-5 h-5 bg-[#ffffff] flex items-center justify-center flex-shrink-0">
             <div className="w-2.5 h-2.5 bg-[#000000]" />
           </div>
-          <span className="font-mono text-xs sm:text-sm font-bold tracking-widest text-[#ffffff] uppercase group-hover:text-[#e5e5e5] hidden min-[450px]:inline">
+          <span className="font-sans text-xs sm:text-sm font-bold tracking-widest text-[#ffffff] uppercase group-hover:text-[#e5e5e5] hidden min-[450px]:inline">
             VAYOM
           </span>
         </div>
 
         {/* Dual Mode Switcher (Google Photos vs Google Drive) */}
-        <div className="hidden md:flex border border-[#282828] bg-[#111111] font-mono text-[11px]">
+        <div className="hidden md:flex border border-[#282828] bg-[#111111] font-sans text-xs">
           <button
             onClick={() => {
               setPrimaryMode('photos')
@@ -94,11 +94,11 @@ export const Header: React.FC = () => {
       <div className="flex-1 max-w-md mx-2 sm:mx-4 min-w-0">
         <div
           onClick={() => setCommandBarOpen(true)}
-          className="h-8 bg-[#111111] border border-[#282828] hover:border-[#444444] px-2.5 sm:px-3 flex items-center justify-between text-xs text-[#666666] cursor-pointer transition-colors"
+          className="h-8 bg-[#111111] border border-[#282828] hover:border-[#444444] px-2.5 sm:px-3 flex items-center justify-between text-xs text-[#888888] cursor-pointer transition-colors"
         >
           <div className="flex items-center gap-2 truncate min-w-0">
-            <Search size={13} className="text-[#666666] flex-shrink-0" />
-            <span className="font-mono text-[11px] truncate">Search CLIP, camera, filename...</span>
+            <Search size={13} className="text-[#888888] flex-shrink-0" />
+            <span className="font-sans text-xs truncate text-[#888888]">Search by filename, camera, tag, or size...</span>
           </div>
           <kbd className="hidden sm:inline-block font-mono text-[10px] bg-[#1c1c1c] text-[#888888] px-1.5 py-0.5 border border-[#282828] flex-shrink-0">
             ⌘K
@@ -109,10 +109,51 @@ export const Header: React.FC = () => {
       {/* Action Buttons & Storage Badge */}
       <div className="flex items-center gap-1.5 sm:gap-2 flex-shrink-0">
         {/* Storage Metric */}
-        <div className="hidden xl:flex items-center gap-2 px-2.5 py-1 bg-[#111111] border border-[#222222] font-mono text-xs">
+        <div className="hidden xl:flex items-center gap-2 px-2.5 py-1 bg-[#111111] border border-[#222222] text-xs">
           <HardDrive size={13} className="text-[#888888]" />
-          <span className="text-[#cccccc]">{formatBytes(metrics.total_bytes)}</span>
-          <span className="text-[#555555]">/ UNLIMITED</span>
+          <span className="text-[#ffffff] font-mono font-semibold">{formatBytes(metrics.total_bytes)}</span>
+          <span className="font-sans text-[#888888] tracking-wider uppercase text-[10px]">Storage Used</span>
+        </div>
+
+        {/* Upload Storage Destination Selector */}
+        <div className="hidden md:flex items-center border border-[#282828] bg-[#111111] font-mono text-[11px] p-0.5">
+          {(['telegram', 'nas', 's3', 'nextcloud'] as const).map((b) => {
+            const isSelected = selectedBackend === b
+            const isProBackend = b !== 'telegram'
+            const isLocked = isProBackend && !license?.is_pro
+            const label = b === 'telegram' ? 'Telegram' : b === 'nextcloud' ? 'Nextcloud' : b.toUpperCase()
+            return (
+              <button
+                key={b}
+                onClick={() => {
+                  if (isLocked) {
+                    setActiveTab('settings')
+                  } else {
+                    setSelectedBackend(b)
+                  }
+                }}
+                className={`px-2 py-0.5 text-[10px] font-bold tracking-wider transition-colors flex items-center gap-1 ${
+                  isSelected
+                    ? 'bg-[#ffffff] text-[#000000]'
+                    : isLocked
+                    ? 'text-[#555555] hover:text-[#888888]'
+                    : 'text-[#888888] hover:text-[#ffffff]'
+                }`}
+                title={
+                  b === 'telegram'
+                    ? 'Upload to Telegram Cloud (Default)'
+                    : b === 'nas'
+                    ? 'Save to Local / NAS Storage'
+                    : b === 's3'
+                    ? 'Upload to S3 / Cloudflare R2 / MinIO'
+                    : 'Upload to Nextcloud WebDAV'
+                }
+              >
+                <span>{label}</span>
+                {isLocked && <span className="text-[9px] text-[#f59e0b]">🔒</span>}
+              </button>
+            )
+          })}
         </div>
 
         {/* Upload File Button */}

@@ -11,27 +11,28 @@ export default {
         surface: {
           bg: '#000000',
           base: '#080808',
-          panel: '#111111',
-          elevated: '#181818',
-          pressed: '#222222',
+          panel: '#0c0c0c',
+          elevated: '#141414',
+          pressed: '#1e1e1e',
         },
         border: {
           subtle: '#1c1c1c',
           default: '#282828',
-          focus: '#555555',
+          focus: '#444444',
           contrast: '#ffffff',
         },
         text: {
           primary: '#f0f0f0',
-          secondary: '#999999',
-          muted: '#555555',
+          secondary: '#a3a3a3',
+          muted: '#888888',
+          caption: '#737373',
         },
         accent: {
           active: '#ffffff',
         },
         status: {
-          info: '#3b82f6',
-          warning: '#eab308',
+          info: '#38bdf8',
+          warning: '#facc15',
           danger: '#ef4444',
           success: '#22c55e',
         }
@@ -58,8 +59,8 @@ export default {
         inner: 'none',
       },
       fontFamily: {
-        mono: ['JetBrains Mono', 'Fira Code', 'ui-monospace', 'SFMono-Regular', 'Menlo', 'Monaco', 'Consolas', 'monospace'],
-        sans: ['Inter', 'system-ui', '-apple-system', 'BlinkMacSystemFont', 'Segoe UI', 'Roboto', 'sans-serif'],
+        sans: ['Inter', 'system-ui', '-apple-system', 'BlinkMacSystemFont', 'Segoe UI', 'Roboto', 'Helvetica Neue', 'Arial', 'sans-serif'],
+        mono: ['JetBrains Mono', 'ui-monospace', 'SFMono-Regular', 'Menlo', 'Monaco', 'Consolas', 'Liberation Mono', 'monospace'],
       }
     },
   },

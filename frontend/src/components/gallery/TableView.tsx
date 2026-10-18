@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react'
+import React, { useState, useMemo, useRef, useEffect } from 'react'
 import { FileItem } from '../../types/vault'
 import { Checkbox } from '../common/Checkbox'
 import { Badge } from '../common/Badge'
@@ -25,7 +25,7 @@ interface TableViewProps {
   items: FileItem[]
   selectedIds: string[]
   onToggleSelect: (id: string) => void
-  onOpenLightbox: (item: FileItem) => void
+  onOpenLightbox: (item: FileItem, contextList?: FileItem[]) => void
   onMoveToTrash: (ids: string[]) => void
 }
 
@@ -42,11 +42,28 @@ export const TableView: React.FC<TableViewProps> = ({
   const [copiedSha, setCopiedSha] = useState<string | null>(null)
   const [sortField, setSortField] = useState<SortField>('created_at')
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc')
+  const copiedTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  useEffect(() => {
+    return () => {
+      if (copiedTimeoutRef.current) {
+        clearTimeout(copiedTimeoutRef.current)
+        copiedTimeoutRef.current = null
+      }
+    }
+  }, [])
 
   const copyToClipboard = (text: string) => {
-    navigator.clipboard.writeText(text)
+    try {
+      navigator.clipboard.writeText(text).catch((err: unknown) => {
+        console.warn('Clipboard write failed:', err)
+      })
+    } catch (err) {
+      console.warn('Clipboard unavailable:', err)
+    }
     setCopiedSha(text)
-    setTimeout(() => setCopiedSha(null), 1500)
+    if (copiedTimeoutRef.current) clearTimeout(copiedTimeoutRef.current)
+    copiedTimeoutRef.current = setTimeout(() => setCopiedSha(null), 1500)
   }
 
   const handleSort = (field: SortField) => {
@@ -92,10 +109,10 @@ export const TableView: React.FC<TableViewProps> = ({
   }
 
   return (
-    <div className="flex-1 overflow-x-auto overflow-y-auto border-t border-[#1c1c1c] font-mono text-xs select-none">
+    <div className="flex-1 overflow-x-auto overflow-y-auto border-t border-[#1c1c1c] font-sans text-xs select-none">
       <table className="w-full min-w-[480px] text-left border-collapse">
         <thead>
-          <tr className="bg-[#0c0c0c] border-b border-[#222222] text-[#666666] text-[10px] uppercase tracking-wider sticky top-0 z-10">
+          <tr className="bg-[#0c0c0c] border-b border-[#222222] text-[#888888] text-[11px] font-semibold uppercase tracking-wider sticky top-0 z-10">
             <th className="py-2.5 px-3 w-8"></th>
             <th className="py-2.5 px-2 w-7"></th>
             <th 
@@ -148,7 +165,7 @@ export const TableView: React.FC<TableViewProps> = ({
 
             const handleRowClick = () => {
               if (isAudio) setActiveAudioItem(item)
-              else onOpenLightbox(item)
+              else onOpenLightbox(item, sortedItems)
             }
 
             return (
@@ -185,24 +202,39 @@ export const TableView: React.FC<TableViewProps> = ({
                     >
                       {item.filename}
                     </span>
+                    {/* Storage Backend Badge */}
+                    {(() => {
+                      const backend = item.storage_backend || 'telegram'
+                      if (backend === 'nas') {
+                        return <span className="px-1 py-0.2 text-[9px] font-mono font-bold bg-emerald-950/80 text-emerald-400 border border-emerald-500/40">NAS</span>
+                      } else if (backend === 's3') {
+                        return <span className="px-1 py-0.2 text-[9px] font-mono font-bold bg-amber-950/80 text-amber-400 border border-amber-500/40">S3</span>
+                      } else if (backend === 'nextcloud') {
+                        return <span className="px-1 py-0.2 text-[9px] font-mono font-bold bg-purple-950/80 text-purple-400 border border-purple-500/40">NC</span>
+                      } else {
+                        return <span className="px-1 py-0.2 text-[9px] font-mono font-bold bg-sky-950/80 text-sky-400 border border-sky-500/40">TG</span>
+                      }
+                    })()}
                   </div>
                 </td>
                 <td className="py-2 px-3 hidden sm:table-cell">
                   <Badge variant="default">{item.file_category}</Badge>
                 </td>
-                <td className="py-2 px-3 text-[#aaaaaa]">
+                <td className="py-2 px-3 text-[#a3a3a3] font-mono text-[11px]">
                   {formatBytes(item.size_bytes)}
                 </td>
                 <td className="py-2 px-3 hidden md:table-cell">
-                  {item.is_interrupted ? (
+                  {item.storage_backend && item.storage_backend !== 'telegram' ? (
+                    <span className="text-[#22c55e] text-[10px] font-mono font-semibold">Native</span>
+                  ) : item.is_interrupted ? (
                     <Badge variant="danger">Interrupted ({item.uploaded_parts || item.parts?.length || 0}/{item.total_parts})</Badge>
                   ) : item.is_split ? (
                     <Badge variant="warning">{item.total_parts} Parts</Badge>
                   ) : (
-                    <span className="text-[#666666]">1 Msg</span>
+                    <span className="text-[#888888] font-mono text-[11px]">1 Msg</span>
                   )}
                 </td>
-                <td className="py-2 px-3 text-[#777777] font-mono text-[11px] hidden lg:table-cell">
+                <td className="py-2 px-3 text-[#888888] font-mono text-[11px] hidden lg:table-cell">
                   <button
                     onClick={() => copyToClipboard(item.sha256)}
                     className="flex items-center gap-1.5 hover:text-[#ffffff] transition-colors"
@@ -216,7 +248,7 @@ export const TableView: React.FC<TableViewProps> = ({
                     )}
                   </button>
                 </td>
-                <td className="py-2 px-3 text-[#777777] text-[11px] hidden sm:table-cell">
+                <td className="py-2 px-3 text-[#888888] font-mono text-[11px] hidden sm:table-cell">
                   {new Date(item.created_at).toLocaleDateString()}
                 </td>
                 <td className="py-2 px-3 text-right">
@@ -225,7 +257,7 @@ export const TableView: React.FC<TableViewProps> = ({
                       <button
                         onClick={() => {
                           if (confirm(`Clean up orphan parts for ${item.filename}?`)) {
-                            cleanupIncomplete(item.id)
+                            cleanupIncomplete(item.id).catch((err: any) => alert(err?.message || 'Failed to clean up orphan parts'))
                           }
                         }}
                         className="px-2 py-0.5 text-[10px] text-[#ef4444] hover:text-[#ffffff] bg-[#221111] hover:bg-[#441111] border border-[#552222]"

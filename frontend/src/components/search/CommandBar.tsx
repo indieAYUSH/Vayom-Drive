@@ -1,15 +1,17 @@
 import React, { useState, useEffect, useRef } from 'react'
-import { Search, Image, Video, Archive, FileText, ArrowRight, X } from 'lucide-react'
+import { Search, Image, Video, Archive, FileText, ArrowRight, X, Loader2 } from 'lucide-react'
 import { useVaultStore } from '../../store/useVaultStore'
 import { FileItem } from '../../types/vault'
 import { Badge } from '../common/Badge'
 import { formatBytes } from '../../utils/format'
+import { api } from '../../services/api'
 
 export const CommandBar: React.FC = () => {
   const { 
     isCommandBarOpen, 
     setCommandBarOpen, 
     files, 
+    catalogFiles,
     openLightbox,
     setActiveTab,
     setSelectedTag
@@ -17,7 +19,39 @@ export const CommandBar: React.FC = () => {
 
   const [query, setQuery] = useState('')
   const [selectedIndex, setSelectedIndex] = useState(0)
+  const [serverResults, setServerResults] = useState<FileItem[]>([])
+  const [isSearchingServer, setIsSearchingServer] = useState(false)
   const inputRef = useRef<HTMLInputElement>(null)
+
+  // H-12: Debounced server search across entire vault catalog
+  useEffect(() => {
+    const trimmed = query.trim()
+    if (!trimmed) {
+      setServerResults([])
+      setIsSearchingServer(false)
+      return
+    }
+
+    const controller = new AbortController()
+    setIsSearchingServer(true)
+    const timer = setTimeout(() => {
+      api.listFiles({ q: trimmed, limit: 30 }, { signal: controller.signal })
+        .then((res) => {
+          setServerResults(res)
+          setIsSearchingServer(false)
+        })
+        .catch((err) => {
+          if (err.name !== 'AbortError') {
+            setIsSearchingServer(false)
+          }
+        })
+    }, 180)
+
+    return () => {
+      clearTimeout(timer)
+      controller.abort()
+    }
+  }, [query])
 
   // Global Keyboard shortcut listener for Cmd+K / Ctrl+K
   useEffect(() => {
@@ -41,14 +75,19 @@ export const CommandBar: React.FC = () => {
       setSelectedIndex(0)
     } else {
       setQuery('')
+      setServerResults([])
+      setIsSearchingServer(false)
     }
   }, [isCommandBarOpen])
 
-  // Filter items matching query (semantic, name, tag, camera, category)
+  // H-12: Filter across catalogFiles and combine with server search results
   const filteredItems = React.useMemo(() => {
-    if (!query.trim()) return files.filter((f) => !f.is_deleted).slice(0, 8)
-    const q = query.toLowerCase()
-    return files.filter((f) => {
+    const pool = catalogFiles.length > 0 ? catalogFiles : files
+    const trimmed = query.trim()
+    if (!trimmed) return pool.filter((f) => !f.is_deleted).slice(0, 8)
+    const q = trimmed.toLowerCase()
+
+    const localMatches = pool.filter((f) => {
       if (f.is_deleted) return false
       if (f.filename.toLowerCase().includes(q)) return true
       if (f.tags.some((t) => t.toLowerCase().includes(q))) return true
@@ -57,8 +96,13 @@ export const CommandBar: React.FC = () => {
       if (f.file_category.toLowerCase() === q) return true
       if (q === 'large' || q === '>1gb') return f.size_bytes > 1000000000
       return false
-    }).slice(0, 8)
-  }, [files, query])
+    })
+
+    const localIds = new Set(localMatches.map((m) => m.id))
+    const additional = serverResults.filter((s) => !s.is_deleted && !localIds.has(s.id))
+
+    return [...localMatches, ...additional].slice(0, 15)
+  }, [catalogFiles, files, query, serverResults])
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'ArrowDown') {
@@ -103,6 +147,7 @@ export const CommandBar: React.FC = () => {
             placeholder="Type search query (e.g. 'dog in snow', '4k drone', 'camera:Sony', 'size:>1gb')..."
             className="w-full bg-transparent text-[#f0f0f0] placeholder:text-[#555555] focus:outline-none text-xs"
           />
+          {isSearchingServer && <Loader2 size={13} className="text-[#888888] animate-spin flex-shrink-0" />}
           <button
             onClick={() => setCommandBarOpen(false)}
             className="text-[#666666] hover:text-[#f0f0f0] p-1"

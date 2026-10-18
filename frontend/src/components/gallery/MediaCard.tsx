@@ -81,24 +81,40 @@ export const MediaCard: React.FC<MediaCardProps> = ({
         >
           <Star size={12} fill={isStarred ? 'white' : 'none'} />
         </button>
+
+        {/* Storage Backend Mini Badge */}
+        {(() => {
+          const backend = item.storage_backend || 'telegram'
+          if (backend === 'nas') {
+            return (
+              <span className="px-1.5 py-0.5 text-[9px] font-mono font-bold tracking-wider bg-emerald-950/80 text-emerald-400 border border-emerald-500/40" title="Stored on Local / NAS Storage">
+                NAS
+              </span>
+            )
+          } else if (backend === 's3') {
+            return (
+              <span className="px-1.5 py-0.5 text-[9px] font-mono font-bold tracking-wider bg-amber-950/80 text-amber-400 border border-amber-500/40" title="Stored on S3 / R2 / MinIO Storage">
+                S3
+              </span>
+            )
+          } else if (backend === 'nextcloud') {
+            return (
+              <span className="px-1.5 py-0.5 text-[9px] font-mono font-bold tracking-wider bg-purple-950/80 text-purple-400 border border-purple-500/40" title="Stored on Nextcloud WebDAV Storage">
+                NC
+              </span>
+            )
+          } else {
+            return (
+              <span className="px-1.5 py-0.5 text-[9px] font-mono font-bold tracking-wider bg-sky-950/80 text-sky-400 border border-sky-500/40" title="Stored on Telegram Cloud Storage">
+                TG
+              </span>
+            )
+          }
+        })()}
+
         {item.is_interrupted && (
           <Badge variant="danger">
             Interrupted ({item.uploaded_parts || item.parts?.length || 0}/{item.total_parts})
-          </Badge>
-        )}
-        {item.is_split && !item.is_interrupted && (
-          <Badge variant="warning">
-            {item.total_parts} Parts
-          </Badge>
-        )}
-        {item.is_lossy_video && (
-          <Badge variant="info">
-            HEVC
-          </Badge>
-        )}
-        {item.is_compressed && !item.is_lossy_video && (
-          <Badge variant="default">
-            zstd
           </Badge>
         )}
       </div>
@@ -108,9 +124,9 @@ export const MediaCard: React.FC<MediaCardProps> = ({
         onClick={handleCardClick}
         className="w-full aspect-square bg-[#080808] overflow-hidden flex items-center justify-center cursor-pointer relative"
       >
-        {!thumbError && (item.thumbnail_url || (item.file_category === 'image' && item.preview_url)) ? (
+        {!thumbError && item.thumbnail_url ? (
           <img
-            src={item.thumbnail_url || item.preview_url}
+            src={item.thumbnail_url}
             alt={item.filename}
             loading="lazy"
             onError={() => setThumbError(true)}
@@ -160,32 +176,48 @@ export const MediaCard: React.FC<MediaCardProps> = ({
         )}
       </div>
 
-      {/* Technical Metadata Footer */}
-      <div className="p-2.5 bg-[#0e0e0e] border-t border-[#1a1a1a] flex flex-col gap-1 font-mono">
-        <div className="text-xs text-[#e5e5e5] truncate font-medium" title={item.filename}>
+      {/* Metadata Footer */}
+      <div className="p-2.5 bg-[#0e0e0e] border-t border-[#1a1a1a] flex flex-col gap-1 font-sans">
+        <div className="text-xs text-[#f0f0f0] truncate font-medium" title={item.filename}>
           {item.filename}
         </div>
-        <div className="flex items-center justify-between text-[10px] text-[#777777]">
-          <span>{formatBytes(item.size_bytes)}</span>
-          <span className="uppercase">{item.mime_type.split('/')[1] || 'BIN'}</span>
+        <div className="flex items-center justify-between text-[11px] text-[#888888]">
+          <span className="font-mono text-[#a3a3a3]">{formatBytes(item.size_bytes)}</span>
+          <div className="flex items-center gap-1.5 uppercase font-mono text-[10px]">
+            {item.is_split && (
+              <span className="text-[9px] text-[#eab308] border border-[#eab308]/40 px-1 py-0.2" title={`${item.total_parts} Split Parts`}>
+                {item.total_parts}P
+              </span>
+            )}
+            {item.is_lossy_video && (
+              <span className="text-[9px] text-[#38bdf8] border border-[#38bdf8]/40 px-1 py-0.2" title="HEVC Encoded">
+                HEVC
+              </span>
+            )}
+            <span className="text-[9px] text-[#888888] font-bold">
+              {item.storage_backend === 'nas' ? 'NAS' : item.storage_backend === 's3' ? 'S3' : item.storage_backend === 'nextcloud' ? 'NC' : 'TG'}
+            </span>
+            <span>•</span>
+            <span className="text-[#a3a3a3]">{item.mime_type.split('/')[1]?.toUpperCase() || 'FILE'}</span>
+          </div>
         </div>
         {item.exif?.camera_model && (
-          <div className="text-[9px] text-[#555555] truncate pt-0.5 border-t border-[#161616]">
+          <div className="text-[11px] font-sans text-[#888888] truncate pt-0.5 border-t border-[#161616]" title={`${item.exif.camera_make || ''} ${item.exif.camera_model || ''}`}>
             {item.exif.camera_make} {item.exif.camera_model}
           </div>
         )}
         {item.is_interrupted && (
           <div className="flex items-center justify-between pt-1 border-t border-[#2a1a1a]">
-            <span className="text-[10px] text-[#ff5555]">Interrupted</span>
+            <span className="text-[11px] font-sans text-[#ff5555]">Interrupted</span>
             <button
               onClick={(e) => {
                 e.stopPropagation()
-                if (confirm(`Clean up orphan parts for ${item.filename}?`)) {
-                  cleanupIncomplete(item.id)
+                if (confirm(`Remove incomplete parts for ${item.filename}?`)) {
+                  cleanupIncomplete(item.id).catch((err: any) => alert(err?.message || 'Failed to remove incomplete parts'))
                 }
               }}
-              className="text-[10px] text-[#ff7777] hover:text-[#ffaaaa] underline flex items-center gap-1"
-              title="Purge orphan parts from Telegram WAL"
+              className="text-[11px] font-sans text-[#ff7777] hover:text-[#ffaaaa] underline flex items-center gap-1"
+              title="Remove incomplete upload parts"
             >
               <Trash2 size={10} /> Clean up
             </button>

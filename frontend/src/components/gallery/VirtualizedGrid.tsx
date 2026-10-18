@@ -9,7 +9,7 @@ interface VirtualizedGridProps {
   items: FileItem[]
   selectedIds: string[]
   onToggleSelect: (id: string) => void
-  onOpenLightbox: (item: FileItem) => void
+  onOpenLightbox: (item: FileItem, contextList?: FileItem[]) => void
   groupByDate?: boolean
 }
 
@@ -80,26 +80,31 @@ export const VirtualizedGrid: React.FC<VirtualizedGridProps> = ({
     return () => window.removeEventListener('resize', updateColumns)
   }, [])
 
-  // Partition items into virtual rows (either grouped by date or flat)
-  const virtualRows = useMemo(() => {
-    if (!groupByDate) {
-      const result: VirtualGridRow[] = []
-      for (let i = 0; i < items.length; i += columns) {
-        result.push({
-          type: 'row',
-          items: items.slice(i, i + columns),
-          key: `row-${i}`,
-        })
-      }
-      return result
-    }
-
-    // Sort items by date descending
-    const sorted = [...items].sort((a, b) => {
+  // H-34 & H-14: sort items so flat, grouped, and lightbox modes share the identical ordering
+  const sortedItems = useMemo(() => {
+    return [...items].sort((a, b) => {
       const dateA = new Date(a.taken_at || a.created_at).getTime() || 0
       const dateB = new Date(b.taken_at || b.created_at).getTime() || 0
       return dateB - dateA
     })
+  }, [items])
+
+  // Partition items into virtual rows (either grouped by date or flat)
+  const virtualRows = useMemo(() => {
+    const sorted = sortedItems
+
+    if (!groupByDate) {
+      const result: VirtualGridRow[] = []
+      for (let i = 0; i < sorted.length; i += columns) {
+        const rowItems = sorted.slice(i, i + columns)
+        result.push({
+          type: 'row',
+          items: rowItems,
+          key: rowItems[0] ? `row-${rowItems[0].id}` : `row-${i}`,
+        })
+      }
+      return result
+    }
 
     // Group items by date
     const groups: { key: string; title: string; items: FileItem[] }[] = []
@@ -209,28 +214,28 @@ export const VirtualizedGrid: React.FC<VirtualizedGridProps> = ({
                   width: '100%',
                   transform: `translateY(${virtualRow.start}px)`,
                 }}
-                className="h-11 flex items-center justify-between border-b border-[#202020] bg-[#000000] px-1 font-mono select-none"
+                className="h-11 flex items-center justify-between border-b border-[#202020] bg-[#000000] px-1 font-sans select-none"
               >
                 <div className="flex items-center gap-2">
-                  <span className="text-xs font-semibold text-[#f0f0f0] tracking-wider uppercase">
+                  <span className="text-xs font-semibold text-[#f0f0f0] tracking-normal">
                     {rowData.title}
                   </span>
-                  <span className="text-[10px] text-[#666666]">
+                  <span className="text-[11px] font-mono text-[#888888]">
                     ({rowData.count} {rowData.count === 1 ? 'item' : 'items'})
                   </span>
                 </div>
                 <button
                   onClick={handleToggleGroup}
-                  className={`text-[10px] px-2 py-0.5 border flex items-center gap-1 transition-colors ${
+                  className={`text-xs px-2.5 py-0.5 border flex items-center gap-1.5 transition-colors font-sans ${
                     allSelected
-                      ? 'border-[#ffffff] bg-[#1a1a1a] text-[#ffffff]'
+                      ? 'border-[#ffffff] bg-[#1a1a1a] text-[#ffffff] font-medium'
                       : someSelected
                       ? 'border-[#444444] text-[#cccccc]'
-                      : 'border-[#282828] text-[#777777] hover:text-[#ffffff] hover:border-[#444444]'
+                      : 'border-[#282828] text-[#888888] hover:text-[#ffffff] hover:border-[#444444]'
                   }`}
                   title={allSelected ? 'Deselect date' : 'Select all in date'}
                 >
-                  {allSelected ? <CheckSquare size={11} /> : <Square size={11} />}
+                  {allSelected ? <CheckSquare size={12} /> : <Square size={12} />}
                   <span>{allSelected ? 'Selected' : 'Select Date'}</span>
                 </button>
               </div>
@@ -258,7 +263,7 @@ export const VirtualizedGrid: React.FC<VirtualizedGridProps> = ({
                   item={item}
                   isSelected={selectedIds.includes(item.id)}
                   onToggleSelect={onToggleSelect}
-                  onOpenLightbox={onOpenLightbox}
+                  onOpenLightbox={(item) => onOpenLightbox(item, sortedItems)}
                 />
               ))}
             </div>
