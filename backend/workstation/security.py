@@ -82,39 +82,47 @@ def validate_watch_folder_path(path_str: str) -> Path:
                 "cannot be registered as a watch folder."
             )
 
-    # 5. Rejection: settings.DATA_DIR (neither inside nor containing DATA_DIR)
-    real_data_dir = os.path.realpath(str(settings.DATA_DIR))
-    if is_contained(real_path_str, real_data_dir):
-        raise ValueError("Application data directory (DATA_DIR) cannot be registered as a watch folder.")
-    if is_contained(real_data_dir, real_path_str):
-        raise ValueError("Cannot register a watch folder containing the application data directory.")
+    # 5. Rejection: application internal directories (DATA_DIR, UPLOAD_TEMP_DIR, THUMBNAIL_DIR, ROOT_DIR)
+    app_internal_dirs = [
+        (settings.DATA_DIR, "data directory (DATA_DIR)"),
+        (settings.UPLOAD_TEMP_DIR, "upload temp directory (UPLOAD_TEMP_DIR)"),
+        (settings.THUMBNAIL_DIR, "thumbnail directory (THUMBNAIL_DIR)"),
+        (settings.ROOT_DIR, "source/project directory (ROOT_DIR)"),
+    ]
+    for app_dir, dir_label in app_internal_dirs:
+        real_app_dir = os.path.realpath(str(app_dir))
+        if is_contained(real_path_str, real_app_dir):
+            raise ValueError(f"Application {dir_label} cannot be registered as a watch folder.")
+        if is_contained(real_app_dir, real_path_str):
+            raise ValueError(f"Cannot register a watch folder containing the application {dir_label}.")
 
-    # 6. Rejection: settings.ROOT_DIR (neither inside nor containing ROOT_DIR)
-    real_root_dir = os.path.realpath(str(settings.ROOT_DIR))
-    if is_contained(real_path_str, real_root_dir):
-        raise ValueError("Application source/project directory cannot be registered as a watch folder.")
-    if is_contained(real_root_dir, real_path_str):
-        raise ValueError("Cannot register a watch folder containing the application source/project directory.")
-
-    # 7. Containment check: must reside within at least one allowlisted root
-    allowed_roots = getattr(
+    # 7. Containment check: must reside within at least one allowlisted root or secondary drive
+    allowed_roots = list(getattr(
         settings,
         "WORKSTATION_ALLOWED_ROOTS",
-        [str(Path.home()), "/media", "/mnt", "/Volumes", tempfile.gettempdir()]
-    )
+        [str(Path.home()), "/media", "/run/media", "/mnt", "/Volumes", tempfile.gettempdir()]
+    ))
+    if "/run/media" not in allowed_roots:
+        allowed_roots.append("/run/media")
 
     is_allowed = False
     for root in allowed_roots:
         real_allowed = os.path.realpath(os.path.expanduser(root))
         if is_contained(real_path_str, real_allowed):
             # Reject direct watching of system mount / temp roots
-            if real_path_str in ("/media", "/mnt", "/Volumes", tempfile.gettempdir(), "/tmp", "/var/tmp"):
+            if real_path_str in ("/media", "/run/media", "/mnt", "/Volumes", tempfile.gettempdir(), "/tmp", "/var/tmp"):
                 raise ValueError(
                     f"System directory root ({real_path_str}) cannot be watched directly. "
                     "Please specify a dedicated subfolder."
                 )
             is_allowed = True
             break
+
+    # Secondary Windows drive support: D:\, E:\, etc. (must be a subfolder, not bare drive root)
+    if not is_allowed and os.name == "nt":
+        drive, tail = os.path.splitdrive(real_path_str)
+        if drive and tail and len(resolved_path.parts) > 1 and resolved_path.parent != resolved_path:
+            is_allowed = True
 
     if not is_allowed:
         raise ValueError(f"Path is outside allowlisted watch roots: {path_str}")
@@ -135,15 +143,10 @@ def is_safe_file_path(file_path: Path) -> bool:
     try:
         real_p = os.path.realpath(str(file_path))
 
-        # 1. Never inside DATA_DIR
-        real_data = os.path.realpath(str(settings.DATA_DIR))
-        if is_contained(real_p, real_data):
-            return False
-
-        # 2. Never inside ROOT_DIR
-        real_root = os.path.realpath(str(settings.ROOT_DIR))
-        if is_contained(real_p, real_root):
-            return False
+        # 1. Never inside DATA_DIR, UPLOAD_TEMP_DIR, THUMBNAIL_DIR, or ROOT_DIR
+        for app_dir in (settings.DATA_DIR, settings.UPLOAD_TEMP_DIR, settings.THUMBNAIL_DIR, settings.ROOT_DIR):
+            if is_contained(real_p, os.path.realpath(str(app_dir))):
+                return False
 
         # 3. Never inside sensitive system directories
         for sys_dir in ("/etc", "/sys", "/proc", "/dev", "/boot", "/bin", "/sbin", "/usr", "/lib", "/lib64", "/var"):
@@ -163,21 +166,29 @@ def is_safe_file_path(file_path: Path) -> bool:
             if part != "/" and part.startswith("."):
                 return False
 
-        # 6. Must reside in at least one allowlisted root
-        allowed_roots = getattr(
+        # 6. Must reside in at least one allowlisted root or secondary drive
+        allowed_roots = list(getattr(
             settings,
             "WORKSTATION_ALLOWED_ROOTS",
-            [str(Path.home()), "/media", "/mnt", "/Volumes", tempfile.gettempdir()]
-        )
-        if allowed_roots:
-            is_allowed = False
-            for root in allowed_roots:
-                real_allowed = os.path.realpath(os.path.expanduser(root))
-                if is_contained(real_p, real_allowed):
-                    is_allowed = True
-                    break
-            if not is_allowed:
-                return False
+            [str(Path.home()), "/media", "/run/media", "/mnt", "/Volumes", tempfile.gettempdir()]
+        ))
+        if "/run/media" not in allowed_roots:
+            allowed_roots.append("/run/media")
+
+        is_allowed = False
+        for root in allowed_roots:
+            real_allowed = os.path.realpath(os.path.expanduser(root))
+            if is_contained(real_p, real_allowed):
+                is_allowed = True
+                break
+
+        if not is_allowed and os.name == "nt":
+            drive, tail = os.path.splitdrive(real_p)
+            if drive and tail and len(Path(real_p).parts) > 1:
+                is_allowed = True
+
+        if not is_allowed:
+            return False
 
         return True
     except Exception:
@@ -232,9 +243,14 @@ async def verify_workstation_auth(
         token = x_api_key.strip()
 
     if token:
-        valid_tokens = {settings.SESSION_SECRET, settings.ADMIN_PASSWORD}
+        valid_tokens = {
+            getattr(settings, "LOCAL_API_TOKEN", ""),
+            getattr(settings, "SESSION_SECRET", ""),
+            getattr(settings, "ADMIN_PASSWORD", "")
+        }
         if hasattr(settings, "API_TOKEN") and getattr(settings, "API_TOKEN"):
             valid_tokens.add(settings.API_TOKEN)
+        valid_tokens = {t for t in valid_tokens if t}
         if token in valid_tokens:
             return True
         raise HTTPException(

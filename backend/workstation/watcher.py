@@ -15,10 +15,12 @@ from watchfiles import Change
 
 from ..config import settings
 from ..db.connection import get_db
-from ..storage.client import storage_client
+from ..storage.client import storage_client, format_part_caption
 from ..compression.splitter import split_file_if_needed, calculate_sha256
 from ..index.metadata import detect_file_category, generate_webp_thumbnail, generate_video_thumbnail, extract_image_exif, extract_video_metadata
-from .security import validate_watch_folder_path, is_safe_file_path
+from ..transcoding.manager import transcoding_manager
+from ..crypto import EncryptedFileSlice, compute_slice_sha256, generate_file_nonce, vault_manager
+from .security import validate_watch_folder_path, is_safe_file_path, is_contained
 
 logger = logging.getLogger("vayom.workstation.watcher")
 
@@ -40,6 +42,7 @@ class LocalFolderWatcher:
         self._running: bool = False
         self._worker_task: Optional[asyncio.Task] = None
         self._reload_event: asyncio.Event = asyncio.Event()
+        self._needs_reload: bool = False
         self._iteration_stop_event: Optional[asyncio.Event] = None
         self._syncing_paths: Set[str] = set()
         # I-5: bounded queue + fixed worker pool (created lazily / on start)
@@ -53,6 +56,15 @@ class LocalFolderWatcher:
         if self._running:
             return
         self._running = True
+        # I-22: crash recovery — anything still marked 'syncing' from a previous run
+        # (power loss / hard restart) is reconciled so files never stay stuck forever.
+        try:
+            async with get_db() as db:
+                await db.execute("UPDATE watch_folder_events SET status = 'interrupted' WHERE status = 'syncing'")
+                await db.commit()
+            logger.info("Reconciled stale 'syncing' watch folder events on startup.")
+        except Exception as e:
+            logger.warning(f"Startup reconciliation of stale syncing events failed: {e}")
         self._ensure_ingest_pool()
         self._worker_task = asyncio.create_task(self._watch_loop(), name="vayom_workstation_watcher")
         logger.info("LocalFolderWatcher service started.")
@@ -60,6 +72,7 @@ class LocalFolderWatcher:
     async def stop(self):
         """Stops the watcher worker cleanly."""
         self._running = False
+        self._needs_reload = False
         if self._iteration_stop_event:
             self._iteration_stop_event.set()
         self._reload_event.set()
@@ -86,10 +99,15 @@ class LocalFolderWatcher:
         logger.info("LocalFolderWatcher service stopped.")
 
     async def reload(self):
-        """Signals the watcher to reload active folders from the database."""
-        if self._iteration_stop_event:
-            self._iteration_stop_event.set()
+        """
+        I-19: Signals the watcher to reload active folders from the database.
+        Sets both _needs_reload and _reload_event and triggers any active iteration
+        stop event so reloads arriving during folder queries or loop setup are never lost.
+        """
+        self._needs_reload = True
         self._reload_event.set()
+        if self._iteration_stop_event and not self._iteration_stop_event.is_set():
+            self._iteration_stop_event.set()
 
     def _ensure_ingest_pool(self):
         """I-5: lazily creates the bounded queue and the fixed worker pool."""
@@ -183,8 +201,13 @@ class LocalFolderWatcher:
     async def _watch_loop(self):
         """Continuous watching loop using watchfiles.awatch."""
         while self._running:
+            self._needs_reload = False
             self._reload_event.clear()
             folders = await self._get_active_folders()
+
+            # I-19: reload arrived while querying folders; restart loop to pick up new rows
+            if self._needs_reload or self._reload_event.is_set():
+                continue
 
             valid_folders: Dict[str, Dict[str, Any]] = {}
             for f in folders:
@@ -198,6 +221,10 @@ class LocalFolderWatcher:
                 else:
                     logger.warning(f"Watch folder path does not exist or is not a directory: {f['path']}")
 
+            # I-19: reload arrived during path validation; restart loop
+            if self._needs_reload or self._reload_event.is_set():
+                continue
+
             if not valid_folders:
                 # No active watch folders; wait for reload signal or timeout
                 try:
@@ -209,22 +236,28 @@ class LocalFolderWatcher:
                 continue
 
             active_paths = list(valid_folders.keys())
-            self._iteration_stop_event = asyncio.Event()
+            iteration_stop = asyncio.Event()
+            self._iteration_stop_event = iteration_stop
+
+            # I-19: atomic stop check before launching awatch
+            if self._needs_reload or self._reload_event.is_set():
+                iteration_stop.set()
+                continue
 
             logger.info(f"Watching {len(active_paths)} directory(ies) for media ingestion: {active_paths}")
 
             try:
                 async for changes in watchfiles.awatch(
                     *active_paths,
-                    stop_event=self._iteration_stop_event,
+                    stop_event=iteration_stop,
                     recursive=True,
                     debounce=1600
                 ):
                     for change_type, path_str in changes:
                         if change_type in (Change.added, Change.modified):
                             file_p = Path(path_str)
-                            if not is_safe_file_path(file_p):
-                                logger.warning(f"Skipping unsafe file change event: {file_p}")
+                            if self._should_ignore(file_p) or not is_safe_file_path(file_p):
+                                logger.warning(f"Skipping ignored or unsafe file change event: {file_p}")
                                 continue
                             # I-8: component-aware match, longest root wins — a raw
                             # startswith let /data/media1 inherit the /data/media config.
@@ -264,13 +297,9 @@ class LocalFolderWatcher:
             raise ValueError(f"Watch folder path does not exist: {folder_path}")
         validate_watch_folder_path(str(folder_path))
 
-        pending: List[Path] = []
-        for item in folder_path.rglob("*"):
-            if item.is_file() and not self._should_ignore(item):
-                if not is_safe_file_path(item):
-                    logger.warning(f"Skipping unsafe file during scan: {item}")
-                    continue
-                pending.append(item)
+        # I-18: recursive tree walk runs in a worker thread so scanning huge
+        # folders never stalls the FastAPI event loop.
+        pending: List[Path] = await asyncio.to_thread(self._walk_sync, folder_path)
 
         count = len(pending)
 
@@ -296,15 +325,83 @@ class LocalFolderWatcher:
 
         return count
 
+    def _walk_sync(self, folder_path: Path) -> List[Path]:
+        """I-18: synchronous recursive walk (always invoked via asyncio.to_thread)."""
+        pending: List[Path] = []
+        for item in folder_path.rglob("*"):
+            if item.is_file() and not self._should_ignore(item):
+                if not is_safe_file_path(item):
+                    logger.warning(f"Skipping unsafe file during scan: {item}")
+                    continue
+                pending.append(item)
+        return pending
+
     def _should_ignore(self, path: Path) -> bool:
-        """Determines if a file is temporary, hidden, or system generated."""
+        """
+        Determines if a file is temporary, hidden, system generated, database/WAL,
+        or resides within the application's internal data/cache directories.
+        """
         name = path.name
         if name.startswith(".") or name.startswith("~"):
             return True
-        ignored_extensions = {".tmp", ".crdownload", ".part", ".swp", ".lock"}
+        ignored_extensions = {
+            ".tmp", ".crdownload", ".part", ".swp", ".lock",
+            ".db", ".db-wal", ".db-shm", ".journal"
+        }
         if path.suffix.lower() in ignored_extensions:
             return True
+
+        # I-7: Hard-exclude application DATA_DIR, UPLOAD_TEMP_DIR, THUMBNAIL_DIR, and ROOT_DIR
+        try:
+            real_p = os.path.realpath(str(path))
+            app_dirs = (
+                settings.DATA_DIR,
+                settings.UPLOAD_TEMP_DIR,
+                settings.THUMBNAIL_DIR,
+                settings.ROOT_DIR,
+            )
+            for app_dir in app_dirs:
+                if is_contained(real_p, os.path.realpath(str(app_dir))):
+                    return True
+        except Exception:
+            return True
+
         return False
+
+    async def _wait_for_file_stability(self, file_path: Path) -> Optional[int]:
+        """
+        I-21: Returns the stable size of file_path once BOTH its size and mtime have
+        stopped changing across consecutive 3 s intervals, or None if the file is
+        missing, empty, or never stabilizes within the 30 s window (warning logged).
+        """
+        try:
+            st = file_path.stat()
+        except OSError:
+            return None
+
+        if st.st_size > 0 and (time.time() - st.st_mtime) >= 3.0:
+            return st.st_size
+
+        prev_size = -1
+        prev_mtime: Optional[float] = None
+        for _ in range(10):  # Maximum 30s stabilization window
+            if not file_path.exists() or not file_path.is_file():
+                return None
+            try:
+                curr = file_path.stat()
+            except Exception:
+                return None
+
+            if curr.st_size > 0 and curr.st_size == prev_size and curr.st_mtime == prev_mtime:
+                return curr.st_size
+
+            prev_size = curr.st_size
+            prev_mtime = curr.st_mtime
+            await asyncio.sleep(3.0)
+
+        if prev_size > 0:
+            logger.warning(f"File did not stabilize within 30s window; deferring ingest until the next change event: {file_path}")
+        return None
 
     async def process_file(
         self,
@@ -337,40 +434,14 @@ class LocalFolderWatcher:
         split_temp_dir: Optional[Path] = None
 
         try:
-            # 1. Stability check: files already quiet (mtime older than 3 s) are ingested directly;
-            # recently-written files are polled until their size is unchanged across a 3 s window.
+            # 1. Stability check (I-21): quiet files (mtime older than 3 s) ingest directly;
+            # recently-written files must keep BOTH size and mtime unchanged across a 3 s
+            # window, otherwise the ingest is deferred until the next change event.
             if not file_path.is_file():
                 return
-            try:
-                st = file_path.stat()
-            except OSError:
+            total_size = await self._wait_for_file_stability(file_path)
+            if total_size is None:
                 return
-
-            is_stable = False
-            prev_size = -1
-            if st.st_size > 0 and (time.time() - st.st_mtime) >= 3.0:
-                is_stable = True
-                prev_size = st.st_size
-            else:
-                for _ in range(10):  # Maximum 30s stabilization window
-                    if not file_path.exists() or not file_path.is_file():
-                        return
-                    try:
-                        curr_size = file_path.stat().st_size
-                    except Exception:
-                        return
-
-                    if curr_size > 0 and curr_size == prev_size:
-                        is_stable = True
-                        break
-
-                    prev_size = curr_size
-                    await asyncio.sleep(3.0)
-
-            if not is_stable or prev_size <= 0:
-                return
-
-            total_size = prev_size
 
             # 2. SHA-256 Calculation & Deduplication Check (offloaded — never blocks the event loop)
             sha256 = await asyncio.to_thread(calculate_sha256, file_path)
@@ -418,9 +489,18 @@ class LocalFolderWatcher:
 
             # 3. Metadata Extraction & Thumbnail Generation
             file_id = f"v_{uuid.uuid4().hex}"
-            nonce = None
             mime_type = mimetypes.guess_type(file_path.name)[0] or "application/octet-stream"
             category = detect_file_category(mime_type, file_path.name)
+
+            # Targeted Client Encryption: encrypt photos, docs, audio, archives; keep video unencrypted for native streaming
+            vault_key = vault_manager.get_key()
+            is_encrypted = (category != "video") and (settings.ENCRYPTION_ENABLED or vault_key is not None)
+            if is_encrypted and vault_key is not None:
+                file_nonce = generate_file_nonce()
+                encryption_mode = "ctr"
+            else:
+                file_nonce = None
+                encryption_mode = "none"
 
             thumbnail_path = settings.THUMBNAIL_DIR / f"{file_id}.webp"
             has_thumb = False
@@ -435,31 +515,51 @@ class LocalFolderWatcher:
             elif category == "video":
                 exif = await extract_video_metadata(file_path)
 
-            # 4. Slicing (if > 1.9 GB) into isolated temp directory (offloaded to a thread)
-            if total_size > settings.MAX_PART_BYTES:
-                split_temp_dir = settings.UPLOAD_TEMP_DIR / f"workstation_{file_id}"
-                split_temp_dir.mkdir(parents=True, exist_ok=True)
-                parts = await asyncio.to_thread(
-                    split_file_if_needed, file_path,
-                    max_part_bytes=settings.MAX_PART_BYTES, output_dir=split_temp_dir
-                )
-            else:
-                # Re-use the SHA already computed above — no second full-file read
-                parts = await asyncio.to_thread(
-                    split_file_if_needed, file_path,
-                    max_part_bytes=settings.MAX_PART_BYTES, precomputed_sha=sha256
-                )
+            # 4. Zero-copy pointer slicing (Hardening 2: avoid duplicating multi-gigabyte files to disk)
+            parts = await asyncio.to_thread(
+                split_file_if_needed,
+                file_path,
+                max_part_bytes=settings.MAX_PART_BYTES,
+                output_dir=None,
+                precomputed_sha=sha256 if total_size <= settings.MAX_PART_BYTES else None
+            )
 
             # 5. Upload each part via storage_client (respects 3-worker concurrency & FloodWait)
             uploaded_parts = []
             for part in parts:
-                caption = (
-                    f"VAYOM:v1:{json.dumps({'id': file_id, 'name': file_path.name, 'part': part['part_index'], 'total': len(parts), 'offset': part['byte_offset'], 'size': part['part_size_bytes'], 'sha256': part['part_sha256'], 'cat': category, 'nonce': None, 'enc': 'none'})}"
+                if encryption_mode == "ctr" and vault_key:
+                    enc_slice = EncryptedFileSlice(
+                        source=part.get("slice") or part["file_path"],
+                        key=vault_key,
+                        nonce_hex=file_nonce,
+                        byte_offset=part["byte_offset"],
+                        slice_size=part["part_size_bytes"]
+                    )
+                    part_sha = compute_slice_sha256(enc_slice)
+                    upload_target = enc_slice
+                    part_record = {**part, "part_sha256": part_sha}
+                else:
+                    part_sha = part["part_sha256"]
+                    upload_target = part.get("slice") or part["file_path"]
+                    part_record = part
+
+                caption = format_part_caption(
+                    file_id=file_id,
+                    part_index=part["part_index"],
+                    total_parts=len(parts),
+                    byte_offset=part["byte_offset"],
+                    part_size=part["part_size_bytes"],
+                    part_sha256=part_sha,
+                    filename=file_path.name,
+                    category=category,
+                    nonce=file_nonce,
+                    encryption=encryption_mode,
+                    kind="original"
                 )
-                res = await storage_client.upload_part(part["file_path"], caption=caption)
+                res = await storage_client.upload_part(upload_target, caption=caption)
                 if isinstance(res, dict):
                     uploaded_parts.append({
-                        **part,
+                        **part_record,
                         "telegram_message_id": res["message_id"],
                         "telegram_channel_id": res.get("channel_id", str(settings.TELEGRAM_CHANNEL_ID)),
                         "telegram_file_id": res.get("file_id"),
@@ -467,12 +567,33 @@ class LocalFolderWatcher:
                     })
                 else:
                     uploaded_parts.append({
-                        **part,
+                        **part_record,
                         "telegram_message_id": res,
                         "telegram_channel_id": str(settings.TELEGRAM_CHANNEL_ID),
                         "telegram_file_id": None,
                         "telegram_access_hash": None
                     })
+
+            # Extract video metadata if available
+            v_width = None
+            v_height = None
+            v_bitrate = None
+            v_codec = None
+            v_container = None
+            v_duration = None
+            if category == "video" and isinstance(exif, dict):
+                dims = exif.get("dimensions", {})
+                v_width = dims.get("width")
+                v_height = dims.get("height")
+                v_bitrate = exif.get("bitrate")
+                v_codec = exif.get("codec")
+                v_container = exif.get("container") or file_path.suffix.lstrip(".").lower()
+                v_duration = exif.get("duration_seconds")
+
+            # I-13: persist capture date + GPS coordinates extracted from image EXIF
+            taken_at = exif.get("taken_at") if isinstance(exif, dict) else None
+            latitude = exif.get("latitude") if isinstance(exif, dict) else None
+            longitude = exif.get("longitude") if isinstance(exif, dict) else None
 
             # 6. Atomic SQLite Commit
             async with get_db() as db:
@@ -481,15 +602,19 @@ class LocalFolderWatcher:
                     INSERT INTO files (
                         id, filename, mime_type, file_category, size_bytes, sha256,
                         is_split, total_parts, upload_status, nonce, encryption,
-                        has_thumbnail, thumbnail_path, exif_json
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        has_thumbnail, thumbnail_path, exif_json,
+                        kind, proxy_status, width, height, video_bitrate_bps,
+                        codec, container, duration_s, taken_at, latitude, longitude
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'original', 'none', ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         file_id, file_path.name, mime_type, category, total_size, sha256,
-                        1 if len(parts) > 1 else 0, len(parts), "completed", None, "none",
+                        1 if len(parts) > 1 else 0, len(parts), "completed", file_nonce, encryption_mode,
                         1 if has_thumb else 0,
                         str(thumbnail_path) if has_thumb else None,
-                        json.dumps(exif) if exif else None
+                        json.dumps(exif) if exif else None,
+                        v_width, v_height, v_bitrate, v_codec, v_container, v_duration,
+                        taken_at, latitude, longitude
                     )
                 )
 
@@ -543,7 +668,23 @@ class LocalFolderWatcher:
                 )
                 await db.commit()
 
-            # 7. Auto-delete local source file if requested
+            # 7. Proxy enqueue and Auto-delete local source file if requested
+            if category == "video":
+                if auto_delete_local:
+                    proxy_source_dir = settings.DATA_DIR / "proxies_tmp"
+                    proxy_source_dir.mkdir(parents=True, exist_ok=True)
+                    proxy_source_path = proxy_source_dir / f"source_{file_id}.tmp"
+                    try:
+                        try:
+                            os.link(file_path, proxy_source_path)
+                        except Exception:
+                            shutil.copy2(file_path, proxy_source_path)
+                        asyncio.create_task(transcoding_manager.enqueue_proxy(file_id, proxy_source_path))
+                    except Exception as e:
+                        logger.warning(f"Could not stage proxy source for {file_id}: {e}")
+                else:
+                    asyncio.create_task(transcoding_manager.enqueue_proxy(file_id, file_path))
+
             if auto_delete_local:
                 if not is_safe_file_path(file_path):
                     logger.error(f"Refusing to auto-delete unsafe file path: {file_path}")
@@ -579,7 +720,7 @@ class LocalFolderWatcher:
         """Compacts SQLite index and pins master catalog index.json to Telegram channel."""
         try:
             from ..api.routes import sync_master_catalog
-            await sync_master_catalog()
+            await sync_master_catalog(delay_seconds=5.0)
         except Exception as e:
             logger.warning(f"Watch folder could not trigger master catalog sync: {e}")
 

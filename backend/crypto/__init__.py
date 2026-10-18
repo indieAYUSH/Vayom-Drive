@@ -6,6 +6,10 @@ from .cipher import (
     aes_gcm_decrypt,
     derive_key_pbkdf2,
     generate_file_nonce,
+    EncryptedFileSlice,
+    compute_slice_sha256,
+    VaultKeyManager,
+    vault_manager,
 )
 
 __all__ = [
@@ -16,4 +20,9 @@ __all__ = [
     "aes_gcm_decrypt",
     "derive_key_pbkdf2",
     "generate_file_nonce",
+    "EncryptedFileSlice",
+    "compute_slice_sha256",
+    "VaultKeyManager",
+    "vault_manager",
 ]
+
