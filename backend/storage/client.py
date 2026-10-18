@@ -5,6 +5,7 @@ import json
 import logging
 import uuid
 import shutil
+import mimetypes
 from pathlib import Path
 from typing import Optional, Callable, AsyncIterator, Any, Union
 from telethon import TelegramClient, events
@@ -15,13 +16,78 @@ from .session import RobustSQLiteSession
 
 logger = logging.getLogger("vayom.storage")
 
+def format_part_caption(
+    file_id: str,
+    part_index: int,
+    total_parts: int,
+    byte_offset: int,
+    part_size: int,
+    part_sha256: str,
+    filename: Optional[str] = None,
+    category: Optional[str] = "other",
+    nonce: Optional[str] = None,
+    encryption: str = "none",
+    kind: str = "original",
+    proxy_of: Optional[str] = None,
+    proxy_profile: Optional[str] = None
+) -> str:
+    """
+    Builds a VAYOM:v1: caption envelope adhering to Phase 1 constraints:
+    - Part 0 caption <= 950 bytes
+    - Later parts (Part 1..N) <= 200 bytes
+    - Optional keys: 'k': 'p', 'of': '<original_id>', 'profile': '<profile>'
+    - Absent 'k' = original
+    """
+    payload: Dict[str, Any] = {
+        "id": file_id,
+        "part": part_index,
+        "total": total_parts,
+        "offset": byte_offset,
+        "size": part_size,
+        "sha256": part_sha256
+    }
+
+    if kind == "proxy":
+        payload["k"] = "p"
+        if part_index == 0:
+            if proxy_of:
+                payload["of"] = proxy_of
+            if proxy_profile:
+                payload["profile"] = proxy_profile
+
+    if part_index == 0:
+        safe_name = filename or "file"
+        if len(safe_name.encode("utf-8")) > 200:
+            ext = os.path.splitext(safe_name)[1]
+            safe_name = safe_name[:180] + ext
+        payload["name"] = safe_name
+        payload["cat"] = category or "other"
+        if nonce:
+            payload["nonce"] = nonce
+        if encryption and encryption != "none":
+            payload["enc"] = encryption
+
+        caption = f"VAYOM:v1:{json.dumps(payload, separators=(',', ':'))}"
+        caption_bytes = caption.encode("utf-8")
+        assert len(caption_bytes) <= 950, f"Part 0 caption exceeded 950 bytes ({len(caption_bytes)} bytes)"
+        return caption
+    else:
+        caption = f"VAYOM:v1:{json.dumps(payload, separators=(',', ':'))}"
+        caption_bytes = caption.encode("utf-8")
+        assert len(caption_bytes) <= 200, f"Part {part_index} caption exceeded 200 bytes ({len(caption_bytes)} bytes)"
+        return caption
+
 class TelegramStorageClient:
     def __init__(self):
         self.client: Optional[TelegramClient] = None
         self._is_connected = False
         self._lock = asyncio.Lock()
         self._media_cache: dict[tuple[str, int], Any] = {}
-        self._flood_wait_until: float = 0.0
+        # Architectural Invariant 4: Read vs. Write FloodWait Isolation
+        # Separate write rate limits (sendMedia/editMessage) from read rate limits (getFile)
+        # so background upload limits never freeze active video streaming or in-memory playback.
+        self._write_flood_wait_until: float = 0.0
+        self._read_flood_wait_until: float = 0.0
         # Anti-Ban Invariant 4: Limit upload concurrency to 3-4 parallel workers
         self._upload_semaphore = asyncio.Semaphore(3)
         self._catalog_lock = asyncio.Lock()
@@ -64,15 +130,36 @@ class TelegramStorageClient:
                 except Exception:
                     pass
 
-    def set_flood_wait(self, seconds: int):
-        """Sets or extends the flood wait period in seconds."""
-        self._flood_wait_until = max(self._flood_wait_until, time.time() + seconds)
+    def set_flood_wait(self, seconds: int, op_type: str = "write"):
+        """Sets or extends the flood wait period in seconds for 'write' or 'read' operations."""
+        # B-1: flood pacing uses time.monotonic() so NTP/manual clock jumps
+        # can neither collapse nor extend the enforced cooldown.
+        target = time.monotonic() + seconds
+        if op_type == "read":
+            self._read_flood_wait_until = max(self._read_flood_wait_until, target)
+        else:
+            self._write_flood_wait_until = max(self._write_flood_wait_until, target)
+
+    def set_write_flood_wait(self, seconds: int):
+        self.set_flood_wait(seconds, op_type="write")
+
+    def set_read_flood_wait(self, seconds: int):
+        self.set_flood_wait(seconds, op_type="read")
+
+    @property
+    def write_flood_wait_seconds(self) -> int:
+        remaining = self._write_flood_wait_until - time.monotonic()
+        return max(0, int(remaining))
+
+    @property
+    def read_flood_wait_seconds(self) -> int:
+        remaining = self._read_flood_wait_until - time.monotonic()
+        return max(0, int(remaining))
 
     @property
     def flood_wait_seconds(self) -> int:
-        """Returns the remaining flood wait duration in seconds, or 0 if not waiting."""
-        remaining = self._flood_wait_until - time.time()
-        return max(0, int(remaining))
+        """Returns write flood wait duration (for upload queue / task trackers) or max remaining."""
+        return max(self.write_flood_wait_seconds, self.read_flood_wait_seconds)
 
     @property
     def online_status(self) -> str:
@@ -81,17 +168,24 @@ class TelegramStorageClient:
             return "flood_wait"
         return "online" if self._is_connected else "reconnecting"
 
-    async def _wait_if_flooded(self):
+    async def _wait_if_flooded(self, op_type: str = "write"):
         """
-        Anti-Ban Invariant 5: Strict Global FloodWait Handling.
-        If any request triggered a FloodWait, pause execution globally for X + 2 seconds
-        so Telegram is not repeatedly spammed under an active rate limit.
+        Pauses execution if a FloodWait cooldown is active for op_type ('write' or 'read').
+        Ensures write flood-waits (e.g. from bulk uploads) do not block read/stream calls.
         """
-        now = time.time()
-        if self._flood_wait_until > now:
-            wait_left = self._flood_wait_until - now
-            logger.warning(f"Global FloodWait active: pausing request for {wait_left:.2f}s...")
+        until = self._read_flood_wait_until if op_type == "read" else self._write_flood_wait_until
+        # B-1: must read the same monotonic clock the deadline was set with.
+        now = time.monotonic()
+        if until > now:
+            wait_left = until - now
+            logger.warning(f"Telegram {op_type.upper()} FloodWait active: pausing request for {wait_left:.2f}s...")
             await asyncio.sleep(wait_left)
+
+    async def _wait_if_write_flooded(self):
+        await self._wait_if_flooded(op_type="write")
+
+    async def _wait_if_read_flooded(self):
+        await self._wait_if_flooded(op_type="read")
 
     async def verify_channel_privacy(self, channel_id: str):
         """
@@ -196,6 +290,8 @@ class TelegramStorageClient:
                 self.client = None
             self._is_connected = False
             self._media_cache.clear()
+            self._write_flood_wait_until = 0.0
+            self._read_flood_wait_until = 0.0
             self._flood_wait_until = 0.0
             logger.info("Disconnected from Telegram MTProto.")
 
@@ -206,29 +302,41 @@ class TelegramStorageClient:
 
     async def upload_part(
         self,
-        file_path: str,
+        file_path: Union[str, Path, Any],
         caption: str,
         progress_callback: Optional[Callable[[int, int], None]] = None
     ) -> dict:
         """
-        Uploads a single file part (up to 2000 MB) to the private channel.
-        Automatically catches and respects FloodWait rate limits.
+        Uploads a single file part (up to 2000 MB or 4000 MB) to the private channel.
+        Supports both local file paths and zero-copy BoundedFileSlice objects.
+        Automatically catches and respects Write FloodWait rate limits.
         Returns dict with message_id, channel_id, file_id, access_hash.
         """
         await self.ensure_connected()
         if not self._is_connected or not self.client:
             # Full-fidelity offline mock mode: persists part to mock_blobs
-            import shutil
             mock_dir = settings.DATA_DIR / "mock_blobs"
             mock_dir.mkdir(parents=True, exist_ok=True)
             msg_id = 1000 + int(asyncio.get_event_loop().time() * 1000) % 900000
-            shutil.copy2(file_path, mock_dir / f"{msg_id}.bin")
+
+            is_slice = hasattr(file_path, "read")
+            if is_slice:
+                if hasattr(file_path, "seek"):
+                    file_path.seek(0)
+                with open(mock_dir / f"{msg_id}.bin", "wb") as out_f:
+                    while chunk := file_path.read(1024 * 1024):
+                        out_f.write(chunk)
+                p_sz = getattr(file_path, "slice_size", getattr(file_path, "size", os.path.getsize(mock_dir / f"{msg_id}.bin")))
+            else:
+                import shutil
+                shutil.copy2(file_path, mock_dir / f"{msg_id}.bin")
+                p_sz = os.path.getsize(file_path)
+
             with open(mock_dir / f"{msg_id}.caption", "w", encoding="utf-8") as cf:
                 cf.write(caption)
             logger.info(f"Offline mock upload: stored part {msg_id}")
             if progress_callback:
                 try:
-                    p_sz = os.path.getsize(file_path)
                     progress_callback(p_sz, p_sz)
                 except Exception:
                     pass
@@ -242,9 +350,11 @@ class TelegramStorageClient:
         channel = int(settings.TELEGRAM_CHANNEL_ID)
 
         # Anti-Ban Invariant 4: Limit upload concurrency to 3-4 parallel workers
-        while True:
-            # Anti-Ban Invariant 5: Pause if global FloodWait is active BEFORE attempting semaphore
-            await self._wait_if_flooded()
+        # B-1: bounded retry loop — at most 5 attempts, then fail with a typed error
+        # instead of retrying forever on a persistently failing connection.
+        for _attempt in range(5):
+            # Anti-Ban Invariant 5: Pause if write FloodWait is active BEFORE attempting semaphore
+            await self._wait_if_write_flooded()
             try:
                 async with self._upload_semaphore:
                     # Adaptive chunk pacing: insert micro-delay between uploads to smooth burst traffic
@@ -252,11 +362,24 @@ class TelegramStorageClient:
                         await asyncio.sleep(settings.CHUNK_PACING_MS / 1000.0)
 
                     # 512 KB chunk part size per update.md anti-ban specification
-                    file_handle = await self.client.upload_file(
-                        file_path,
-                        part_size_kb=512,
-                        progress_callback=progress_callback
-                    )
+                    is_slice = hasattr(file_path, "read")
+                    if is_slice:
+                        if hasattr(file_path, "seek"):
+                            file_path.seek(0)
+                        file_handle = await self.client.upload_file(
+                            file_path,
+                            part_size_kb=512,
+                            file_size=getattr(file_path, "slice_size", getattr(file_path, "size", None)),
+                            file_name=getattr(file_path, "name", "part.bin"),
+                            progress_callback=progress_callback
+                        )
+                    else:
+                        file_handle = await self.client.upload_file(
+                            file_path,
+                            part_size_kb=512,
+                            progress_callback=progress_callback
+                        )
+
                     message = await self.client.send_file(
                         channel,
                         file_handle,
@@ -273,10 +396,9 @@ class TelegramStorageClient:
                     }
             except FloodWaitError as e:
                 # Anti-Ban Invariant 5: Catch FLOOD_WAIT_X globally and pause for X + 2 seconds.
-                # Notice semaphore was released upon exiting `async with`, preventing worker deadlock!
                 penalty = e.seconds + 2
-                self.set_flood_wait(penalty)
-                logger.warning(f"Telegram FloodWait encountered ({e.seconds}s): global pause enforced for {penalty}s (X + 2 rule)...")
+                self.set_write_flood_wait(penalty)
+                logger.warning(f"Telegram Write FloodWait encountered ({e.seconds}s): write pause enforced for {penalty}s (X + 2 rule)...")
                 await asyncio.sleep(penalty)
             except Exception as e:
                 err_str = str(e)
@@ -285,12 +407,14 @@ class TelegramStorageClient:
                     match = re.search(r"FLOOD_WAIT_(\d+)", err_str)
                     wait_sec = int(match.group(1)) if match else 10
                     penalty = wait_sec + 2
-                    self.set_flood_wait(penalty)
-                    logger.warning(f"Telegram FloodWait text encountered ({wait_sec}s): global pause for {penalty}s...")
+                    self.set_write_flood_wait(penalty)
+                    logger.warning(f"Telegram Write FloodWait text encountered ({wait_sec}s): write pause for {penalty}s...")
                     await asyncio.sleep(penalty)
                 else:
                     logger.error(f"Error uploading file part to Telegram: {e}")
                     raise
+
+        raise RuntimeError(f"Upload exceeded maximum retry limit (5) for part: {caption[:40]}")
 
     async def stream_part_bytes(
         self,
@@ -332,7 +456,7 @@ class TelegramStorageClient:
         async def get_fresh_media():
             for m_attempt in range(3):
                 await self.ensure_connected()
-                await self._wait_if_flooded()
+                await self._wait_if_read_flooded()
                 try:
                     msg = await self.client.get_messages(channel, ids=message_id)
                     if msg and msg.media:
@@ -342,8 +466,8 @@ class TelegramStorageClient:
                         return msg.media
                 except FloodWaitError as e:
                     penalty = e.seconds + 2
-                    self.set_flood_wait(penalty)
-                    logger.warning(f"FloodWait when getting message {message_id}: sleeping {penalty}s (X + 2 rule)")
+                    self.set_read_flood_wait(penalty)
+                    logger.warning(f"Read FloodWait when getting message {message_id}: sleeping {penalty}s (X + 2 rule)")
                     await asyncio.sleep(penalty)
                     continue
                 except Exception as e:
@@ -353,8 +477,8 @@ class TelegramStorageClient:
                         match = re.search(r"FLOOD_WAIT_(\d+)", err_str)
                         wait_sec = int(match.group(1)) if match else 10
                         penalty = wait_sec + 2
-                        self.set_flood_wait(penalty)
-                        logger.warning(f"FloodWait text when getting message {message_id}: sleeping {penalty}s...")
+                        self.set_read_flood_wait(penalty)
+                        logger.warning(f"Read FloodWait text when getting message {message_id}: sleeping {penalty}s...")
                         await asyncio.sleep(penalty)
                         continue
                     logger.warning(f"Error getting message {message_id}: {e}. Reconnecting...")
@@ -372,34 +496,85 @@ class TelegramStorageClient:
 
         for attempt in range(max_retries):
             try:
-                await self._wait_if_flooded()
-                # Telethon iter_download streams chunks directly from Telegram DC sockets
-                async for chunk in self.client.iter_download(
-                    media,
-                    offset=curr_offset,
-                    request_size=chunk_size,
-                    chunk_size=chunk_size
-                ):
-                    # Check global rate limits before yielding each chunk
-                    await self._wait_if_flooded()
+                await self._wait_if_read_flooded()
+                # Accelerated MTProto Download: For multi-chunk streaming and downloads,
+                # use a bounded lookahead prefetch pipeline to download the next chunk from MTProto
+                # while previous chunks are actively yielded to the HTTP client/browser.
+                if limit is None or limit > chunk_size:
+                    queue: asyncio.Queue = asyncio.Queue(maxsize=3)
+                    _SENTINEL = object()
 
-                    if limit is not None and bytes_sent + len(chunk) > limit:
-                        remaining = limit - bytes_sent
-                        yield chunk[:remaining]
-                        bytes_sent += remaining
+                    async def _prefetch_producer(start_off: int, start_sent: int):
+                        p_off = start_off
+                        p_sent = start_sent
+                        try:
+                            await self._wait_if_read_flooded()
+                            async for p_chunk in self.client.iter_download(
+                                media,
+                                offset=p_off,
+                                request_size=chunk_size,
+                                chunk_size=chunk_size
+                            ):
+                                await self._wait_if_read_flooded()
+                                if limit is not None and p_sent + len(p_chunk) > limit:
+                                    rem = limit - p_sent
+                                    await queue.put(p_chunk[:rem])
+                                    break
+                                await queue.put(p_chunk)
+                                p_sent += len(p_chunk)
+                                p_off += len(p_chunk)
+                        except asyncio.CancelledError:
+                            raise
+                        except Exception as ex:
+                            await queue.put(ex)
+                            return
+                        finally:
+                            await queue.put(_SENTINEL)
+
+                    producer = asyncio.create_task(_prefetch_producer(curr_offset, bytes_sent))
+                    try:
+                        while True:
+                            item = await queue.get()
+                            if item is _SENTINEL:
+                                break
+                            if isinstance(item, Exception):
+                                raise item
+                            yield item
+                            bytes_sent += len(item)
+                            curr_offset += len(item)
+                            if limit is not None and bytes_sent >= limit:
+                                break
                         return
-
-                    yield chunk
-                    bytes_sent += len(chunk)
-                    curr_offset += len(chunk)
-
-                # Successful stream completion
-                return
+                    finally:
+                        if not producer.done():
+                            producer.cancel()
+                            try:
+                                await producer
+                            except (asyncio.CancelledError, Exception):
+                                pass
+                else:
+                    # Single chunk request: direct sequential pull
+                    async for chunk in self.client.iter_download(
+                        media,
+                        offset=curr_offset,
+                        request_size=chunk_size,
+                        chunk_size=chunk_size
+                    ):
+                        await self._wait_if_read_flooded()
+                        if limit is not None and bytes_sent + len(chunk) > limit:
+                            remaining = limit - bytes_sent
+                            yield chunk[:remaining]
+                            bytes_sent += remaining
+                            return
+                        yield chunk
+                        bytes_sent += len(chunk)
+                        curr_offset += len(chunk)
+                    return
 
             except FloodWaitError as e:
                 penalty = e.seconds + 2
-                self.set_flood_wait(penalty)
-                logger.warning(f"FloodWait during iter_download for msg {message_id} at offset {curr_offset}: sleeping {penalty}s (X + 2 rule)...")
+                self.set_read_flood_wait(penalty)
+                logger.warning(f"Read FloodWait during iter_download for msg {message_id} at offset {curr_offset}: sleeping {penalty}s (X + 2 rule)...")
                 await asyncio.sleep(penalty)
                 continue
 
@@ -416,8 +591,8 @@ class TelegramStorageClient:
                     match = re.search(r"FLOOD_WAIT_(\d+)", err_str)
                     wait_sec = int(match.group(1)) if match else 10
                     penalty = wait_sec + 2
-                    self.set_flood_wait(penalty)
-                    logger.warning(f"FloodWait text during iter_download for msg {message_id} at {curr_offset}: sleeping {penalty}s...")
+                    self.set_read_flood_wait(penalty)
+                    logger.warning(f"Read FloodWait text during iter_download for msg {message_id} at {curr_offset}: sleeping {penalty}s...")
                     await asyncio.sleep(penalty)
                     continue
 
@@ -462,7 +637,7 @@ class TelegramStorageClient:
                     pass
             return None
 
-        await self._wait_if_flooded()
+        await self._wait_if_read_flooded()
 
         async def fetch_catalog_from_target(target_chat) -> Optional[dict]:
             try:
@@ -558,6 +733,21 @@ class TelegramStorageClient:
         Removes previous pinned catalog messages to avoid spam and accumulation.
         """
         async with self._catalog_lock:
+            # Calculate max_message_id across all parts for delta tail sync recovery
+            max_msg_id = int(catalog_data.get("max_message_id") or 0)
+            for f in catalog_data.get("files", []):
+                for p in f.get("parts", []):
+                    mid = p.get("telegram_message_id")
+                    if mid and isinstance(mid, int) and mid > max_msg_id:
+                        max_msg_id = mid
+                proxy = f.get("proxy")
+                if isinstance(proxy, dict):
+                    for pp in proxy.get("parts", []):
+                        mid = pp.get("telegram_message_id")
+                        if mid and isinstance(mid, int) and mid > max_msg_id:
+                            max_msg_id = mid
+            catalog_data["max_message_id"] = max_msg_id
+
             # Always maintain local snapshot for zero-cloud disaster recovery (atomic write)
             backup_tmp = None
             try:
@@ -594,7 +784,7 @@ class TelegramStorageClient:
                 self._save_catalog_state()
                 return 999999
 
-            await self._wait_if_flooded()
+            await self._wait_if_write_flooded()
             channel = int(settings.TELEGRAM_CHANNEL_ID)
 
             # Determine target old pinned message to delete
@@ -630,7 +820,8 @@ class TelegramStorageClient:
                     "version": "1.0",
                     "updated_at": catalog_data.get("updated_at", ""),
                     "total_files": catalog_data.get("total_files", len(catalog_data.get("files", []))),
-                    "total_bytes": catalog_data.get("total_bytes", 0)
+                    "total_bytes": catalog_data.get("total_bytes", 0),
+                    "max_message_id": max_msg_id
                 }
                 caption = f"VAYOM:CATALOG:v1:{json.dumps(summary)}"
 
@@ -709,7 +900,7 @@ class TelegramStorageClient:
                 return msg.id
             except FloodWaitError as e:
                 penalty = e.seconds + 2
-                self.set_flood_wait(penalty)
+                self.set_write_flood_wait(penalty)
                 logger.warning(f"FloodWait when saving pinned catalog: sleeping {penalty}s (X + 2 rule)")
                 raise
             except Exception as e:
@@ -777,10 +968,11 @@ class TelegramStorageClient:
 
         return health
 
-    async def scan_channel_envelopes(self, limit: int = 2000) -> list[dict]:
+    async def scan_channel_envelopes(self, limit: int = 2000, min_id: Optional[int] = None) -> list[dict]:
         """
         Scans channel message history backward from HEAD.
         Extracts VAYOM:v1: JSON envelopes from captions for zero-loss recovery.
+        When min_id is provided, only retrieves newer envelopes with message_id > min_id (Delta Tail Sync).
         Recognizes alphanumeric continuous IDs (e.g. v_...) and legacy UUIDs.
         """
         if not self._is_connected or not self.client:
@@ -790,11 +982,35 @@ class TelegramStorageClient:
                 for cap_file in sorted(mock_dir.glob("*.caption"), reverse=True):
                     try:
                         msg_id = int(cap_file.stem)
+                        if min_id is not None and msg_id <= min_id:
+                            continue
                         text = cap_file.read_text(encoding="utf-8")
                         if text.startswith("VAYOM:v1:"):
                             data = json.loads(text[len("VAYOM:v1:"):])
                             data["telegram_message_id"] = msg_id
                             envelopes.append(data)
+                    except Exception:
+                        pass
+                for bin_file in sorted(mock_dir.glob("*.bin"), reverse=True):
+                    try:
+                        msg_id = int(bin_file.stem)
+                        if min_id is not None and msg_id <= min_id:
+                            continue
+                        if not (mock_dir / f"{msg_id}.caption").exists():
+                            envelopes.append({
+                                "id": f"v_fwd_{msg_id}",
+                                "name": f"mock_file_{msg_id}.bin",
+                                "part": 0,
+                                "total": 1,
+                                "offset": 0,
+                                "size": bin_file.stat().st_size,
+                                "sha256": "",
+                                "cat": "other",
+                                "mime": "application/octet-stream",
+                                "nonce": None,
+                                "enc": "none",
+                                "telegram_message_id": msg_id
+                            })
                     except Exception:
                         pass
             return envelopes
@@ -803,56 +1019,132 @@ class TelegramStorageClient:
         channel = int(settings.TELEGRAM_CHANNEL_ID)
 
         # 1. Ephemeral probe to discover channel HEAD ID
-        await self._wait_if_flooded()
-        head_id = 1
+        await self._wait_if_write_flooded()
+        head_id: Optional[int] = None
         try:
             probe = await self.client.send_message(channel, "VAYOM:DISASTER_RECOVERY_HEAD_PROBE")
             head_id = probe.id
             await self.client.delete_messages(channel, [head_id])
         except FloodWaitError as e:
             penalty = e.seconds + 2
-            self.set_flood_wait(penalty)
+            self.set_write_flood_wait(penalty)
             logger.warning(f"FloodWait during channel head probe: sleeping {penalty}s (X + 2 rule)")
-            head_id = 500
+            head_id = None
         except Exception as e:
-            logger.warning(f"Could not probe channel HEAD, falling back to scanning range: {e}")
-            head_id = 500
+            logger.warning(f"Could not probe channel HEAD, falling back to newest-message iteration: {e}")
+            head_id = None
+
+        if head_id is None:
+            # E-2: probe failed — iterate the NEWEST messages directly instead of the old
+            # head_id=500 fallback, which scanned the oldest IDs of the channel.
+            try:
+                async for message in self.client.iter_messages(channel, limit=limit, min_id=min_id or 0):
+                    env = self._envelope_from_message(message)
+                    if env:
+                        envelopes.append(env)
+            except Exception as e:
+                logger.error(f"Newest-message recovery scan failed: {e}")
+            return envelopes
+
+        if min_id is not None and min_id >= head_id:
+            return []
 
         # 2. Scan message IDs backwards from HEAD in batches of 100
-        start_id = max(1, head_id - limit)
+        start_id = max(min_id + 1 if min_id is not None else 1, head_id - limit)
         for chunk_start in range(head_id - 1, start_id - 1, -100):
+            if min_id is not None and chunk_start <= min_id:
+                break
             chunk_end = max(start_id, chunk_start - 99)
-            batch_ids = list(range(chunk_end, chunk_start + 1))
+            batch_ids = [mid for mid in range(chunk_end, chunk_start + 1) if (min_id is None or mid > min_id)]
             if not batch_ids:
                 continue
 
-            await self._wait_if_flooded()
-            try:
-                messages = await self.client.get_messages(channel, ids=batch_ids)
-                for message in messages:
-                    if not message:
-                        continue
-                    text = message.text or message.message or ""
-                    # Ignore catalog envelopes and system probe messages
-                    if text.startswith("VAYOM:CATALOG:v1:") or text.startswith("VAYOM:DISASTER_RECOVERY"):
-                        continue
-                    if text.startswith("VAYOM:v1:"):
-                        try:
-                            payload = text[len("VAYOM:v1:"):]
-                            data = json.loads(payload)
-                            data["telegram_message_id"] = message.id
-                            envelopes.append(data)
-                        except Exception as err:
-                            logger.warning(f"Failed to parse caption envelope in message {message.id}: {err}")
-            except FloodWaitError as e:
-                penalty = e.seconds + 2
-                self.set_flood_wait(penalty)
-                logger.warning(f"FloodWait during channel message scan: sleeping {penalty}s (X + 2 rule)")
-                await asyncio.sleep(penalty)
-            except Exception as e:
-                logger.error(f"Error fetching message batch {batch_ids[0]}-{batch_ids[-1]}: {e}")
+            # E-2: retry the SAME batch up to 3 times on FloodWait instead of silently skipping it
+            messages = None
+            for fetch_attempt in range(3):
+                await self._wait_if_read_flooded()
+                try:
+                    messages = await self.client.get_messages(channel, ids=batch_ids)
+                    break
+                except FloodWaitError as e:
+                    penalty = e.seconds + 2
+                    self.set_read_flood_wait(penalty)
+                    logger.warning(f"FloodWait during channel message scan ({fetch_attempt + 1}/3): sleeping {penalty}s (X + 2 rule)")
+                    await asyncio.sleep(penalty)
+                except Exception as e:
+                    logger.error(f"Error fetching message batch {batch_ids[0]}-{batch_ids[-1]}: {e}")
+                    messages = None
+                    break
+
+            if messages is None:
+                logger.error(f"Batch {batch_ids[0]}-{batch_ids[-1]} skipped after 3 flood-wait attempts; it will be retried on the next recovery scan.")
+                continue
+
+            for message in messages:
+                if min_id is not None and getattr(message, "id", 0) <= min_id:
+                    continue
+                env = self._envelope_from_message(message)
+                if env:
+                    envelopes.append(env)
 
         return envelopes
+
+    def _envelope_from_message(self, message) -> Optional[dict]:
+        """Parses a Telegram message into a VAYOM envelope dict, or None if it is not recoverable."""
+        if not message:
+            return None
+        text = message.text or message.message or ""
+        # Ignore catalog envelopes and system probe messages
+        if text.startswith("VAYOM:CATALOG:v1:") or text.startswith("VAYOM:DISASTER_RECOVERY"):
+            return None
+        if text.startswith("VAYOM:v1:"):
+            try:
+                payload = text[len("VAYOM:v1:"):]
+                data = json.loads(payload)
+                data["telegram_message_id"] = message.id
+                return data
+            except Exception as err:
+                logger.warning(f"Failed to parse caption envelope in message {message.id}: {err}")
+                return None
+        elif getattr(message, "media", None):
+            # Direct "Forward-to-Vault" Ingestion: auto-index raw media forwarded from mobile
+            try:
+                f_obj = getattr(message, "file", None)
+                f_ext = getattr(f_obj, "ext", "") or ""
+                fname = getattr(f_obj, "name", None) or f"telegram_{message.id}{f_ext}"
+                fsize = getattr(f_obj, "size", 0) or 0
+                fmime = getattr(f_obj, "mime_type", None) or mimetypes.guess_type(fname)[0] or "application/octet-stream"
+
+                cat = "other"
+                if fmime.startswith("image/"):
+                    cat = "image"
+                elif fmime.startswith("video/"):
+                    cat = "video"
+                elif fmime.startswith("audio/"):
+                    cat = "audio"
+                elif fmime.startswith("application/pdf") or "document" in fmime or "text/" in fmime:
+                    cat = "document"
+                elif any(fname.lower().endswith(ext) for ext in [".zip", ".tar", ".gz", ".7z", ".rar"]):
+                    cat = "archive"
+
+                return {
+                    "id": f"v_fwd_{message.id}",
+                    "name": fname,
+                    "part": 0,
+                    "total": 1,
+                    "offset": 0,
+                    "size": fsize,
+                    "sha256": "",
+                    "cat": cat,
+                    "mime": fmime,
+                    "nonce": None,
+                    "enc": "none",
+                    "telegram_message_id": message.id
+                }
+            except Exception as m_err:
+                logger.debug(f"Could not parse raw media message {message.id}: {m_err}")
+                return None
+        return None
 
     async def delete_messages(
         self,
@@ -907,13 +1199,13 @@ class TelegramStorageClient:
         for i in range(0, len(message_ids), 100):
             batch = message_ids[i:i + 100]
             try:
-                await self._wait_if_flooded()
+                await self._wait_if_write_flooded()
                 await self.client.delete_messages(channel, batch)
                 deleted_count += len(batch)
             except FloodWaitError as e:
                 penalty = e.seconds + 2
-                self.set_flood_wait(penalty)
-                logger.warning(f"Telegram FloodWait during delete: sleeping {penalty}s (X + 2 rule)")
+                self.set_write_flood_wait(penalty)
+                logger.warning(f"Telegram Write FloodWait during delete: sleeping {penalty}s (X + 2 rule)")
                 await asyncio.sleep(penalty)
                 try:
                     await self.client.delete_messages(channel, batch)
