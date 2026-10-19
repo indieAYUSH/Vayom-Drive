@@ -5,6 +5,7 @@ import { Badge } from '../common/Badge'
 import { Play, FileText, Archive, Film, Star, Music, Trash2, Image } from 'lucide-react'
 import { useVaultStore } from '../../store/useVaultStore'
 import { formatBytes } from '../../utils/format'
+import { resolveMediaUrl } from '../../utils/apiUrl'
 
 interface MediaCardProps {
   item: FileItem
@@ -126,7 +127,7 @@ export const MediaCard: React.FC<MediaCardProps> = ({
       >
         {!thumbError && item.thumbnail_url ? (
           <img
-            src={item.thumbnail_url}
+            src={resolveMediaUrl(item.thumbnail_url)}
             alt={item.filename}
             loading="lazy"
             onError={() => setThumbError(true)}

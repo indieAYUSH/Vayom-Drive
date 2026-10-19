@@ -5,6 +5,7 @@ import { FileItem } from '../../types/vault'
 import { Badge } from '../common/Badge'
 import { formatBytes } from '../../utils/format'
 import { api } from '../../services/api'
+import { resolveMediaUrl } from '../../utils/apiUrl'
 
 export const CommandBar: React.FC = () => {
   const { 
@@ -195,7 +196,7 @@ export const CommandBar: React.FC = () => {
                 <div className="flex items-center gap-2 sm:gap-3 truncate min-w-0 flex-1 mr-2">
                   {item.thumbnail_url ? (
                     <img
-                      src={item.thumbnail_url}
+                      src={resolveMediaUrl(item.thumbnail_url)}
                       alt={item.filename}
                       className="w-8 h-8 object-cover border border-[#282828] flex-shrink-0"
                     />

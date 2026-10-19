@@ -3,7 +3,7 @@ import { useVaultStore } from '../store/useVaultStore'
 import { Folder, Plus, Download } from 'lucide-react'
 import { Button } from '../components/common/Button'
 import { BreadcrumbNav } from '../components/drive/BreadcrumbNav'
-import { apiUrl } from '../utils/apiUrl'
+import { apiUrl, resolveMediaUrl } from '../utils/apiUrl'
 
 export const AlbumsView: React.FC = () => {
   const { albums, setSelectedAlbumId, setCreateAlbumModalOpen } = useVaultStore()
@@ -55,7 +55,7 @@ export const AlbumsView: React.FC = () => {
             <div className="w-full h-44 bg-[#141414] overflow-hidden relative">
               {album.cover_url ? (
                 <img
-                  src={album.cover_url}
+                  src={resolveMediaUrl(album.cover_url)}
                   alt={album.name}
                   draggable={false}
                   onDragStart={(e) => e.preventDefault()}

@@ -4,6 +4,7 @@ import { Trash2, RotateCcw } from 'lucide-react'
 import { Button } from '../components/common/Button'
 import { Badge } from '../components/common/Badge'
 import { formatBytes } from '../utils/format'
+import { resolveMediaUrl } from '../utils/apiUrl'
 
 // H-22: compute remaining retention days from the actual deletion date (30-day policy)
 const formatDaysLeft = (deletedAt?: string) => {
@@ -82,7 +83,7 @@ export const TrashView: React.FC = () => {
               <div className="flex items-center gap-3 truncate min-w-0 flex-1">
                 {item.thumbnail_url ? (
                   <img
-                    src={item.thumbnail_url}
+                    src={resolveMediaUrl(item.thumbnail_url)}
                     alt={item.filename}
                     draggable={false}
                     onDragStart={(e) => e.preventDefault()}

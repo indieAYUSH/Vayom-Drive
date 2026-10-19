@@ -112,7 +112,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({ item, src, poster, fil
             seekOnLoadRef.current = prevTime
             wasPlayingBeforeSwitchRef.current = isPlaying
             setActiveStream('proxy')
-            setCurrentSrc(found.proxy_url)
+            setCurrentSrc(resolveMediaUrl(found.proxy_url))
             showToast('Instant FastStart preview is ready! Switched stream.')
           }
         }
