@@ -551,13 +551,14 @@ class StreamingEngine:
                                     _make_prefetch(next_p, 0, next_lim)
                                 ))
 
-                    # Invariant 1: Decrypt chunk if encrypted with AES-256-CTR
+                    # Invariant 1: Decrypt chunk if encrypted with AES-256-CTR (C-8: absolute file offset)
                     if encryption == "ctr" and nonce and key and aes_ctr_decrypt:
+                        absolute_aligned_offset = p_start + chunk_aligned_offset
                         chunk_bytes = aes_ctr_decrypt(
                             chunk_bytes,
                             key,
                             nonce,
-                            aligned_byte_offset=chunk_aligned_offset
+                            aligned_byte_offset=absolute_aligned_offset
                         )
 
                     # Slice out the specific sub-segment needed for this range

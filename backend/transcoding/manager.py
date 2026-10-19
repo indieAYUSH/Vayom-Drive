@@ -100,6 +100,9 @@ class TranscodingManager:
         if original_id in self._active_jobs:
             return
 
+        # I-41: reserve the id synchronously so concurrent enqueues can't double-queue it
+        self._active_jobs.add(original_id)
+
         async with get_db() as db:
             await db.execute("UPDATE files SET proxy_status = 'queued' WHERE id = ?", (original_id,))
             await db.commit()
@@ -256,9 +259,12 @@ class TranscodingManager:
 
             # 2. Slice if needed (proxy file is typically 50MB - 2GB)
             proxy_size = proxy_file.stat().st_size
-            proxy_sha = calculate_sha256(proxy_file)
+            proxy_sha = await asyncio.to_thread(calculate_sha256, proxy_file)
 
-            parts = split_file_if_needed(proxy_file, max_part_bytes=settings.MAX_PART_BYTES, precomputed_sha=proxy_sha)
+            parts = await asyncio.to_thread(
+                split_file_if_needed, proxy_file,
+                max_part_bytes=settings.MAX_PART_BYTES, precomputed_sha=proxy_sha,
+            )
             uploaded_parts = []
 
             # 3. Upload parts with stream_v1 proxy captions

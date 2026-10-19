@@ -317,7 +317,10 @@ class TelegramStorageClient:
             # Full-fidelity offline mock mode: persists part to mock_blobs
             mock_dir = settings.DATA_DIR / "mock_blobs"
             mock_dir.mkdir(parents=True, exist_ok=True)
-            msg_id = 1000 + int(asyncio.get_event_loop().time() * 1000) % 900000
+            if not hasattr(self, "_mock_msg_seq"):
+                self._mock_msg_seq = 1000 + int(time.time() * 10) % 500000
+            self._mock_msg_seq += 1
+            msg_id = self._mock_msg_seq
 
             is_slice = hasattr(file_path, "read")
             if is_slice:
@@ -446,8 +449,7 @@ class TelegramStorageClient:
                         yield chunk
                         bytes_left -= len(chunk)
                 return
-            yield b"\x00" * (limit or 1024)
-            return
+            raise FileNotFoundError(f"Mock blob missing for message {message_id}: {blob_path}")
 
         target_channel_str = str(channel_id or settings.TELEGRAM_CHANNEL_ID)
         cache_key = (target_channel_str, message_id)

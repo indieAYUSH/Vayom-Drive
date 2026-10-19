@@ -49,6 +49,11 @@ class LocalFolderWatcher:
         self._ingest_queue: Optional[asyncio.Queue] = None
         self._ingest_workers: List[asyncio.Task] = []
         self._queued_paths: Set[str] = set()
+        # I-34: change events that arrived while their path was actively syncing.
+        # They are replayed by the ingest worker once the active run finishes so
+        # the newest bytes are never skipped (auto-delete is also gated on this).
+        self._dirty_items: Dict[str, Dict[str, Any]] = {}
+        self._stopping: bool = False
         self._producer_tasks: Set[asyncio.Task] = set()
 
     async def start(self):
@@ -56,6 +61,7 @@ class LocalFolderWatcher:
         if self._running:
             return
         self._running = True
+        self._stopping = False
         # I-22: crash recovery — anything still marked 'syncing' from a previous run
         # (power loss / hard restart) is reconciled so files never stay stuck forever.
         try:
@@ -72,6 +78,7 @@ class LocalFolderWatcher:
     async def stop(self):
         """Stops the watcher worker cleanly."""
         self._running = False
+        self._stopping = True
         self._needs_reload = False
         if self._iteration_stop_event:
             self._iteration_stop_event.set()
@@ -96,6 +103,7 @@ class LocalFolderWatcher:
         self._ingest_workers = []
         self._ingest_queue = None
         self._queued_paths.clear()
+        self._dirty_items.clear()
         logger.info("LocalFolderWatcher service stopped.")
 
     async def reload(self):
@@ -132,15 +140,22 @@ class LocalFolderWatcher:
         """
         self._ensure_ingest_pool()
         key = str(file_path.resolve())
-        if key in self._queued_paths or key in self._syncing_paths:
-            return False
-        self._queued_paths.add(key)
         item = {
             "folder_id": folder_id,
             "file_path": file_path,
             "auto_delete_local": auto_delete_local,
             "target_album_id": target_album_id
         }
+        if key in self._syncing_paths:
+            # I-34: never drop a change that lands mid-sync — remember the newest
+            # event and replay it once the active ingest finishes. The stability
+            # check then re-runs against the newest bytes (critical with
+            # auto_delete_local, which is gated on this marker).
+            self._dirty_items[key] = item
+            return False
+        if key in self._queued_paths:
+            return False
+        self._queued_paths.add(key)
         try:
             await self._ingest_queue.put((key, item))
         except BaseException:
@@ -161,6 +176,16 @@ class LocalFolderWatcher:
             finally:
                 self._queued_paths.discard(key)
                 self._ingest_queue.task_done()
+                # I-34: if a change event arrived while this path was syncing,
+                # replay it through the normal queue now that the path is free.
+                dirty_item = self._dirty_items.pop(key, None)
+                if dirty_item is not None and not self._stopping:
+                    try:
+                        await self._enqueue(**dirty_item)
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as e:
+                        logger.warning(f"Failed to re-enqueue changed path {dirty_item.get('file_path')}: {e}")
 
     async def _get_active_folders(self) -> List[Dict[str, Any]]:
         """Queries database for all active watch folders."""
@@ -469,11 +494,16 @@ class LocalFolderWatcher:
                     await db.commit()
 
                     if auto_delete_local:
-                        try:
-                            file_path.unlink(missing_ok=True)
-                            logger.info(f"Auto-deleted local file after sync: {file_path}")
-                        except Exception as e:
-                            logger.warning(f"Could not delete local file {file_path}: {e}")
+                        if str_path in self._dirty_items:
+                            # I-34: the file changed while it was being processed —
+                            # keep it so the deferred re-ingest uploads the newest bytes.
+                            logger.warning(f"File changed during sync; keeping local copy for re-ingest: {file_path}")
+                        else:
+                            try:
+                                file_path.unlink(missing_ok=True)
+                                logger.info(f"Auto-deleted local file after sync: {file_path}")
+                            except Exception as e:
+                                logger.warning(f"Could not delete local file {file_path}: {e}")
                     return
 
                 # Record event as 'syncing'
@@ -686,7 +716,11 @@ class LocalFolderWatcher:
                     asyncio.create_task(transcoding_manager.enqueue_proxy(file_id, file_path))
 
             if auto_delete_local:
-                if not is_safe_file_path(file_path):
+                if str_path in self._dirty_items:
+                    # I-34: never delete a file that changed while it was syncing —
+                    # the deferred re-ingest must still find the newer bytes on disk.
+                    logger.warning(f"File changed during sync; keeping local copy for re-ingest: {file_path}")
+                elif not is_safe_file_path(file_path):
                     logger.error(f"Refusing to auto-delete unsafe file path: {file_path}")
                 else:
                     try:

@@ -14,6 +14,16 @@ Image.MAX_IMAGE_PIXELS = 89_478_485
 logger = logging.getLogger("vayom.index.metadata")
 
 
+async def _communicate_with_timeout(proc, timeout: float):
+    """Waits for a subprocess, killing it on timeout so it cannot leak."""
+    try:
+        return await asyncio.wait_for(proc.communicate(), timeout=timeout)
+    except asyncio.TimeoutError:
+        proc.kill()
+        await proc.wait()
+        raise
+
+
 def detect_file_category(mime_type: str, filename: str) -> str:
     ext = Path(filename).suffix.lower()
     if mime_type.startswith("image/") or ext in [".jpg", ".jpeg", ".png", ".webp", ".gif", ".arw", ".cr2", ".nef", ".dng", ".tiff"]:
@@ -98,7 +108,7 @@ async def generate_video_thumbnail(
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE
         )
-        await asyncio.wait_for(proc.communicate(), timeout=20.0)
+        await _communicate_with_timeout(proc, 20.0)
         if proc.returncode == 0 and output_path.exists() and output_path.stat().st_size > 0:
             return True
 
@@ -118,9 +128,10 @@ async def generate_video_thumbnail(
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE
         )
-        await asyncio.wait_for(proc.communicate(), timeout=20.0)
+        await _communicate_with_timeout(proc, 20.0)
         return proc.returncode == 0 and output_path.exists() and output_path.stat().st_size > 0
-    except Exception:
+    except Exception as e:
+        logger.warning(f"Thumbnail generation failed for {video_path}: {e}")
         return False
 
 
@@ -144,9 +155,10 @@ async def apply_mp4_faststart(input_path: Path, output_path: Path) -> bool:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE
         )
-        await asyncio.wait_for(proc.communicate(), timeout=60.0)
+        await _communicate_with_timeout(proc, 60.0)
         return proc.returncode == 0 and output_path.exists() and output_path.stat().st_size > 0
-    except Exception:
+    except Exception as e:
+        logger.warning(f"FastStart remux failed for {input_path}: {e}")
         return False
 
 
@@ -175,8 +187,8 @@ def extract_image_exif(image_path: Path) -> Dict[str, Any]:
                     elif hasattr(value, "numerator") and hasattr(value, "denominator"):
                         # Rational number (e.g. F-number, focal length, shutter speed)
                         named_exif[tag_name] = float(value)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(f"EXIF IFD sub-tags unreadable for {image_path}: {e}")
 
             make = named_exif.get("Make")
             model = named_exif.get("Model")
@@ -419,7 +431,7 @@ async def extract_video_metadata(video_path: Path) -> Dict[str, Any]:
             auto_tags.append(str(model).lower().strip())
         metadata["tags"] = list(dict.fromkeys(auto_tags))
 
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning(f"Video metadata extraction failed for {video_path}: {e}")
 
     return metadata

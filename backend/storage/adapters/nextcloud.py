@@ -20,6 +20,36 @@ from ...index.metadata import detect_file_category
 logger = logging.getLogger("vayom.storage.nextcloud")
 
 
+def normalize_webdav_path(path: str) -> str:
+    """
+    B-10: normalize a logical WebDAV path before it is stored or fetched.
+
+    Backslashes are treated as separators (Windows-style folder paths) and
+    empty/`.` segments are collapsed. `..` is rejected outright so a crafted
+    folder or file name can never climb out of the vault prefix.
+    """
+    segments: List[str] = []
+    for segment in path.replace("\\", "/").split("/"):
+        if segment in ("", "."):
+            continue
+        if segment == "..":
+            raise ValueError("WebDAV path may not contain '..' segments")
+        segments.append(segment)
+    return "/".join(segments)
+
+
+def encode_webdav_path(path: str) -> str:
+    """
+    B-10: percent-encode every path segment so `#`, `?`, `%` and spaces cannot
+    truncate the URL, start a query string, or collide with another file.
+    """
+    return "/".join(
+        urllib.parse.quote(segment, safe="")
+        for segment in normalize_webdav_path(path).split("/")
+        if segment
+    )
+
+
 class NextcloudWebDAVAdapter(BaseStorageAdapter):
     """
     Nextcloud / ownCloud WebDAV Storage Adapter:
@@ -52,7 +82,7 @@ class NextcloudWebDAVAdapter(BaseStorageAdapter):
         return httpx.BasicAuth(self.username, self.app_password)
 
     def _build_url(self, rel_path: str = "") -> str:
-        clean = rel_path.lstrip("/").replace("\\", "/")
+        clean = encode_webdav_path(rel_path.lstrip("/"))
         if not self.webdav_url:
             return f"/{clean}"
         if clean:
@@ -104,15 +134,19 @@ class NextcloudWebDAVAdapter(BaseStorageAdapter):
         """
         local_p = Path(local_path)
         file_size = local_p.stat().st_size
-        safe_filename = Path(filename).name or f"{file_id}.bin"
+        safe_filename = Path(filename.replace("\\", "/")).name
+        if not safe_filename or safe_filename in (".", ".."):
+            safe_filename = f"{file_id}.bin"
 
         if is_proxy:
-            rel_path = f"{self.vault_prefix}/.vayom/proxies/{file_id}/{safe_filename}"
+            raw_path = f"{self.vault_prefix}/.vayom/proxies/{file_id}/{safe_filename}"
         elif folder_name:
             clean_folder = folder_name.strip("/").replace("\\", "/")
-            rel_path = f"{self.vault_prefix}/{clean_folder}/{safe_filename}"
+            raw_path = f"{self.vault_prefix}/{clean_folder}/{safe_filename}"
         else:
-            rel_path = f"{self.vault_prefix}/{safe_filename}"
+            raw_path = f"{self.vault_prefix}/{safe_filename}"
+        # B-10: keep the logical path canonical; `_build_url` percent-encodes it.
+        rel_path = normalize_webdav_path(raw_path)
 
         target_url = self._build_url(rel_path)
 

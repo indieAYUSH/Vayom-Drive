@@ -26,6 +26,36 @@ MULTIPART_THRESHOLD = 100 * 1024 * 1024  # 100 MB
 MULTIPART_CHUNK_SIZE = 16 * 1024 * 1024  # 16 MB chunks
 
 
+def normalize_object_path(path: str) -> str:
+    """
+    B-10: normalize a logical object key before it is stored or fetched.
+
+    Backslashes are treated as separators (Windows-style folder paths) and
+    empty/`.` segments are collapsed. `..` is rejected outright so a crafted
+    folder or file name can never climb out of the vault prefix.
+    """
+    segments: List[str] = []
+    for segment in path.replace("\\", "/").split("/"):
+        if segment in ("", "."):
+            continue
+        if segment == "..":
+            raise ValueError("object path may not contain '..' segments")
+        segments.append(segment)
+    return "/".join(segments)
+
+
+def encode_object_key(path: str) -> str:
+    """
+    B-10: percent-encode every path segment so `#`, `?`, `%` and spaces cannot
+    truncate the key, start a query string, or collide with another object.
+    """
+    return "/".join(
+        urllib.parse.quote(segment, safe="")
+        for segment in normalize_object_path(path).split("/")
+        if segment
+    )
+
+
 def sign_v4_headers(
     method: str,
     url: str,
@@ -55,7 +85,9 @@ def sign_v4_headers(
     signed_headers_map["x-amz-date"] = amz_date
     signed_headers_map["x-amz-content-sha256"] = payload_hash
 
-    canonical_uri = urllib.parse.quote(parsed.path or "/", safe="/")
+    # `_build_url` already percent-encodes each key segment; treat existing
+    # escapes as literal so SigV4 does not double-encode them (B-10).
+    canonical_uri = urllib.parse.quote(parsed.path or "/", safe="/%")
     
     # Canonical Query String
     if parsed.query:
@@ -144,7 +176,7 @@ class S3StorageAdapter(BaseStorageAdapter):
 
     def _build_url(self, key: str = "", query: str = "") -> str:
         """Constructs path-style or endpoint S3 URL."""
-        clean_key = key.lstrip("/")
+        clean_key = encode_object_key(key.lstrip("/"))
         if self.bucket_name:
             path = f"/{self.bucket_name}"
             if clean_key:
@@ -202,14 +234,18 @@ class S3StorageAdapter(BaseStorageAdapter):
         file_size = local_p.stat().st_size
 
         # Determine target S3 object key
-        safe_filename = Path(filename).name or f"{file_id}.bin"
+        safe_filename = Path(filename.replace("\\", "/")).name
+        if not safe_filename or safe_filename in (".", ".."):
+            safe_filename = f"{file_id}.bin"
         if is_proxy:
-            object_key = f"{self.vault_prefix}/.vayom/proxies/{file_id}/{safe_filename}"
+            raw_key = f"{self.vault_prefix}/.vayom/proxies/{file_id}/{safe_filename}"
         elif folder_name:
             clean_folder = folder_name.strip("/").replace("\\", "/")
-            object_key = f"{self.vault_prefix}/{clean_folder}/{safe_filename}"
+            raw_key = f"{self.vault_prefix}/{clean_folder}/{safe_filename}"
         else:
-            object_key = f"{self.vault_prefix}/{safe_filename}"
+            raw_key = f"{self.vault_prefix}/{safe_filename}"
+        # B-10: keep the logical key canonical; `_build_url` percent-encodes it.
+        object_key = normalize_object_path(raw_key)
 
         if file_size > MULTIPART_THRESHOLD:
             await self._upload_multipart(local_p, object_key, file_size, mime_type, progress_callback)
@@ -238,11 +274,13 @@ class S3StorageAdapter(BaseStorageAdapter):
         """Uploads file in a single PUT request with streaming body."""
         url = self._build_url(object_key)
 
-        def _get_payload_hash() -> str:
+        def _read_payload() -> tuple[str, bytes]:
             with open(local_path, "rb") as f:
-                return hashlib.sha256(f.read()).hexdigest()
+                payload = f.read()
+            return hashlib.sha256(payload).hexdigest(), payload
 
-        payload_hash = await asyncio.to_thread(_get_payload_hash)
+        # B-12: hash and upload the single in-memory copy of the payload.
+        payload_hash, content = await asyncio.to_thread(_read_payload)
         headers = {
             "Content-Type": mime_type or "application/octet-stream",
             "Content-Length": str(file_size),
@@ -250,8 +288,6 @@ class S3StorageAdapter(BaseStorageAdapter):
         signed = self._get_signed_headers("PUT", url, headers, payload_hash=payload_hash)
 
         async with httpx.AsyncClient(timeout=300.0) as client:
-            with open(local_path, "rb") as f:
-                content = f.read()
             resp = await client.put(url, content=content, headers=signed)
             if resp.status_code not in (200, 201):
                 raise RuntimeError(f"S3 PUT upload failed ({resp.status_code}): {resp.text}")
@@ -360,12 +396,20 @@ class S3StorageAdapter(BaseStorageAdapter):
             headers["Range"] = f"bytes={offset}-"
 
         signed = self._get_signed_headers("GET", url, headers, payload_hash="UNSIGNED-PAYLOAD")
+        range_requested = "Range" in headers
 
         async with httpx.AsyncClient(timeout=300.0) as client:
             async with client.stream("GET", url, headers=signed) as response:
                 if response.status_code not in (200, 206):
                     logger.warning(f"S3 stream failed for {storage_uri}: status {response.status_code}")
                     return
+                if range_requested and response.status_code != 206:
+                    # B-14: a 200 here is the whole object from offset 0, not
+                    # the requested range — fail instead of serving wrong bytes.
+                    raise RuntimeError(
+                        f"S3 endpoint ignored Range request for {storage_uri} "
+                        f"(HTTP {response.status_code}); refusing to stream wrong bytes"
+                    )
                 async for chunk in response.aiter_bytes(chunk_size=chunk_size):
                     yield chunk
 
@@ -463,7 +507,9 @@ class S3StorageAdapter(BaseStorageAdapter):
             )
 
             async with httpx.AsyncClient(timeout=60.0) as client:
-                await client.put(url, content=snapshot_bytes, headers=signed)
+                resp = await client.put(url, content=snapshot_bytes, headers=signed)
+                if resp.status_code not in (200, 201):
+                    logger.warning(f"S3 catalog snapshot PUT failed: HTTP {resp.status_code} {resp.text[:200]}")
 
     async def load_catalog_snapshot(self) -> int:
         """Restores S3 catalog snapshot from .vayom/index.json into local SQLite."""

@@ -171,6 +171,7 @@ class EncryptedFileSlice(io.IOBase):
             total_file_size = os.path.getsize(path)
             self.slice_size = slice_size if slice_size is not None else (total_file_size - byte_offset)
             self._name = name or f"{path.stem}.part_{byte_offset // max(1, self.slice_size)}{path.suffix}"
+            self._is_standalone_chunk = total_file_size < (self.byte_offset + self.slice_size)
 
         self._pos = 0
 
@@ -198,7 +199,8 @@ class EncryptedFileSlice(io.IOBase):
         else:
             if self._file is None or self._file.closed:
                 self._file = open(self._source, "rb")
-                self._file.seek(self.byte_offset + self._pos)
+                file_target = self._pos if self._is_standalone_chunk else (self.byte_offset + self._pos)
+                self._file.seek(file_target)
         return self
 
     def close(self):
@@ -237,9 +239,9 @@ class EncryptedFileSlice(io.IOBase):
         else:
             if self._file is None or self._file.closed:
                 self.open()
-            target_abs = self.byte_offset + self._pos
-            if self._file.tell() != target_abs:
-                self._file.seek(target_abs)
+            file_target = self._pos if self._is_standalone_chunk else (self.byte_offset + self._pos)
+            if self._file.tell() != file_target:
+                self._file.seek(file_target)
             plaintext = self._file.read(to_read)
 
         if not plaintext:

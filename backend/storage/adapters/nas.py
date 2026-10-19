@@ -281,9 +281,10 @@ class NASStorageAdapter(BaseStorageAdapter):
         entries = await asyncio.to_thread(_scan_filesystem)
         indexed_count = 0
         mapped_albums = set()
+        errors: List[Dict[str, str]] = []
 
         async with get_db() as db:
-            for full_p, rel_p, rel_dir, filename in entries:
+            for idx, (full_p, rel_p, rel_dir, filename) in enumerate(entries):
                 # Check if already indexed
                 cur = await db.execute(
                     "SELECT file_id FROM file_parts WHERE storage_backend = 'nas' AND storage_uri = ?",
@@ -292,67 +293,83 @@ class NASStorageAdapter(BaseStorageAdapter):
                 if await cur.fetchone():
                     continue
 
-                f_stat = await asyncio.to_thread(os.stat, full_p)
-                f_size = f_stat.st_size
-                f_sha256 = await asyncio.to_thread(calculate_sha256, full_p)
-                mime = mimetypes.guess_type(full_p)[0] or "application/octet-stream"
-                cat = detect_file_category(mime, filename)
-                file_id = f"nas-{uuid.uuid4().hex[:12]}"
+                # I-40: isolate each file in a savepoint so one unreadable or
+                # malformed entry is collected and skipped instead of aborting
+                # the entire scan (or committing a partial row).
+                savepoint = f"nas_sync_{idx}"
+                await db.execute(f"SAVEPOINT {savepoint}")
+                mapped_album = None
+                try:
+                    f_stat = await asyncio.to_thread(os.stat, full_p)
+                    f_size = f_stat.st_size
+                    f_sha256 = await asyncio.to_thread(calculate_sha256, full_p)
+                    mime = mimetypes.guess_type(full_p)[0] or "application/octet-stream"
+                    cat = detect_file_category(mime, filename)
+                    file_id = f"nas-{uuid.uuid4().hex[:12]}"
 
-                # Thumbnail generation
-                thumb_path = settings.THUMBNAIL_DIR / f"{file_id}.webp"
-                has_thumb = False
-                if cat == "image":
-                    has_thumb = await asyncio.to_thread(generate_webp_thumbnail, full_p, thumb_path)
+                    # Thumbnail generation
+                    thumb_path = settings.THUMBNAIL_DIR / f"{file_id}.webp"
+                    has_thumb = False
+                    if cat == "image":
+                        has_thumb = await asyncio.to_thread(generate_webp_thumbnail, full_p, thumb_path)
 
-                # Commit to files
-                await db.execute(
-                    """
-                    INSERT INTO files (
-                        id, filename, mime_type, file_category, size_bytes, sha256,
-                        is_split, total_parts, has_thumbnail, thumbnail_path,
-                        storage_backend, upload_status
-                    ) VALUES (?, ?, ?, ?, ?, ?, 0, 1, ?, ?, 'nas', 'completed')
-                    """,
-                    (
-                        file_id, filename, mime, cat, f_size, f_sha256,
-                        1 if has_thumb else 0, str(thumb_path) if has_thumb else None
-                    )
-                )
-
-                # Commit to file_parts (continuous unsplit file)
-                part_id = str(uuid.uuid4())
-                await db.execute(
-                    """
-                    INSERT INTO file_parts (
-                        id, file_id, part_index, byte_offset, part_size_bytes,
-                        part_sha256, telegram_message_id, storage_backend, storage_uri
-                    ) VALUES (?, ?, 0, 0, ?, ?, 0, 'nas', ?)
-                    """,
-                    (part_id, file_id, f_size, f_sha256, rel_p)
-                )
-
-                # Auto Folder (Album) Mapping
-                if rel_dir and rel_dir != ".":
-                    folder_name = rel_dir.split("/")[0]
-                    mapped_albums.add(folder_name)
-                    # Check/create album
-                    a_cur = await db.execute("SELECT id FROM albums WHERE name = ?", (folder_name,))
-                    a_row = await a_cur.fetchone()
-                    if a_row:
-                        album_id = a_row[0]
-                    else:
-                        album_id = f"alb-{uuid.uuid4().hex[:12]}"
-                        await db.execute(
-                            "INSERT INTO albums (id, name, description) VALUES (?, ?, ?)",
-                            (album_id, folder_name, f"NAS Folder: {folder_name}")
-                        )
+                    # Commit to files
                     await db.execute(
-                        "INSERT OR IGNORE INTO file_albums (file_id, album_id) VALUES (?, ?)",
-                        (file_id, album_id)
+                        """
+                        INSERT INTO files (
+                            id, filename, mime_type, file_category, size_bytes, sha256,
+                            is_split, total_parts, has_thumbnail, thumbnail_path,
+                            storage_backend, upload_status
+                        ) VALUES (?, ?, ?, ?, ?, ?, 0, 1, ?, ?, 'nas', 'completed')
+                        """,
+                        (
+                            file_id, filename, mime, cat, f_size, f_sha256,
+                            1 if has_thumb else 0, str(thumb_path) if has_thumb else None
+                        )
                     )
 
-                indexed_count += 1
+                    # Commit to file_parts (continuous unsplit file)
+                    part_id = str(uuid.uuid4())
+                    await db.execute(
+                        """
+                        INSERT INTO file_parts (
+                            id, file_id, part_index, byte_offset, part_size_bytes,
+                            part_sha256, telegram_message_id, storage_backend, storage_uri
+                        ) VALUES (?, ?, 0, 0, ?, ?, 0, 'nas', ?)
+                        """,
+                        (part_id, file_id, f_size, f_sha256, rel_p)
+                    )
+
+                    # Auto Folder (Album) Mapping
+                    if rel_dir and rel_dir != ".":
+                        folder_name = rel_dir.split("/")[0]
+                        mapped_album = folder_name
+                        # Check/create album
+                        a_cur = await db.execute("SELECT id FROM albums WHERE name = ?", (folder_name,))
+                        a_row = await a_cur.fetchone()
+                        if a_row:
+                            album_id = a_row[0]
+                        else:
+                            album_id = f"alb-{uuid.uuid4().hex[:12]}"
+                            await db.execute(
+                                "INSERT INTO albums (id, name, description) VALUES (?, ?, ?)",
+                                (album_id, folder_name, f"NAS Folder: {folder_name}")
+                            )
+                        await db.execute(
+                            "INSERT OR IGNORE INTO file_albums (file_id, album_id) VALUES (?, ?)",
+                            (file_id, album_id)
+                        )
+                except Exception as e:
+                    await db.execute(f"ROLLBACK TO {savepoint}")
+                    await db.execute(f"RELEASE {savepoint}")
+                    logger.warning(f"NAS sync skipped unreadable entry {rel_p}: {e}")
+                    errors.append({"path": rel_p, "error": str(e)})
+                    continue
+                else:
+                    await db.execute(f"RELEASE {savepoint}")
+                    if mapped_album:
+                        mapped_albums.add(mapped_album)
+                    indexed_count += 1
 
             await db.commit()
 
@@ -362,7 +379,9 @@ class NASStorageAdapter(BaseStorageAdapter):
         return {
             "indexed_files": indexed_count,
             "mapped_albums": list(mapped_albums),
-            "total_scanned": len(entries)
+            "total_scanned": len(entries),
+            "errors": errors,
+            "failed_files": len(errors),
         }
 
     async def save_catalog_snapshot(self) -> None:

@@ -124,6 +124,12 @@ async def virtual_stream_file(
         from ..crypto import vault_manager
         key = vault_manager.get_key()
 
+    if encryption == "ctr" and key is None:
+        raise HTTPException(
+            status_code=423,
+            detail="Vault is locked. Decryption key or passphrase required to decrypt this file."
+        )
+
     return StreamingResponse(
         streaming_engine.stream_range(
             parts=parts,

@@ -8,6 +8,16 @@ from typing import Optional, Dict, Any, List
 
 logger = logging.getLogger("vayom.transcoding.encoder")
 
+
+async def _communicate_with_timeout(proc, timeout: float):
+    """Waits for a subprocess, killing it on timeout so it cannot leak."""
+    try:
+        return await asyncio.wait_for(proc.communicate(), timeout=timeout)
+    except asyncio.TimeoutError:
+        proc.kill()
+        await proc.wait()
+        raise
+
 CANDIDATE_ENCODERS = [
     "h264_nvenc",
     "h264_qsv",
@@ -107,7 +117,7 @@ async def probe_stream_metadata(source_path: Path) -> Dict[str, Any]:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE
         )
-        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=15.0)
+        stdout, _ = await _communicate_with_timeout(proc, 15.0)
         if proc.returncode != 0 or not stdout:
             return meta
 
