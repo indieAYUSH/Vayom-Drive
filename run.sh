@@ -3,6 +3,9 @@ set -e
 
 echo "🌌 Starting Vayom Drive..."
 
+# Protect WebKitGTK / Mesa Gallium on Linux Wayland/AMD
+export WEBKIT_DISABLE_DMABUF_RENDERER=1
+
 # 1. Setup Backend Environment
 if [ ! -d ".venv" ]; then
     echo "Creating Python virtual environment..."
