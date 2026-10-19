@@ -206,7 +206,8 @@ function processQueue() {
 
   const queuedTasks = state.tasks.filter((t) => t.status === 'queued').slice(0, availableSlots)
   for (const task of queuedTasks) {
-    if (task.total_parts > 1 || task.size_bytes > 100 * 1024 * 1024) {
+    const isTelegram = !task.storage_backend || task.storage_backend === 'telegram'
+    if (isTelegram && (task.total_parts > 1 || task.size_bytes > 100 * 1024 * 1024)) {
       executeChunkedUpload(task.id)
     } else {
       executeRealUpload(task.id)
