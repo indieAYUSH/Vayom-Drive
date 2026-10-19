@@ -2,59 +2,37 @@ import React, { useEffect, useState } from 'react'
 import { FolderUp, Archive, Folder, Loader2, X } from 'lucide-react'
 import { useUploadStore } from '../../store/useUploadStore'
 import { Button } from '../common/Button'
-import JSZip from 'jszip'
 
 async function extractFilesFromDataTransfer(dataTransfer: DataTransfer): Promise<File[]> {
-  const files: File[] = []
+  // CRITICAL: Extract entries/handles SYNCHRONOUSLY before any await!
+  // Per HTML5 Drag and Drop spec, dataTransfer.items is protected/cleared as soon as the synchronous turn ends.
   const items = dataTransfer.items
+  const entries: any[] = []
 
-  // 1. Try Modern File System Access API (getAsFileSystemHandle)
-  if (items && items.length > 0 && typeof (items[0] as any).getAsFileSystemHandle === 'function') {
-    try {
-      async function walkHandle(handle: any, currentPath = ''): Promise<void> {
-        if (!handle) return
-        if (handle.kind === 'file') {
-          const file = await handle.getFile()
-          const rel = currentPath ? `${currentPath}/${file.name}` : file.name
-          ;(file as any).customRelativePath = rel
-          try {
-            Object.defineProperty(file, 'webkitRelativePath', { value: rel, configurable: true })
-          } catch {}
-          files.push(file)
-        } else if (handle.kind === 'directory') {
-          const dirPath = currentPath ? `${currentPath}/${handle.name}` : handle.name
-          for await (const entry of handle.values()) {
-            await walkHandle(entry, dirPath)
-          }
-        }
+  if (items && items.length > 0) {
+    for (let i = 0; i < items.length; i++) {
+      const item = items[i]
+      if (typeof item.webkitGetAsEntry === 'function') {
+        const entry = item.webkitGetAsEntry()
+        if (entry) entries.push(entry)
+      } else if (typeof (item as any).getAsEntry === 'function') {
+        const entry = (item as any).getAsEntry()
+        if (entry) entries.push(entry)
       }
-
-      const promises: Promise<void>[] = []
-      for (let i = 0; i < items.length; i++) {
-        const item = items[i]
-        if (item.kind === 'file') {
-          const handle = await (item as any).getAsFileSystemHandle()
-          if (handle) {
-            promises.push(walkHandle(handle, handle.kind === 'directory' ? handle.name : ''))
-          }
-        }
-      }
-      await Promise.all(promises)
-      if (files.length > 0) return files
-    } catch (e) {
-      console.warn('FileSystemHandle traversal failed, falling back to webkitGetAsEntry:', e)
     }
   }
 
-  // 2. Fallback to WebKit / Blink / Gecko Entry API (webkitGetAsEntry)
-  if (items && items.length > 0) {
-    const traverseEntry = async (entry: any, path = ''): Promise<void> => {
+  // 1. Traverse WebKit / Blink / Gecko entries (universal across Chrome, Safari, Firefox, Edge, WebKitGTK/Tauri)
+  if (entries.length > 0) {
+    const files: File[] = []
+
+    const traverseEntry = async (entry: any, currentPath = ''): Promise<void> => {
       if (!entry) return
       if (entry.isFile) {
         return new Promise<void>((resolve) => {
           entry.file(
             (file: File) => {
-              const relativePath = path ? `${path}/${file.name}` : file.name
+              const relativePath = currentPath ? `${currentPath}/${file.name}` : file.name
               ;(file as any).customRelativePath = relativePath
               try {
                 Object.defineProperty(file, 'webkitRelativePath', {
@@ -73,7 +51,12 @@ async function extractFilesFromDataTransfer(dataTransfer: DataTransfer): Promise
         const readAllEntries = async (): Promise<any[]> => {
           const all: any[] = []
           while (true) {
-            const batch: any[] = await new Promise((res) => dirReader.readEntries(res, () => res([])))
+            const batch: any[] = await new Promise((res) => {
+              dirReader.readEntries(
+                (results: any[]) => res(results || []),
+                () => res([])
+              )
+            })
             if (!batch || batch.length === 0) break
             all.push(...batch)
           }
@@ -81,27 +64,67 @@ async function extractFilesFromDataTransfer(dataTransfer: DataTransfer): Promise
         }
 
         const children = await readAllEntries()
-        const newPath = path ? `${path}/${entry.name}` : entry.name
+        const dirPath = currentPath ? `${currentPath}/${entry.name}` : entry.name
         for (const child of children) {
-          await traverseEntry(child, newPath)
+          await traverseEntry(child, dirPath)
         }
       }
     }
 
     const promises: Promise<void>[] = []
-    for (let i = 0; i < items.length; i++) {
-      const item = items[i]
-      const entry = typeof item.webkitGetAsEntry === 'function' 
-        ? item.webkitGetAsEntry() 
-        : typeof (item as any).getAsEntry === 'function' 
-        ? (item as any).getAsEntry() 
-        : null
-      if (entry) {
-        promises.push(traverseEntry(entry))
-      }
+    for (const entry of entries) {
+      promises.push(traverseEntry(entry))
     }
     await Promise.all(promises)
     if (files.length > 0) return files
+  }
+
+  // 2. Fallback to FileSystemHandle Access API if available
+  if (items && items.length > 0 && typeof (items[0] as any).getAsFileSystemHandle === 'function') {
+    try {
+      const handlePromises: Promise<any>[] = []
+      for (let i = 0; i < items.length; i++) {
+        if (items[i].kind === 'file') {
+          handlePromises.push((items[i] as any).getAsFileSystemHandle().catch(() => null))
+        }
+      }
+      const handles = await Promise.all(handlePromises)
+      const files: File[] = []
+
+      async function walkHandle(handle: any, currentPath = ''): Promise<void> {
+        if (!handle) return
+        if (handle.kind === 'file') {
+          const file = await handle.getFile()
+          const rel = currentPath ? `${currentPath}/${file.name}` : file.name
+          ;(file as any).customRelativePath = rel
+          try {
+            Object.defineProperty(file, 'webkitRelativePath', { value: rel, configurable: true })
+          } catch {}
+          files.push(file)
+        } else if (handle.kind === 'directory') {
+          for await (const entry of handle.values()) {
+            await walkHandle(entry, currentPath ? `${currentPath}/${entry.name}` : entry.name)
+          }
+        }
+      }
+
+      const walkPromises: Promise<void>[] = []
+      for (const h of handles) {
+        if (h) {
+          if (h.kind === 'directory') {
+            for await (const child of h.values()) {
+              walkPromises.push(walkHandle(child, h.name))
+            }
+          } else {
+            walkPromises.push(walkHandle(h, ''))
+          }
+        }
+      }
+      await Promise.all(walkPromises)
+      if (files.length > 0) return files
+    } catch (e) {
+      console.warn('FileSystemHandle traversal failed:', e)
+    }
   }
 
   // 3. Fallback to standard dataTransfer.files
@@ -115,13 +138,16 @@ async function extractFilesFromDataTransfer(dataTransfer: DataTransfer): Promise
 }
 
 export const DropZoneOverlay: React.FC = () => {
-  const { addFilesToUpload } = useUploadStore()
+  const {
+    folderPrompt,
+    setFolderPrompt,
+    uploadFolderAsAlbum,
+    compressFolderToZipAndUpload,
+    addFilesToUpload,
+  } = useUploadStore()
+
   const [isDragging, setIsDragging] = useState(false)
-  const [folderPrompt, setFolderPrompt] = useState<{
-    folderName: string
-    files: File[]
-  } | null>(null)
-  const [isZipping, setIsZipping] = useState(false)
+  const [isProcessing, setIsProcessing] = useState(false)
 
   useEffect(() => {
     let dragCounter = 0
@@ -233,47 +259,25 @@ export const DropZoneOverlay: React.FC = () => {
       window.removeEventListener('dragover', handleDragOver)
       window.removeEventListener('drop', handleDrop)
     }
-  }, [addFilesToUpload])
+  }, [addFilesToUpload, setFolderPrompt])
 
-  const handleUploadAsFolder = () => {
-    if (!folderPrompt) return
-    addFilesToUpload(folderPrompt.files)
-    setFolderPrompt(null)
+  const handleUploadAsFolder = async () => {
+    if (!folderPrompt || isProcessing) return
+    setIsProcessing(true)
+    try {
+      await uploadFolderAsAlbum(folderPrompt.folderName, folderPrompt.files)
+    } finally {
+      setIsProcessing(false)
+    }
   }
 
-  const handleCompressToZipAndUpload = async () => {
-    if (!folderPrompt) return
-    setIsZipping(true)
+  const handleCompressToZip = async () => {
+    if (!folderPrompt || isProcessing) return
+    setIsProcessing(true)
     try {
-      const zip = new JSZip()
-      for (const file of folderPrompt.files) {
-        const rel = (file as any).customRelativePath || file.webkitRelativePath || file.name
-        // Store path inside zip relative to root folder
-        const parts = rel.split('/')
-        const internalPath = parts.length > 1 ? parts.slice(1).join('/') : file.name
-        zip.file(internalPath, file)
-      }
-
-      const zipBlob = await zip.generateAsync({
-        type: 'blob',
-        compression: 'DEFLATE',
-        compressionOptions: { level: 6 },
-      })
-
-      const zipFile = new File([zipBlob], `${folderPrompt.folderName}.zip`, {
-        type: 'application/zip',
-        lastModified: Date.now(),
-      })
-
-      addFilesToUpload([zipFile])
-      setFolderPrompt(null)
-    } catch (err) {
-      console.error('Failed to create zip file:', err)
-      alert('Failed to compress folder into zip. Falling back to folder upload.')
-      addFilesToUpload(folderPrompt.files)
-      setFolderPrompt(null)
+      await compressFolderToZipAndUpload(folderPrompt.folderName, folderPrompt.files)
     } finally {
-      setIsZipping(false)
+      setIsProcessing(false)
     }
   }
 
@@ -310,7 +314,7 @@ export const DropZoneOverlay: React.FC = () => {
                 <Folder size={18} className="text-[#ffffff]" />
                 <span className="font-semibold text-sm">Folder Detected</span>
               </div>
-              {!isZipping && (
+              {!isProcessing && (
                 <button
                   onClick={() => setFolderPrompt(null)}
                   className="text-[#666666] hover:text-[#ffffff] transition-colors"
@@ -322,7 +326,7 @@ export const DropZoneOverlay: React.FC = () => {
 
             <div className="flex flex-col gap-1">
               <p className="text-xs text-[#d4d4d4]">
-                You dropped folder <span className="text-[#ffffff] font-semibold font-mono">"{folderPrompt.folderName}"</span> containing{' '}
+                You selected folder <span className="text-[#ffffff] font-semibold font-mono">"{folderPrompt.folderName}"</span> containing{' '}
                 <span className="text-[#ffffff] font-semibold font-mono">{folderPrompt.files.length}</span> files.
               </p>
               <p className="text-[11px] text-[#888888]">
@@ -333,12 +337,12 @@ export const DropZoneOverlay: React.FC = () => {
             <div className="flex flex-col gap-2.5 pt-2">
               <button
                 onClick={handleUploadAsFolder}
-                disabled={isZipping}
-                className="w-full flex items-center justify-between px-4 py-3 bg-[#141414] border border-[#282828] hover:border-[#ffffff] text-left transition-colors group"
+                disabled={isProcessing}
+                className="w-full flex items-center justify-between px-4 py-3 bg-[#141414] border border-[#282828] hover:border-[#ffffff] text-left transition-colors group disabled:opacity-50"
               >
                 <div className="flex items-center gap-3">
                   <div className="w-8 h-8 rounded bg-[#1c1c1c] border border-[#333333] flex items-center justify-center text-[#ffffff]">
-                    <Folder size={16} />
+                    {isProcessing ? <Loader2 size={16} className="animate-spin text-[#ffffff]" /> : <Folder size={16} />}
                   </div>
                   <div>
                     <div className="text-xs font-semibold text-[#f0f0f0] group-hover:text-[#ffffff]">
@@ -353,17 +357,17 @@ export const DropZoneOverlay: React.FC = () => {
               </button>
 
               <button
-                onClick={handleCompressToZipAndUpload}
-                disabled={isZipping}
-                className="w-full flex items-center justify-between px-4 py-3 bg-[#141414] border border-[#282828] hover:border-[#ffffff] text-left transition-colors group"
+                onClick={handleCompressToZip}
+                disabled={isProcessing}
+                className="w-full flex items-center justify-between px-4 py-3 bg-[#141414] border border-[#282828] hover:border-[#ffffff] text-left transition-colors group disabled:opacity-50"
               >
                 <div className="flex items-center gap-3">
                   <div className="w-8 h-8 rounded bg-[#1c1c1c] border border-[#333333] flex items-center justify-center text-[#ffffff]">
-                    {isZipping ? <Loader2 size={16} className="animate-spin text-[#ffffff]" /> : <Archive size={16} />}
+                    {isProcessing ? <Loader2 size={16} className="animate-spin text-[#ffffff]" /> : <Archive size={16} />}
                   </div>
                   <div>
                     <div className="text-xs font-semibold text-[#f0f0f0] group-hover:text-[#ffffff]">
-                      {isZipping ? 'Compressing to .ZIP...' : 'Compress to .ZIP Archive'}
+                      {isProcessing ? 'Compressing to .ZIP...' : 'Compress to .ZIP Archive'}
                     </div>
                     <div className="text-[10px] text-[#777777]">
                       Packages all files into a single "{folderPrompt.folderName}.zip"
@@ -379,7 +383,7 @@ export const DropZoneOverlay: React.FC = () => {
                 variant="ghost"
                 size="sm"
                 onClick={() => setFolderPrompt(null)}
-                disabled={isZipping}
+                disabled={isProcessing}
               >
                 Cancel
               </Button>

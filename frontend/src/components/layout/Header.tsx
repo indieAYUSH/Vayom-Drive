@@ -8,7 +8,7 @@ import { formatBytes } from '../../utils/format'
 
 export const Header: React.FC = () => {
   const { metrics, setCommandBarOpen, setActiveTab, activeTab, primaryMode, setPrimaryMode, license } = useVaultStore()
-  const { addFilesToUpload, selectedBackend, setSelectedBackend } = useUploadStore()
+  const { addFilesToUpload, selectedBackend, setSelectedBackend, setFolderPrompt } = useUploadStore()
   const { user } = useAuthStore()
   const fileInputRef = useRef<HTMLInputElement>(null)
   const folderInputRef = useRef<HTMLInputElement>(null)
@@ -16,6 +16,33 @@ export const Header: React.FC = () => {
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files.length > 0) {
       addFilesToUpload(e.target.files)
+      e.target.value = ''
+    }
+  }
+
+  const handleFolderChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (e.target.files && e.target.files.length > 0) {
+      const files = Array.from(e.target.files)
+      const rootFolders = Array.from(
+        new Set(
+          files
+            .map((f) => {
+              const rel = (f as any).customRelativePath || f.webkitRelativePath || ''
+              const parts = rel.split('/')
+              return parts.length > 1 ? parts[0] : null
+            })
+            .filter(Boolean)
+        )
+      ) as string[]
+
+      if (rootFolders.length === 1) {
+        setFolderPrompt({
+          folderName: rootFolders[0],
+          files,
+        })
+      } else {
+        addFilesToUpload(files)
+      }
       e.target.value = ''
     }
   }
@@ -33,7 +60,7 @@ export const Header: React.FC = () => {
       <input
         type="file"
         ref={folderInputRef}
-        onChange={handleFileChange}
+        onChange={handleFolderChange}
         // @ts-ignore
         webkitdirectory=""
         directory=""

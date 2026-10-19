@@ -1,5 +1,6 @@
 import { FileItem, AlbumItem, StorageMetrics, WatchFolder, WatchFolderEvent, LicenseStatus } from '../types/vault'
 import { useAuthStore } from '../store/useAuthStore'
+import { translateErrorMessage } from '../utils/errorTranslation'
 
 export { getBackendOrigin, BACKEND_ORIGIN, API_BASE, apiUrl, resolveMediaUrl } from '../utils/apiUrl'
 import { API_BASE } from '../utils/apiUrl'
@@ -13,27 +14,27 @@ async function authFetch(input: RequestInfo | URL, init?: RequestInit): Promise<
   return res
 }
 
-// H-23: Surface the backend error `detail` (FloodWait, validation, path-security, ...)
-// instead of a generic statusText, so actionable messages reach the user.
+// Surface creator-friendly, non-technical prompts without exposing paths or exploitable internals
 function extractErrorMessage(body: string | null | undefined, fallback: string): string {
-  if (!body) return fallback
+  if (!body) return translateErrorMessage(fallback)
   try {
     const data = JSON.parse(body)
     const detail = data?.detail ?? data?.message
-    if (typeof detail === 'string' && detail) return detail
+    if (typeof detail === 'string' && detail) return translateErrorMessage(detail)
     if (Array.isArray(detail)) {
       // FastAPI validation errors: [{loc, msg, type}, ...]
       const msgs = detail
         .map((d: any) => (typeof d === 'string' ? d : d?.msg))
         .filter(Boolean)
-      if (msgs.length > 0) return msgs.join('; ')
+      if (msgs.length > 0) return translateErrorMessage(msgs.join('; '))
     } else if (detail && typeof detail === 'object') {
-      return JSON.stringify(detail)
+      const msg = detail?.message || detail?.detail || detail?.error || fallback
+      return translateErrorMessage(typeof msg === 'string' ? msg : fallback)
     }
-    return fallback
+    return translateErrorMessage(fallback)
   } catch {
-    // Non-JSON body (e.g. HTML error page): return a bounded snippet
-    return body.slice(0, 200)
+    // Non-JSON body (e.g. HTML error page): return a bounded snippet passed through translation
+    return translateErrorMessage(body.slice(0, 200))
   }
 }
 
@@ -162,6 +163,7 @@ export const api = {
     total_parts?: number
     nonce?: string
     encryption?: string
+    album_id?: string | null
   }): Promise<{
     file_id: string
     filename: string
@@ -177,6 +179,7 @@ export const api = {
     if (params.total_parts) form.append('total_parts', String(params.total_parts))
     if (params.nonce) form.append('nonce', params.nonce)
     if (params.encryption) form.append('encryption', params.encryption)
+    if (params.album_id) form.append('album_id', params.album_id)
 
     const res = await authFetch(`${API_BASE}/upload/init`, {
       method: 'POST',

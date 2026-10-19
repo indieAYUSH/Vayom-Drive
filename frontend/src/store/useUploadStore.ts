@@ -8,11 +8,15 @@ interface UploadState {
   tasks: UploadTask[]
   isTrayOpen: boolean
   floodWaitSecondsRemaining: number
+  folderPrompt: { folderName: string; files: File[] } | null
 
   selectedBackend: 'telegram' | 'nas' | 's3' | 'nextcloud'
   setSelectedBackend: (backend: 'telegram' | 'nas' | 's3' | 'nextcloud') => void
   setTrayOpen: (open: boolean) => void
-  addFilesToUpload: (files: FileList | File[]) => void
+  setFolderPrompt: (prompt: { folderName: string; files: File[] } | null) => void
+  addFilesToUpload: (files: FileList | File[], targetAlbumId?: string | null) => void
+  uploadFolderAsAlbum: (folderName: string, files: File[]) => Promise<void>
+  compressFolderToZipAndUpload: (folderName: string, files: File[]) => Promise<void>
   pauseTask: (id: string) => void
   resumeTask: (id: string) => void
   retryTask: (id: string) => void
@@ -39,8 +43,9 @@ let floodWaitTickerId: any = null
 // completions from the same directory drop cannot create duplicate albums
 const albumCreatePromises = new Map<string, Promise<AlbumItem>>()
 
-function findOrCreateAlbum(folderName: string): Promise<AlbumItem> {
-  const key = folderName.toLowerCase()
+export function findOrCreateAlbum(folderName: string): Promise<AlbumItem> {
+  const cleanName = folderName.trim()
+  const key = cleanName.toLowerCase()
   const existing = useVaultStore.getState().albums.find((a) => a.name.toLowerCase() === key)
   if (existing) {
     albumCreatePromises.delete(key)
@@ -48,7 +53,7 @@ function findOrCreateAlbum(folderName: string): Promise<AlbumItem> {
   }
   let promise = albumCreatePromises.get(key)
   if (!promise) {
-    promise = api.createAlbum(folderName).then((newAlbum) => {
+    promise = api.createAlbum(cleanName).then((newAlbum) => {
       useVaultStore.getState().fetchAlbums()
       return newAlbum
     })
@@ -61,10 +66,12 @@ function findOrCreateAlbum(folderName: string): Promise<AlbumItem> {
 // H-55: associate a completed upload with the album captured at enqueue time,
 // falling back to the dropped folder's top-level name. Shared by both the
 // single-part and chunked completion paths so they can't diverge.
-function associateUploadedFile(fileId: string, task: UploadTask) {
+async function associateUploadedFile(fileId: string, task: UploadTask) {
   const albumId = task.target_album_id
   if (albumId) {
-    api.addFileToAlbum(albumId, fileId).catch(() => {})
+    try {
+      await api.addFileToAlbum(albumId, fileId)
+    } catch {}
     return
   }
   const rel = ((task.file as any).customRelativePath || (task.file as any).webkitRelativePath) as string | undefined
@@ -72,9 +79,11 @@ function associateUploadedFile(fileId: string, task: UploadTask) {
   const parts = rel.split('/')
   if (parts.length <= 1) return
   // H-16: concurrent completions from one directory drop share a single create
-  findOrCreateAlbum(parts[0])
-    .then((album) => api.addFileToAlbum(album.id, fileId).catch(() => {}))
-    .catch(() => {})
+  try {
+    const album = await findOrCreateAlbum(parts[0])
+    await api.addFileToAlbum(album.id, fileId)
+    useVaultStore.getState().fetchAlbums()
+  } catch {}
 }
 
 function updateFloodWaitTicker() {
@@ -219,18 +228,64 @@ export const useUploadStore = create<UploadState>((set, get) => ({
   tasks: [],
   isTrayOpen: true,
   floodWaitSecondsRemaining: 0,
+  folderPrompt: null,
   selectedBackend: 'telegram',
 
   setSelectedBackend: (backend) => set({ selectedBackend: backend }),
   setTrayOpen: (open) => set({ isTrayOpen: open }),
+  setFolderPrompt: (prompt) => set({ folderPrompt: prompt }),
 
-  addFilesToUpload: (fileInput) => {
+  uploadFolderAsAlbum: async (folderName: string, files: File[]) => {
+    try {
+      const album = await findOrCreateAlbum(folderName)
+      get().addFilesToUpload(files, album.id)
+      set({ folderPrompt: null })
+      useVaultStore.getState().fetchAlbums()
+    } catch (e) {
+      console.error('Failed to create album for folder upload:', e)
+      get().addFilesToUpload(files)
+      set({ folderPrompt: null })
+    }
+  },
+
+  compressFolderToZipAndUpload: async (folderName: string, files: File[]) => {
+    try {
+      const JSZipModule = (await import('jszip')).default
+      const zip = new JSZipModule()
+      for (const file of files) {
+        const rel = (file as any).customRelativePath || file.webkitRelativePath || file.name
+        const parts = rel.split('/')
+        const internalPath = parts.length > 1 ? parts.slice(1).join('/') : file.name
+        zip.file(internalPath, file)
+      }
+
+      const zipBlob = await zip.generateAsync({
+        type: 'blob',
+        compression: 'DEFLATE',
+        compressionOptions: { level: 6 },
+      })
+
+      const zipFile = new File([zipBlob], `${folderName}.zip`, {
+        type: 'application/zip',
+        lastModified: Date.now(),
+      })
+
+      get().addFilesToUpload([zipFile])
+      set({ folderPrompt: null })
+    } catch (err) {
+      console.error('Failed to create zip file:', err)
+      get().addFilesToUpload(files)
+      set({ folderPrompt: null })
+    }
+  },
+
+  addFilesToUpload: (fileInput, explicitAlbumId) => {
     const fileArray = Array.from(fileInput)
     if (fileArray.length === 0) return
 
     const currentBackend = get().selectedBackend
-    // H-55: capture the destination album now, not when the upload completes
-    const targetAlbumId = useVaultStore.getState().selectedAlbumId ?? null
+    // Priority: explicitly passed albumId > selectedAlbumId
+    const targetAlbumId = explicitAlbumId !== undefined ? explicitAlbumId : (useVaultStore.getState().selectedAlbumId ?? null)
     const newTasks: UploadTask[] = fileArray.map((file) => {
       const isLarge = file.size > 1887436800
       const totalParts = (isLarge && currentBackend === 'telegram') ? Math.ceil(file.size / 1887436800) : 1
@@ -651,11 +706,17 @@ function executeRealUpload(taskId: string) {
   const formData = new FormData()
   formData.append('file', task.file)
   formData.append('task_id', taskId)
+  if (task.target_album_id) {
+    formData.append('album_id', task.target_album_id)
+  }
 
   xhr.open('POST', `${API_BASE}/upload?task_id=${encodeURIComponent(taskId)}`)
   xhr.setRequestHeader('X-Task-ID', taskId)
   if (task.storage_backend) {
     xhr.setRequestHeader('X-Storage-Backend', task.storage_backend)
+  }
+  if (task.target_album_id) {
+    xhr.setRequestHeader('X-Album-ID', task.target_album_id)
   }
   xhr.send(formData)
 }
@@ -709,6 +770,7 @@ async function executeChunkedUploadInner(taskId: string) {
         total_size: file.size,
         mime_type: file.type || 'application/octet-stream',
         total_parts: totalParts,
+        album_id: task.target_album_id,
       })
       fileId = initRes.file_id
       updateTask({ server_file_id: fileId, total_parts: totalParts })
