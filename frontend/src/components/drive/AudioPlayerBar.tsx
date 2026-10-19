@@ -26,7 +26,7 @@ export const AudioPlayerBar: React.FC = () => {
     const audio = audioRef.current
     if (!audio) return
 
-    audio.src = resolveMediaUrl(activeAudioItem.preview_url || `/api/v1/files/${activeAudioItem.id}/download`)
+    audio.src = resolveMediaUrl(activeAudioItem.preview_url || `/api/v1/files/${activeAudioItem.id}/view`)
     audio.load()
     audio.play().then(() => setIsPlaying(true)).catch(() => setIsPlaying(false))
 
@@ -87,7 +87,7 @@ export const AudioPlayerBar: React.FC = () => {
 
   const handleDownload = () => {
     const a = document.createElement('a')
-    a.href = resolveMediaUrl(activeAudioItem.preview_url || `/api/v1/files/${activeAudioItem.id}/download`)
+    a.href = resolveMediaUrl(`/api/v1/files/${activeAudioItem.id}/download`)
     a.download = activeAudioItem.filename
     a.click()
   }

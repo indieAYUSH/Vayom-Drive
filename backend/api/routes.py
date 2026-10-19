@@ -2053,6 +2053,14 @@ async def download_file(
             (file_id,)
         )
         parts = [dict(p) for p in await p_cursor.fetchall()]
+        if not parts:
+            raise HTTPException(status_code=404, detail="File content parts not found")
+
+        if file_item.get("upload_status") == "interrupted":
+            raise HTTPException(
+                status_code=409,
+                detail="File upload was interrupted. Resume the upload before downloading."
+            )
 
     total_size = file_item["size_bytes"]
     filename = file_item["filename"]
