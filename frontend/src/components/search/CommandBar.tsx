@@ -132,7 +132,7 @@ export const CommandBar: React.FC = () => {
       />
 
       {/* Sharp modal box */}
-      <div className="relative w-full max-w-2xl bg-[#111111] border border-[#333333] select-none font-mono text-xs z-10 flex flex-col">
+      <div className="relative w-full max-w-2xl bg-[#111111] border border-[#333333] select-none text-xs z-10 flex flex-col">
         {/* Search Input Bar */}
         <div className="flex items-center px-4 py-3 border-b border-[#282828] bg-[#0c0c0c] gap-3">
           <Search size={16} className="text-[#888888]" />
@@ -144,8 +144,8 @@ export const CommandBar: React.FC = () => {
               setSelectedIndex(0)
             }}
             onKeyDown={handleKeyDown}
-            placeholder="Type search query (e.g. 'dog in snow', '4k drone', 'camera:Sony', 'size:>1gb')..."
-            className="w-full bg-transparent text-[#f0f0f0] placeholder:text-[#555555] focus:outline-none text-xs"
+            placeholder="Search by filename, camera, lens, tags (e.g. 'drone', '4k', 'Sony')..."
+            className="w-full bg-transparent text-[#f0f0f0] placeholder:text-[#666666] focus:outline-none text-xs"
           />
           {isSearchingServer && <Loader2 size={13} className="text-[#888888] animate-spin flex-shrink-0" />}
           <button
@@ -157,8 +157,8 @@ export const CommandBar: React.FC = () => {
         </div>
 
         {/* Quick Filter Tag Suggestions */}
-        <div className="px-4 py-2 bg-[#080808] border-b border-[#1f1f1f] flex items-center gap-2 flex-wrap text-[10px] text-[#777777]">
-          <span>Quick:</span>
+        <div className="px-4 py-2 bg-[#080808] border-b border-[#1f1f1f] flex items-center gap-2 flex-wrap text-xs text-[#888888]">
+          <span className="font-medium text-[#777777]">Quick:</span>
           {['dog', 'aurora', 'drone', '4k', 'backup', 'large'].map((filter) => (
             <button
               key={filter}
@@ -166,7 +166,7 @@ export const CommandBar: React.FC = () => {
                 setQuery(filter)
                 inputRef.current?.focus()
               }}
-              className="px-2 py-0.5 bg-[#141414] border border-[#282828] hover:border-[#ffffff] hover:text-[#ffffff] transition-colors"
+              className="px-2 py-0.5 bg-[#141414] border border-[#282828] hover:border-[#ffffff] hover:text-[#ffffff] transition-colors font-medium text-xs text-[#cccccc]"
             >
               #{filter}
             </button>
@@ -176,7 +176,7 @@ export const CommandBar: React.FC = () => {
         {/* Search Result Rows */}
         <div className="max-h-80 overflow-y-auto divide-y divide-[#1a1a1a]">
           {filteredItems.length === 0 ? (
-            <div className="p-8 text-center text-[#555555]">
+            <div className="p-8 text-center text-[#666666] text-xs">
               No files matching "{query}"
             </div>
           ) : (
@@ -210,15 +210,15 @@ export const CommandBar: React.FC = () => {
                   )}
 
                   <div className="truncate min-w-0 flex-1">
-                    <div className="font-medium truncate text-xs">{item.filename}</div>
-                    <div className="text-[10px] text-[#777777] flex items-center gap-2 mt-0.5">
-                      <span>{formatBytes(item.size_bytes)}</span>
+                    <div className="font-medium truncate text-xs text-[#f0f0f0]">{item.filename}</div>
+                    <div className="text-xs text-[#888888] flex items-center gap-2 mt-0.5">
+                      <span className="font-mono text-[11px] text-[#888888]">{formatBytes(item.size_bytes)}</span>
                       <span>•</span>
-                      <span>{item.file_category}</span>
+                      <span className="capitalize">{item.file_category}</span>
                       {item.tags.length > 0 && (
                         <>
                           <span>•</span>
-                          <span className="truncate">#{item.tags.slice(0, 2).join(' #')}</span>
+                          <span className="truncate text-[#777777]">#{item.tags.slice(0, 2).join(' #')}</span>
                         </>
                       )}
                     </div>
@@ -226,8 +226,8 @@ export const CommandBar: React.FC = () => {
                 </div>
 
                 <div className="flex items-center gap-1.5 sm:gap-2 flex-shrink-0">
-                  {item.is_split && <Badge variant="warning">{item.total_parts} Parts</Badge>}
-                  <ArrowRight size={14} className="text-[#555555]" />
+                  {item.is_split && <Badge variant="warning" className="font-mono text-[10px]">{item.total_parts} Parts</Badge>}
+                  <ArrowRight size={14} className="text-[#666666]" />
                 </div>
               </div>
             ))
@@ -235,8 +235,14 @@ export const CommandBar: React.FC = () => {
         </div>
 
         {/* Footer shortcuts */}
-        <div className="px-4 py-2 bg-[#0a0a0a] border-t border-[#222222] flex items-center justify-between text-[10px] text-[#555555]">
-          <div>Navigate: ↑ / ↓ • Select: Enter</div>
+        <div className="px-4 py-2 bg-[#0a0a0a] border-t border-[#222222] flex items-center justify-between text-xs text-[#888888]">
+          <div className="flex items-center gap-2">
+            <span>Navigate:</span>
+            <span className="font-mono text-[11px] px-1 bg-[#161616] border border-[#282828] text-[#cccccc]">↑</span>
+            <span className="font-mono text-[11px] px-1 bg-[#161616] border border-[#282828] text-[#cccccc]">↓</span>
+            <span>• Select:</span>
+            <span className="font-mono text-[11px] px-1 bg-[#161616] border border-[#282828] text-[#cccccc]">Enter</span>
+          </div>
           <div>ESC to close</div>
         </div>
       </div>

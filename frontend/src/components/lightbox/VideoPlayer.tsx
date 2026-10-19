@@ -2,6 +2,7 @@ import React, { useRef, useState, useEffect, useCallback } from 'react'
 import { Play, Pause, Volume2, VolumeX, Maximize, AlertTriangle, RefreshCw, ExternalLink, Download, SlidersHorizontal, Check, Loader2 } from 'lucide-react'
 import type { FileItem } from '../../types/vault'
 import { api } from '../../services/api'
+import { resolveMediaUrl } from '../../utils/apiUrl'
 
 interface VideoPlayerProps {
   item?: FileItem
@@ -20,8 +21,8 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({ item, src, poster, fil
 
   // Stream mode: 'original' vs 'proxy'
   const hasProxy = (dynamicProxyStatus === 'ready' || item?.proxy_status === 'ready') && !!(dynamicProxyUrl || item?.proxy_url)
-  const originalUrl = item?.preview_url || src
-  const proxyUrl = dynamicProxyUrl || item?.proxy_url || ''
+  const originalUrl = resolveMediaUrl(item?.preview_url || src)
+  const proxyUrl = resolveMediaUrl(dynamicProxyUrl || item?.proxy_url || '')
   const isOptimizing = !hasProxy && (
     dynamicProxyStatus === 'uploading' ||
     dynamicProxyStatus === 'encoding' ||
@@ -68,6 +69,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({ item, src, poster, fil
   const healthyBufferSecondsRef = useRef(0)
   const stallCountRef = useRef(0)
   const lastSwitchTimeRef = useRef(0)
+  const dragHandlersRef = useRef<{ move: (e: MouseEvent) => void; up: (e: MouseEvent) => void } | null>(null)
 
   // Initial stream selection: default to stream-optimized proxy (zero buffering) when available
   useEffect(() => {
@@ -78,6 +80,12 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({ item, src, poster, fil
     }
 
     if (!forceOriginal) {
+      // H-51: preserve playback position/state when auto-switching to the proxy
+      if (currentSrc !== proxyUrl) {
+        const video = videoRef.current
+        seekOnLoadRef.current = video ? video.currentTime : 0
+        wasPlayingBeforeSwitchRef.current = isPlaying
+      }
       setActiveStream('proxy')
       setCurrentSrc(proxyUrl)
     } else {
@@ -142,6 +150,13 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({ item, src, poster, fil
     }
   }, [activeStream, hasProxy, forceOriginal, originalUrl, proxyUrl, currentTime, isPlaying, showToast])
 
+  // H-38: latest values for the media effect's event handlers — read at call time so the
+  // effect below only re-runs when the actual media source changes (not on every timeupdate).
+  const mediaLiveRef = useRef({ activeStream, hasProxy, forceOriginal, isOptimizing, switchStream })
+  useEffect(() => {
+    mediaLiveRef.current = { activeStream, hasProxy, forceOriginal, isOptimizing, switchStream }
+  })
+
   const toggleForceOriginal = () => {
     if (!forceOriginal) {
       setForceOriginal(true)
@@ -182,14 +197,15 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({ item, src, poster, fil
         setBufferedEnd(finalBufferedEnd)
 
         // Adaptive upgrade check: upgrade on pause, seek, or sustained healthy buffer (>20s for >30s)
-        if (activeStream === 'proxy' && !forceOriginal && hasProxy) {
+        const live = mediaLiveRef.current
+        if (live.activeStream === 'proxy' && !live.forceOriginal && live.hasProxy) {
           const bufferAhead = finalBufferedEnd - video.currentTime
           const isEligibleMoment = video.paused || isScrubbingRef.current || bufferAhead > 25.0
           if (bufferAhead > 15.0 && isEligibleMoment) {
             healthyBufferSecondsRef.current += 1
             if (healthyBufferSecondsRef.current >= 15) {
               healthyBufferSecondsRef.current = 0
-              switchStream('original', 'connection recovered')
+              live.switchStream('original', 'connection recovered')
             }
           } else {
             healthyBufferSecondsRef.current = 0
@@ -225,13 +241,14 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({ item, src, poster, fil
     const handleWaiting = () => {
       setIsLoading(true)
       // Adaptive downgrade check: if playing original and stalled with low buffer, switch to proxy
-      if (activeStream === 'original' && hasProxy && !forceOriginal) {
+      const live = mediaLiveRef.current
+      if (live.activeStream === 'original' && live.hasProxy && !live.forceOriginal) {
         stallCountRef.current += 1
         if (stallCountRef.current >= 1) {
           stallCountRef.current = 0
-          switchStream('proxy', 'slow connection')
+          live.switchStream('proxy', 'slow connection')
         }
-      } else if (activeStream === 'original' && isOptimizing) {
+      } else if (live.activeStream === 'original' && live.isOptimizing) {
         showToast('Buffering uncompressed original from Telegram (preview optimizing...)')
       }
     }
@@ -251,8 +268,9 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({ item, src, poster, fil
       setIsPlaying(false)
 
       // Fallback: If original failed to play (e.g. 4K HEVC unsupported in browser), auto-fallback to stream_v1 proxy!
-      if (activeStream === 'original' && hasProxy && !forceOriginal) {
-        switchStream('proxy', 'browser codec fallback')
+      const live = mediaLiveRef.current
+      if (live.activeStream === 'original' && live.hasProxy && !live.forceOriginal) {
+        live.switchStream('proxy', 'browser codec fallback')
         return
       }
 
@@ -276,12 +294,6 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({ item, src, poster, fil
     video.addEventListener('error', handleVideoError)
 
     return () => {
-      try {
-        video.pause()
-        video.removeAttribute('src')
-        video.load()
-      } catch {}
-
       video.removeEventListener('timeupdate', handleTimeUpdate)
       video.removeEventListener('progress', updateBufferInfo)
       video.removeEventListener('loadedmetadata', handleLoadedMetadata)
@@ -293,7 +305,28 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({ item, src, poster, fil
       if (seekThrottleTimeout.current) clearTimeout(seekThrottleTimeout.current)
       if (toastTimeoutRef.current) clearTimeout(toastTimeoutRef.current)
     }
-  }, [currentSrc, activeStream, hasProxy, forceOriginal, switchStream])
+  }, [currentSrc])
+
+  // H-38/H-53: unmount-only teardown — release the media element (stops background
+  // downloads) and drop any window drag listeners left by an in-progress scrub.
+  useEffect(() => {
+    const video = videoRef.current
+    return () => {
+      const drag = dragHandlersRef.current
+      if (drag) {
+        window.removeEventListener('mousemove', drag.move)
+        window.removeEventListener('mouseup', drag.up)
+        dragHandlersRef.current = null
+      }
+      isScrubbingRef.current = false
+      if (!video) return
+      try {
+        video.pause()
+        video.removeAttribute('src')
+        video.load()
+      } catch {}
+    }
+  }, [])
 
   const togglePlay = () => {
     if (!videoRef.current) return
@@ -352,13 +385,16 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({ item, src, poster, fil
       handleSeekPos(upEvent.clientX, true)
       window.removeEventListener('mousemove', handleMouseMove)
       window.removeEventListener('mouseup', handleMouseUp)
+      dragHandlersRef.current = null
     }
 
+    dragHandlersRef.current = { move: handleMouseMove, up: handleMouseUp }
     window.addEventListener('mousemove', handleMouseMove)
     window.addEventListener('mouseup', handleMouseUp)
   }
 
   const handleTouchStart = (e: React.TouchEvent<HTMLDivElement>) => {
+    e.stopPropagation()
     isScrubbingRef.current = true
     if (e.touches.length > 0) {
       handleSeekPos(e.touches[0].clientX, false)
@@ -366,12 +402,14 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({ item, src, poster, fil
   }
 
   const handleTouchMove = (e: React.TouchEvent<HTMLDivElement>) => {
+    e.stopPropagation()
     if (e.touches.length > 0) {
       handleSeekPos(e.touches[0].clientX, false)
     }
   }
 
   const handleTouchEnd = (e: React.TouchEvent<HTMLDivElement>) => {
+    e.stopPropagation()
     isScrubbingRef.current = false
     if (e.changedTouches.length > 0) {
       handleSeekPos(e.changedTouches[0].clientX, true)
@@ -489,7 +527,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({ item, src, poster, fil
                 <ExternalLink size={12} /> Open in Native Player
               </a>
               <a
-                href={`/api/v1/files/${item?.id || ''}/download`}
+                href={resolveMediaUrl(`/api/v1/files/${item?.id || ''}/download`)}
                 download={filename}
                 className="px-3 py-1.5 bg-[#141414] border border-[#333333] hover:border-[#ffffff] text-xs text-[#ffffff] flex items-center gap-1.5 transition-colors"
               >
@@ -501,7 +539,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({ item, src, poster, fil
       </div>
 
       {/* Control Overlay Bar */}
-      <div className="w-full max-w-4xl bg-[#0c0c0c] border border-[#222222] p-2 mt-2 sm:mt-3 font-mono text-xs flex flex-col gap-2">
+      <div className="w-full max-w-4xl bg-[#0c0c0c] border border-[#222222] p-2 mt-2 sm:mt-3 text-xs flex flex-col gap-2">
         {/* Progress Bar (Range Scrubber) */}
         <div
           ref={progressRef}
@@ -555,7 +593,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({ item, src, poster, fil
               {isMuted ? <VolumeX size={14} /> : <Volume2 size={14} />}
             </button>
 
-            <span className="text-[11px] text-[#888888]">
+            <span className="text-xs font-mono text-[#888888]">
               {formatTime(currentTime)} / {formatTime(duration)}
             </span>
           </div>
@@ -565,22 +603,22 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({ item, src, poster, fil
             {hasProxy && (
               <button
                 onClick={toggleForceOriginal}
-                className={`px-2 py-0.5 border text-[10px] font-mono flex items-center gap-1 transition-colors ${
+                className={`px-2 py-0.5 border text-xs font-mono flex items-center gap-1 transition-colors ${
                   forceOriginal
                     ? 'bg-[#1e3a5f] border-[#3b82f6] text-[#ffffff]'
                     : 'border-[#282828] text-[#888888] hover:text-[#cccccc] hover:border-[#444444]'
                 }`}
                 title={forceOriginal ? "Disable forced original (enable adaptive preview)" : "Force original stream (session only)"}
               >
-                <SlidersHorizontal size={10} />
+                <SlidersHorizontal size={11} />
                 <span>Force original</span>
-                {forceOriginal && <Check size={10} className="text-[#38bdf8]" />}
+                {forceOriginal && <Check size={11} className="text-[#38bdf8]" />}
               </button>
             )}
 
             <button
               onClick={changeRate}
-              className="px-1.5 py-0.5 border border-[#282828] text-[10px] hover:border-[#555555]"
+              className="px-1.5 py-0.5 border border-[#282828] text-xs font-mono hover:border-[#555555] text-[#cccccc]"
               title="Playback Rate"
             >
               {playbackRate}x

@@ -237,5 +237,7 @@ else:
         return {"status": "Vayom Drive Backend Running (Build frontend to serve web app)"}
 
 if __name__ == "__main__":
+    import multiprocessing
     import uvicorn
-    uvicorn.run("backend.main:app", host=settings.HOST, port=settings.PORT, reload=False)
+    multiprocessing.freeze_support()
+    uvicorn.run(app, host=settings.HOST, port=settings.PORT, reload=False)

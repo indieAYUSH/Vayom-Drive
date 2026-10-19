@@ -30,14 +30,14 @@ export const TrashView: React.FC = () => {
   }
 
   return (
-    <div className="flex-1 overflow-y-auto p-6 bg-[#000000] select-none font-mono">
+    <div className="flex-1 overflow-y-auto p-6 bg-[#000000] select-none">
       {/* Top Header */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-6 border-b border-[#282828] mb-6">
         <div>
-          <h1 className="text-base font-bold uppercase tracking-wider text-[#ef4444] flex items-center gap-2">
+          <h1 className="text-sm font-semibold text-[#ef4444] flex items-center gap-2">
             <Trash2 size={16} /> Trash & 30-Day Retention
           </h1>
-          <p className="text-xs text-[#777777] mt-1">
+          <p className="text-xs text-[#888888] mt-1">
             Items remain in trash for 30 days before automated permanent purge.
           </p>
         </div>
@@ -69,8 +69,8 @@ export const TrashView: React.FC = () => {
           <div className="w-12 h-12 border border-[#222222] flex items-center justify-center mb-3 text-[#444444]">
             ✓
           </div>
-          <p className="text-sm uppercase tracking-wider text-[#888888]">Trash is empty</p>
-          <p className="text-xs text-[#444444] mt-1">Deleted items will be staged here for 30 days</p>
+          <p className="text-sm font-medium text-[#cccccc]">Trash is empty</p>
+          <p className="text-xs text-[#888888] mt-1">Deleted items will be staged here for 30 days</p>
         </div>
       ) : (
         <div className="space-y-2">
@@ -95,11 +95,11 @@ export const TrashView: React.FC = () => {
                 )}
 
                 <div className="truncate min-w-0 flex-1">
-                  <div className="font-semibold text-[#cccccc] truncate">{item.filename}</div>
-                  <div className="text-[10px] text-[#666666] flex items-center gap-2 mt-0.5">
-                    <span>{formatBytes(item.size_bytes)}</span>
+                  <div className="font-medium text-xs text-[#f0f0f0] truncate">{item.filename}</div>
+                  <div className="text-xs text-[#888888] flex items-center gap-2 mt-0.5">
+                    <span className="font-mono text-[11px] text-[#888888]">{formatBytes(item.size_bytes)}</span>
                     <span>•</span>
-                    <Badge variant="danger">{formatDaysLeft(item.deleted_at)}</Badge>
+                    <Badge variant="danger" className="font-mono text-[10px]">{formatDaysLeft(item.deleted_at)}</Badge>
                   </div>
                 </div>
               </div>

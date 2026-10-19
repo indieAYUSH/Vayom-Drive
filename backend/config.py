@@ -5,8 +5,12 @@ from pathlib import Path
 from typing import List, Optional
 from dotenv import load_dotenv
 
+import sys
 # Load .env file from project root
-ROOT_DIR = Path(__file__).resolve().parent.parent
+if getattr(sys, "frozen", False):
+    ROOT_DIR = Path(sys.executable).resolve().parent
+else:
+    ROOT_DIR = Path(__file__).resolve().parent.parent
 load_dotenv(ROOT_DIR / ".env")
 
 logger = logging.getLogger("vayom.config")

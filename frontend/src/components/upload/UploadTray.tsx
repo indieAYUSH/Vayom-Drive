@@ -50,7 +50,7 @@ export const UploadTray: React.FC = () => {
       : `Upload complete (${completedTasks.length})`
 
   return (
-    <div className="fixed bottom-16 left-2 right-2 sm:left-auto sm:right-4 sm:bottom-4 sm:w-96 z-40 bg-[#111111] border border-[#333333] select-none font-mono text-xs flex flex-col shadow-none">
+    <div className="fixed bottom-16 left-2 right-2 sm:left-auto sm:right-4 sm:bottom-4 sm:w-96 z-40 bg-[#111111] border border-[#333333] select-none text-xs flex flex-col shadow-none">
       {/* Tray Header Bar */}
       <div 
         onClick={() => setTrayOpen(!isTrayOpen)}
@@ -58,11 +58,11 @@ export const UploadTray: React.FC = () => {
       >
         <div className="flex items-center gap-2 truncate">
           <UploadCloud size={14} className={uploadingTasks.length > 0 ? 'text-[#3b82f6] animate-pulse' : 'text-[#888888]'} />
-          <span className="font-semibold text-xs truncate">
+          <span className="font-medium text-xs truncate">
             {headerLabel}
           </span>
           {totalSpeed > 0 && (
-            <span className="text-[10px] text-[#3b82f6] hidden sm:inline">
+            <span className="text-[11px] font-mono text-[#38bdf8] hidden sm:inline">
               ({formatSpeed(totalSpeed)})
             </span>
           )}

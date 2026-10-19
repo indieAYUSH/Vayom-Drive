@@ -6,8 +6,8 @@ export const MobileNav: React.FC = () => {
   const { activeTab, setActiveTab, setSelectedAlbumId } = useVaultStore()
 
   const navItemClass = (isActive: boolean) => `
-    flex-1 flex flex-col items-center justify-center py-2 text-[10px] font-mono select-none cursor-pointer transition-colors
-    ${isActive ? 'text-[#ffffff] bg-[#141414]' : 'text-[#777777] hover:text-[#cccccc]'}
+    flex-1 flex flex-col items-center justify-center py-2 text-[11px] font-medium select-none cursor-pointer transition-colors
+    ${isActive ? 'text-[#ffffff] bg-[#141414]' : 'text-[#888888] hover:text-[#ffffff]'}
   `
 
   return (

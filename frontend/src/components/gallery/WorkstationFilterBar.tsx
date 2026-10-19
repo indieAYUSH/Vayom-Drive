@@ -70,26 +70,26 @@ export const WorkstationFilterBar: React.FC = () => {
   }
 
   return (
-    <div className="border-b border-[#1f1f1f] bg-[#0c0c0c] px-4 py-1.5 flex items-center gap-2 overflow-x-auto text-[11px] font-mono select-none scrollbar-thin">
-      <div className="flex items-center gap-1.5 text-[#666666] uppercase tracking-wider text-[10px] pr-2 border-r border-[#222222] flex-shrink-0">
-        <Film size={12} className="text-[#888888]" />
+    <div className="border-b border-[#1f1f1f] bg-[#0c0c0c] px-4 py-1.5 flex items-center gap-2 overflow-x-auto text-xs select-none scrollbar-thin">
+      <div className="flex items-center gap-1.5 text-[#888888] font-medium text-xs pr-2 border-r border-[#222222] flex-shrink-0">
+        <Film size={13} className="text-[#888888]" />
         <span>Workstation</span>
       </div>
 
       {/* Camera Filter Chips */}
       {cameras.length > 0 && (
         <div className="flex items-center gap-1 flex-shrink-0">
-          <Camera size={11} className="text-[#555555] mr-0.5" />
+          <Camera size={12} className="text-[#777777] mr-0.5" />
           {cameras.slice(0, 4).map((cam) => {
             const isActive = selectedCamera === cam
             return (
               <button
                 key={cam}
                 onClick={() => setSelectedCamera(isActive ? null : cam)}
-                className={`px-2 py-0.5 rounded-none border transition-colors flex items-center gap-1 ${
+                className={`px-2 py-0.5 rounded-none border transition-colors flex items-center gap-1 text-xs ${
                   isActive
-                    ? 'bg-[#ffffff] text-[#000000] border-[#ffffff] font-semibold'
-                    : 'bg-[#141414] text-[#aaaaaa] border-[#252525] hover:border-[#444444] hover:text-[#f0f0f0]'
+                    ? 'bg-[#ffffff] text-[#000000] border-[#ffffff] font-medium'
+                    : 'bg-[#141414] text-[#cccccc] border-[#252525] hover:border-[#444444] hover:text-[#ffffff]'
                 }`}
               >
                 <span>{cam}</span>
@@ -103,17 +103,17 @@ export const WorkstationFilterBar: React.FC = () => {
       {/* Video Codec Filter Chips */}
       {codecs.length > 0 && (
         <div className="flex items-center gap-1 flex-shrink-0 pl-1 border-l border-[#222222]">
-          <span className="text-[10px] text-[#555555]">CODEC:</span>
+          <span className="text-xs font-mono text-[#888888]">CODEC:</span>
           {codecs.map((c) => {
             const isActive = selectedCodec === c
             return (
               <button
                 key={c}
                 onClick={() => setSelectedCodec(isActive ? null : c)}
-                className={`px-2 py-0.5 rounded-none border transition-colors flex items-center gap-1 ${
+                className={`px-2 py-0.5 rounded-none border transition-colors flex items-center gap-1 text-xs font-mono ${
                   isActive
-                    ? 'bg-[#00e5ff] text-[#000000] border-[#00e5ff] font-semibold'
-                    : 'bg-[#141414] text-[#aaaaaa] border-[#252525] hover:border-[#444444] hover:text-[#f0f0f0]'
+                    ? 'bg-[#38bdf8] text-[#000000] border-[#38bdf8] font-semibold'
+                    : 'bg-[#141414] text-[#cccccc] border-[#252525] hover:border-[#444444] hover:text-[#ffffff]'
                 }`}
               >
                 <span>{c}</span>
@@ -127,17 +127,17 @@ export const WorkstationFilterBar: React.FC = () => {
       {/* Resolution Tier Filter Chips */}
       {resolutions.length > 0 && (
         <div className="flex items-center gap-1 flex-shrink-0 pl-1 border-l border-[#222222]">
-          <Monitor size={11} className="text-[#555555] mr-0.5" />
+          <Monitor size={12} className="text-[#777777] mr-0.5" />
           {resolutions.map((res) => {
             const isActive = selectedResolution === res
             return (
               <button
                 key={res}
                 onClick={() => setSelectedResolution(isActive ? null : res)}
-                className={`px-2 py-0.5 rounded-none border transition-colors flex items-center gap-1 ${
+                className={`px-2 py-0.5 rounded-none border transition-colors flex items-center gap-1 text-xs font-mono ${
                   isActive
-                    ? 'bg-[#ff0055] text-[#ffffff] border-[#ff0055] font-semibold'
-                    : 'bg-[#141414] text-[#aaaaaa] border-[#252525] hover:border-[#444444] hover:text-[#f0f0f0]'
+                    ? 'bg-[#ef4444] text-[#ffffff] border-[#ef4444] font-medium'
+                    : 'bg-[#141414] text-[#cccccc] border-[#252525] hover:border-[#444444] hover:text-[#ffffff]'
                 }`}
               >
                 <span>{res}</span>
@@ -151,17 +151,17 @@ export const WorkstationFilterBar: React.FC = () => {
       {/* Lens Filter Chips */}
       {lenses.length > 0 && (
         <div className="flex items-center gap-1 flex-shrink-0 pl-1 border-l border-[#222222]">
-          <Aperture size={11} className="text-[#555555] mr-0.5" />
+          <Aperture size={12} className="text-[#777777] mr-0.5" />
           {lenses.slice(0, 3).map((lens) => {
             const isActive = selectedLens === lens
             return (
               <button
                 key={lens}
                 onClick={() => setSelectedLens(isActive ? null : lens)}
-                className={`px-2 py-0.5 rounded-none border transition-colors flex items-center gap-1 ${
+                className={`px-2 py-0.5 rounded-none border transition-colors flex items-center gap-1 text-xs ${
                   isActive
-                    ? 'bg-[#ffffff] text-[#000000] border-[#ffffff] font-semibold'
-                    : 'bg-[#141414] text-[#aaaaaa] border-[#252525] hover:border-[#444444] hover:text-[#f0f0f0]'
+                    ? 'bg-[#ffffff] text-[#000000] border-[#ffffff] font-medium'
+                    : 'bg-[#141414] text-[#cccccc] border-[#252525] hover:border-[#444444] hover:text-[#ffffff]'
                 }`}
               >
                 <span>{lens}</span>
@@ -176,10 +176,10 @@ export const WorkstationFilterBar: React.FC = () => {
       {hasActiveFilter && (
         <button
           onClick={resetWorkstationFilters}
-          className="ml-auto flex items-center gap-1 text-[#ff4444] hover:text-[#ff7777] border border-[#ff4444]/30 hover:border-[#ff4444] px-2 py-0.5 text-[10px] flex-shrink-0 transition-colors"
+          className="ml-auto flex items-center gap-1 text-[#ef4444] hover:text-[#ff7777] border border-[#ef4444]/30 hover:border-[#ef4444] px-2 py-0.5 text-xs font-medium flex-shrink-0 transition-colors"
           title="Reset all media workstation filters"
         >
-          <RotateCcw size={10} />
+          <RotateCcw size={11} />
           <span>Reset Filters</span>
         </button>
       )}

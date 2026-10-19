@@ -12,10 +12,10 @@ export const App: React.FC = () => {
 
   if (isInitializing) {
     return (
-      <div className="min-h-screen bg-[#000000] flex flex-col items-center justify-center font-mono text-xs text-[#888888] select-none">
+      <div className="min-h-screen bg-[#000000] flex flex-col items-center justify-center text-xs text-[#888888] select-none">
         <div className="w-8 h-8 border-2 border-[#333333] border-t-[#ffffff] animate-spin mb-4" />
-        <span className="tracking-widest uppercase text-[#cccccc]">VAYOM DRIVE</span>
-        <span className="text-[10px] text-[#555555] mt-1">VERIFYING NODE GATEWAY...</span>
+        <span className="font-semibold tracking-wider uppercase text-[#f0f0f0]">Vayom Drive</span>
+        <span className="text-xs font-mono text-[#888888] mt-1.5">Verifying node gateway...</span>
       </div>
     )
   }

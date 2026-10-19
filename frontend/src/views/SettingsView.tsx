@@ -20,7 +20,8 @@ import {
   FolderSync, 
   Activity, 
   Zap,
-  Check
+  Check,
+  HelpCircle
 } from 'lucide-react'
 import { Button } from '../components/common/Button'
 import { Badge } from '../components/common/Badge'
@@ -29,6 +30,8 @@ import { formatBytes } from '../utils/format'
 import { api } from '../services/api'
 import { translateErrorMessage } from '../utils/errorTranslation'
 
+type SettingsCategory = 'all' | 'storage' | 'automation' | 'backup' | 'diagnostics'
+
 export const SettingsView: React.FC = () => {
   const { metrics, rebuildIndex, license, activateLicense, fetchFiles, fetchAlbums, fetchMetrics } = useVaultStore()
   const { user, authMode, logout } = useAuthStore()
@@ -36,8 +39,37 @@ export const SettingsView: React.FC = () => {
   const [rebuildLogs, setRebuildLogs] = useState<string[]>([])
   const [rebuildDone, setRebuildDone] = useState(false)
 
+  // Active Category State
+  const [activeCategory, setActiveCategory] = useState<SettingsCategory>('all')
+
+  // Demand-based Card Accordion State (only expands on user demand)
+  const [expandedCards, setExpandedCards] = useState<Record<string, boolean>>({
+    telegram: false,
+    additional: false,
+    automation: false,
+    backup: false,
+    diagnostics: false,
+  })
+
+  const toggleCard = (id: string) => {
+    setExpandedCards(prev => ({ ...prev, [id]: !prev[id] }))
+  }
+
+  const handleSelectCategory = (cat: SettingsCategory) => {
+    setActiveCategory(cat)
+    if (cat === 'storage') {
+      setExpandedCards(prev => ({ ...prev, telegram: true, additional: true }))
+    } else if (cat === 'automation') {
+      setExpandedCards(prev => ({ ...prev, automation: true }))
+    } else if (cat === 'backup') {
+      setExpandedCards(prev => ({ ...prev, backup: true }))
+    } else if (cat === 'diagnostics') {
+      setExpandedCards(prev => ({ ...prev, diagnostics: true }))
+    }
+  }
+
   // Diagnostics Panel Collapsible State
-  const [diagnosticsOpen, setDiagnosticsOpen] = useState(false)
+  const [diagnosticsOpen, setDiagnosticsOpen] = useState(true)
 
   // Pro License & Multi-Storage State
   const [licenseKeyInput, setLicenseKeyInput] = useState('')
@@ -324,18 +356,26 @@ export const SettingsView: React.FC = () => {
   }
 
   return (
-    <div className="flex-1 overflow-y-auto p-4 sm:p-6 md:p-8 bg-[#000000] select-none font-mono">
+    <div className="flex-1 overflow-y-auto p-4 sm:p-6 md:p-8 bg-[#000000] select-none font-sans">
       {/* Top Header */}
       <div className="pb-6 border-b border-[#282828] mb-6 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div>
-          <h1 className="text-base sm:text-lg font-bold uppercase tracking-wider text-[#ffffff] flex items-center gap-2.5">
+          <h1 className="text-base sm:text-lg font-bold tracking-tight text-[#ffffff] flex items-center gap-2.5">
             <HardDrive size={18} className="text-[#ffffff]" /> Storage Connections
           </h1>
-          <p className="text-xs text-[#777777] mt-1">
+          <p className="text-xs text-[#a3a3a3] mt-1">
             Manage connected cloud accounts, object storage, local drives, and backup channels
           </p>
         </div>
         <div className="flex items-center gap-2">
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => window.dispatchEvent(new CustomEvent('open-vayom-guide'))}
+            icon={<HelpCircle size={12} />}
+          >
+            Setup Guide
+          </Button>
           <Button
             variant="secondary"
             size="sm"
@@ -356,139 +396,262 @@ export const SettingsView: React.FC = () => {
         </div>
       </div>
 
-      {/* Main 2-Column Desktop Grid */}
-      <div className="max-w-7xl mx-auto grid grid-cols-1 xl:grid-cols-2 gap-6 items-start">
-        
-        {/* ================= COLUMN 1: STORAGE PROVIDERS ================= */}
-        <div className="space-y-6">
+      {/* Categorized Settings Navigation Bar */}
+      <div className="max-w-5xl mx-auto mb-6">
+        <div className="flex items-center gap-1 border-b border-[#222222] overflow-x-auto scrollbar-none pb-0">
+          <button
+            onClick={() => handleSelectCategory('all')}
+            className={`
+              flex items-center gap-2 px-4 py-2.5 text-xs font-medium whitespace-nowrap transition-colors border-b-2 -mb-px select-none
+              ${activeCategory === 'all'
+                ? 'border-[#ffffff] text-[#ffffff] bg-[#121212]'
+                : 'border-transparent text-[#888888] hover:text-[#cccccc] hover:bg-[#0a0a0a]'
+              }
+            `}
+          >
+            <HardDrive size={14} className={activeCategory === 'all' ? 'text-[#ffffff]' : 'text-[#666666]'} />
+            <span className="hidden sm:inline">All Settings</span>
+            <span className="inline sm:hidden">All</span>
+          </button>
 
-          {/* 1. Connected Telegram Account & Cloud Storage */}
-          <div className="p-5 bg-[#0a0a0a] border border-[#222222] space-y-4">
-            <div className="flex items-center justify-between pb-3 border-b border-[#1a1a1a]">
-              <div className="flex items-center gap-2.5">
-                <div className="w-8 h-8 bg-[#0284c7]/20 border border-[#0284c7]/40 flex items-center justify-center text-[#38bdf8]">
+          <button
+            onClick={() => handleSelectCategory('storage')}
+            className={`
+              flex items-center gap-2 px-4 py-2.5 text-xs font-medium whitespace-nowrap transition-colors border-b-2 -mb-px select-none
+              ${activeCategory === 'storage'
+                ? 'border-[#ffffff] text-[#ffffff] bg-[#121212]'
+                : 'border-transparent text-[#888888] hover:text-[#cccccc] hover:bg-[#0a0a0a]'
+              }
+            `}
+          >
+            <Cloud size={14} className={activeCategory === 'storage' ? 'text-[#38bdf8]' : 'text-[#666666]'} />
+            <span className="hidden sm:inline">Storage Providers</span>
+            <span className="inline sm:hidden">Storage</span>
+            <span className="w-1.5 h-1.5 rounded-full bg-[#22c55e]" title="Active" />
+          </button>
+
+          <button
+            onClick={() => handleSelectCategory('automation')}
+            className={`
+              flex items-center gap-2 px-4 py-2.5 text-xs font-medium whitespace-nowrap transition-colors border-b-2 -mb-px select-none
+              ${activeCategory === 'automation'
+                ? 'border-[#ffffff] text-[#ffffff] bg-[#121212]'
+                : 'border-transparent text-[#888888] hover:text-[#cccccc] hover:bg-[#0a0a0a]'
+              }
+            `}
+          >
+            <FolderSync size={14} className={activeCategory === 'automation' ? 'text-[#60a5fa]' : 'text-[#666666]'} />
+            <span className="hidden sm:inline">Folder Automation</span>
+            <span className="inline sm:hidden">Automation</span>
+          </button>
+
+          <button
+            onClick={() => handleSelectCategory('backup')}
+            className={`
+              flex items-center gap-2 px-4 py-2.5 text-xs font-medium whitespace-nowrap transition-colors border-b-2 -mb-px select-none
+              ${activeCategory === 'backup'
+                ? 'border-[#ffffff] text-[#ffffff] bg-[#121212]'
+                : 'border-transparent text-[#888888] hover:text-[#cccccc] hover:bg-[#0a0a0a]'
+              }
+            `}
+          >
+            <ShieldCheck size={14} className={activeCategory === 'backup' ? 'text-[#22c55e]' : 'text-[#666666]'} />
+            <span className="hidden sm:inline">Backup & Recovery</span>
+            <span className="inline sm:hidden">Backup</span>
+          </button>
+
+          <button
+            onClick={() => handleSelectCategory('diagnostics')}
+            className={`
+              flex items-center gap-2 px-4 py-2.5 text-xs font-medium whitespace-nowrap transition-colors border-b-2 -mb-px select-none
+              ${activeCategory === 'diagnostics'
+                ? 'border-[#ffffff] text-[#ffffff] bg-[#121212]'
+                : 'border-transparent text-[#888888] hover:text-[#cccccc] hover:bg-[#0a0a0a]'
+              }
+            `}
+          >
+            <Activity size={14} className={activeCategory === 'diagnostics' ? 'text-[#fbbf24]' : 'text-[#666666]'} />
+            <span className="hidden sm:inline">System & Diagnostics</span>
+            <span className="inline sm:hidden">Diagnostics</span>
+          </button>
+        </div>
+
+        {/* Category Description Sub-bar */}
+        <div className="py-2.5 px-1 text-xs text-[#737373]">
+          {activeCategory === 'all' && 'All storage, automation, backup, and system maintenance settings. Click any card to expand its options.'}
+          {activeCategory === 'storage' && 'Configure primary Telegram storage, S3 object storage, Nextcloud, and local/NAS network drives.'}
+          {activeCategory === 'automation' && 'Set up automatic ingestion for OBS recordings, camera SD card drops, and watched local folders.'}
+          {activeCategory === 'backup' && 'Manage dual-channel redundancy, secondary Telegram mirror channels, and portable catalog backups.'}
+          {activeCategory === 'diagnostics' && 'View anti-ban worker pool metrics, catalog WAL integrity, index reconstruction, and setup guides.'}
+        </div>
+      </div>
+
+      {/* Main Settings Content Area */}
+      <div className="max-w-5xl mx-auto space-y-4">
+        {/* ================= 1. TELEGRAM CLOUD STORAGE ================= */}
+        {(activeCategory === 'all' || activeCategory === 'storage') && (
+          <div className="bg-[#0a0a0a] border border-[#222222] transition-colors">
+            <button
+              type="button"
+              onClick={() => toggleCard('telegram')}
+              className="w-full p-4 sm:p-5 flex items-center justify-between text-left hover:bg-[#111111]/70 transition-colors select-none"
+            >
+              <div className="flex items-center gap-3">
+                <div className="w-8 h-8 bg-[#0284c7]/20 border border-[#0284c7]/40 flex items-center justify-center text-[#38bdf8] shrink-0">
                   <Cloud size={16} />
                 </div>
                 <div>
-                  <span className="text-xs font-bold text-[#f0f0f0] uppercase tracking-wider block">
-                    Telegram Cloud Storage
-                  </span>
-                  <span className="text-[10px] text-[#777777]">
-                    Primary decentralized media vault
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs font-semibold text-[#f0f0f0]">
+                      Telegram Cloud Storage
+                    </span>
+                    <Badge
+                      variant={
+                        metrics.online_status === 'online'
+                          ? 'success'
+                          : metrics.online_status === 'flood_wait'
+                          ? 'danger'
+                          : 'warning'
+                      }
+                    >
+                      {metrics.online_status === 'online'
+                        ? 'Connected & Synced'
+                        : metrics.online_status === 'flood_wait'
+                        ? `Rate Limited (${metrics.flood_wait_seconds ?? 0}s)`
+                        : 'Connecting'}
+                    </Badge>
+                  </div>
+                  <span className="text-[11px] text-[#888888] hidden sm:block">
+                    Primary decentralized media vault ({user?.display_name || 'Account'} • {formatBytes(metrics.total_bytes)})
                   </span>
                 </div>
               </div>
 
-              <Badge
-                variant={
-                  metrics.online_status === 'online'
-                    ? 'success'
-                    : metrics.online_status === 'flood_wait'
-                    ? 'danger'
-                    : 'warning'
-                }
-              >
-                {metrics.online_status === 'online'
-                  ? 'Connected & Synced'
-                  : metrics.online_status === 'flood_wait'
-                  ? `Rate Limited (${metrics.flood_wait_seconds ?? 0}s)`
-                  : 'Connecting'}
-              </Badge>
-            </div>
-
-            {/* Account Details */}
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs">
-              <div>
-                <span className="text-[10px] text-[#666666] uppercase block">Account</span>
-                <span className="text-[#e5e5e5] font-semibold truncate block">
-                  {user?.display_name || 'Vault User'}
-                </span>
-                <span className="text-[10px] text-[#888888]">
-                  {user?.username ? `@${user.username}` : 'Direct MTProto'}
-                </span>
-              </div>
-
-              <div>
-                <span className="text-[10px] text-[#666666] uppercase block">Storage Used</span>
-                <span className="text-[#e5e5e5] font-semibold text-sm">
-                  {formatBytes(metrics.total_bytes)}
-                </span>
-                <span className="text-[10px] text-[#888888] block">
-                  {metrics.total_files} files cataloged
-                </span>
-              </div>
-
-              <div>
-                <span className="text-[10px] text-[#666666] uppercase block">Max Upload Size</span>
-                <span className="text-[#22c55e] font-semibold flex items-center gap-1">
-                  {user?.is_premium ? (
-                    <>
-                      <Zap size={11} className="fill-[#22c55e]" /> 4.00 GB (Premium)
-                    </>
-                  ) : (
-                    '1.90 GB (Standard)'
-                  )}
-                </span>
-                <span className="text-[10px] text-[#888888] block">
-                  {user?.is_premium ? 'Uncapped speed' : 'Lookahead prefetch'}
-                </span>
-              </div>
-            </div>
-
-            {/* Channel Info & Actions */}
-            <div className="p-3 bg-[#111111] border border-[#1e1e1e] flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 text-[11px]">
-              <div>
-                <span className="text-[#666666] text-[10px] uppercase block">Storage Channel ID</span>
-                <span className="text-[#aaaaaa] font-mono select-all">
-                  {metrics.channel_id || 'Not Assigned'}
-                </span>
-              </div>
               <div className="flex items-center gap-2">
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={handleDisconnect}
-                  className="text-[10px] whitespace-nowrap"
-                >
-                  Switch Account
-                </Button>
+                <span className="text-xs text-[#888888] hidden md:inline font-mono">
+                  {expandedCards.telegram ? 'Collapse' : 'Configure'}
+                </span>
+                <div className="p-1 text-[#888888] hover:text-[#ffffff]">
+                  {expandedCards.telegram ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
+                </div>
               </div>
-            </div>
-          </div>
+            </button>
 
-          {/* 2. Additional Storage Connections (Pro / Multi-Storage) */}
-          <div className="p-5 bg-[#0a0a0a] border border-[#222222] space-y-4">
-            <div className="flex items-center justify-between pb-3 border-b border-[#1a1a1a]">
-              <div className="flex items-center gap-2.5">
-                <div className="w-8 h-8 bg-[#f59e0b]/20 border border-[#f59e0b]/40 flex items-center justify-center text-[#fbbf24]">
+            {expandedCards.telegram && (
+              <div className="p-5 pt-0 border-t border-[#1a1a1a] space-y-4 animate-in fade-in duration-150">
+                {/* Account Details */}
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs pt-4">
+                  <div>
+                    <span className="text-[11px] font-medium text-[#888888] block">Account</span>
+                    <span className="text-[#f0f0f0] font-medium truncate block">
+                      {user?.display_name || 'Vault User'}
+                    </span>
+                    <span className="text-[11px] font-mono text-[#888888]">
+                      {user?.username ? `@${user.username}` : 'Direct MTProto'}
+                    </span>
+                  </div>
+
+                  <div>
+                    <span className="text-[11px] font-medium text-[#888888] block">Storage Used</span>
+                    <span className="text-[#f0f0f0] font-semibold font-mono text-sm">
+                      {formatBytes(metrics.total_bytes)}
+                    </span>
+                    <span className="text-[11px] font-mono text-[#888888] block">
+                      {metrics.total_files} files cataloged
+                    </span>
+                  </div>
+
+                  <div>
+                    <span className="text-[11px] font-medium text-[#888888] block">Max Upload Size</span>
+                    <span className="text-[#22c55e] font-semibold font-mono flex items-center gap-1">
+                      {user?.is_premium ? (
+                        <>
+                          <Zap size={11} className="fill-[#22c55e]" /> 4.00 GB (Premium)
+                        </>
+                      ) : (
+                        '1.90 GB (Standard)'
+                      )}
+                    </span>
+                    <span className="text-[11px] text-[#888888] block">
+                      {user?.is_premium ? 'Uncapped speed' : 'Lookahead prefetch'}
+                    </span>
+                  </div>
+                </div>
+
+                {/* Channel Info & Actions */}
+                <div className="p-3 bg-[#111111] border border-[#1e1e1e] flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 text-[11px]">
+                  <div>
+                    <span className="text-[#666666] text-[10px] uppercase block">Storage Channel ID</span>
+                    <span className="text-[#aaaaaa] font-mono select-all">
+                      {metrics.channel_id || 'Not Assigned'}
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={handleDisconnect}
+                      className="text-[10px] whitespace-nowrap"
+                    >
+                      Switch Account
+                    </Button>
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* ================= 2. ADDITIONAL STORAGE CONNECTIONS ================= */}
+        {(activeCategory === 'all' || activeCategory === 'storage') && (
+          <div className="bg-[#0a0a0a] border border-[#222222] transition-colors">
+            <button
+              type="button"
+              onClick={() => toggleCard('additional')}
+              className="w-full p-4 sm:p-5 flex items-center justify-between text-left hover:bg-[#111111]/70 transition-colors select-none"
+            >
+              <div className="flex items-center gap-3">
+                <div className="w-8 h-8 bg-[#f59e0b]/20 border border-[#f59e0b]/40 flex items-center justify-center text-[#fbbf24] shrink-0">
                   <HardDrive size={16} />
                 </div>
                 <div>
-                  <span className="text-xs font-bold text-[#f0f0f0] uppercase tracking-wider block">
-                    Additional Storage Connections
-                  </span>
-                  <span className="text-[10px] text-[#777777]">
-                    S3, NAS, and Nextcloud integration
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs font-semibold text-[#f0f0f0]">
+                      Additional Storage Connections
+                    </span>
+                    <Badge variant={license?.is_pro ? 'success' : 'default'}>
+                      {license?.is_pro ? 'Pro Unlocked' : 'Free Tier'}
+                    </Badge>
+                  </div>
+                  <span className="text-[11px] text-[#888888] hidden sm:block">
+                    Connect S3-compatible buckets, Local NAS, and Nextcloud WebDAV
                   </span>
                 </div>
               </div>
 
-              <Badge variant={license?.is_pro ? 'success' : 'default'}>
-                {license?.is_pro ? 'Pro Unlocked' : 'Free Tier'}
-              </Badge>
-            </div>
+              <div className="flex items-center gap-2">
+                <span className="text-xs text-[#888888] hidden md:inline font-mono">
+                  {expandedCards.additional ? 'Collapse' : 'Configure'}
+                </span>
+                <div className="p-1 text-[#888888] hover:text-[#ffffff]">
+                  {expandedCards.additional ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
+                </div>
+              </div>
+            </button>
 
-            <p className="text-[11px] text-[#777777] leading-relaxed">
+            {expandedCards.additional && (
+              <div className="p-5 pt-0 border-t border-[#1a1a1a] space-y-4 animate-in fade-in duration-150">
+                <p className="text-xs text-[#a3a3a3] leading-relaxed pt-4">
               Connect external storage to store files natively without splitting. Files are organized into your Vayom Drive library seamlessly.
             </p>
 
             {/* Pro License Activation if not active */}
             {!license?.is_pro && (
               <div className="p-3.5 bg-[#121212] border border-[#2a2a2a] space-y-2.5">
-                <div className="text-xs text-[#e5e5e5] font-semibold flex items-center gap-1.5">
+                <div className="text-xs text-[#f0f0f0] font-semibold flex items-center gap-1.5">
                   <Key size={13} className="text-[#f59e0b]" /> Unlock Additional Storage Connections
                 </div>
-                <p className="text-[11px] text-[#888888]">
+                <p className="text-xs text-[#888888]">
                   Enter your Vayom Pro license key to connect your NAS, S3 buckets, and Nextcloud:
                 </p>
                 <div className="flex gap-2">
@@ -524,13 +687,13 @@ export const SettingsView: React.FC = () => {
                 <div className="flex items-center justify-between">
                   <div className="flex items-center gap-2">
                     <span className="w-2 h-2 rounded-full bg-emerald-500" />
-                    <span className="text-xs font-bold text-[#e5e5e5]">Local & Network Storage (NAS)</span>
+                    <span className="text-xs font-semibold text-[#f0f0f0]">Local & Network Storage (NAS)</span>
                   </div>
-                  <span className="text-[9px] px-1.5 py-0.5 bg-emerald-950/80 text-emerald-400 border border-emerald-500/40 font-mono">
+                  <span className="text-[10px] px-1.5 py-0.5 bg-emerald-950/80 text-emerald-400 border border-emerald-500/40 font-mono">
                     LOCAL / SMB / NFS
                   </span>
                 </div>
-                <p className="text-[10px] text-[#888888]">
+                <p className="text-xs text-[#a3a3a3]">
                   Access files on your local workstation, external SSDs, or local network NAS.
                 </p>
                 <div className="flex items-center justify-between pt-1">
@@ -539,12 +702,11 @@ export const SettingsView: React.FC = () => {
                     size="sm"
                     onClick={handleSyncNasVault}
                     disabled={isNasSyncing}
-                    className="text-[10px]"
                     icon={<FolderSync size={11} />}
                   >
                     {isNasSyncing ? 'Scanning...' : 'Scan & Sync Library'}
                   </Button>
-                  {nasSyncMsg && <span className="text-[10px] text-[#888888] font-mono">{nasSyncMsg}</span>}
+                  {nasSyncMsg && <span className="text-xs text-[#888888] font-mono">{nasSyncMsg}</span>}
                 </div>
               </div>
 
@@ -553,18 +715,18 @@ export const SettingsView: React.FC = () => {
                 <div className="flex items-center justify-between">
                   <div className="flex items-center gap-2">
                     <span className={`w-2 h-2 rounded-full ${storageConfigs?.s3?.configured ? 'bg-amber-500' : 'bg-[#555555]'}`} />
-                    <span className="text-xs font-bold text-[#e5e5e5]">S3-Compatible Cloud Storage</span>
+                    <span className="text-xs font-semibold text-[#f0f0f0]">S3-Compatible Cloud Storage</span>
                   </div>
                   <Badge variant={storageConfigs?.s3?.configured ? 'success' : 'default'}>
                     {storageConfigs?.s3?.configured ? 'Connected' : 'Not Configured'}
                   </Badge>
                 </div>
-                <p className="text-[10px] text-[#888888]">
+                <p className="text-xs text-[#a3a3a3]">
                   Connect Cloudflare R2, Amazon S3, Backblaze B2, or MinIO.
                 </p>
                 {storageConfigs?.s3?.configured && (
-                  <div className="text-[10px] text-[#aaaaaa] font-mono">
-                    Bucket: <span className="text-[#e5e5e5]">{storageConfigs.s3.bucket_name}</span>
+                  <div className="text-xs text-[#a3a3a3]">
+                    Bucket: <span className="text-[#f0f0f0] font-mono">{storageConfigs.s3.bucket_name}</span>
                   </div>
                 )}
                 <div className="pt-1">
@@ -572,7 +734,6 @@ export const SettingsView: React.FC = () => {
                     variant={s3FormOpen ? "secondary" : "outline"}
                     size="sm"
                     onClick={() => { setS3FormOpen(!s3FormOpen); setNcFormOpen(false); }}
-                    className="text-[10px]"
                   >
                     {s3FormOpen ? 'Close Settings' : (storageConfigs?.s3?.configured ? 'Configure S3' : 'Connect S3')}
                   </Button>
@@ -580,40 +741,40 @@ export const SettingsView: React.FC = () => {
 
                 {/* S3 Inline Form */}
                 {s3FormOpen && (
-                  <div className="p-3 bg-[#0a0a0a] border border-amber-500/30 space-y-3 font-mono text-xs mt-2">
+                  <div className="p-3 bg-[#0a0a0a] border border-amber-500/30 space-y-3 text-xs mt-2 font-sans">
                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
                       <div>
-                        <label className="text-[10px] text-[#888888] uppercase block mb-1">Endpoint URL</label>
+                        <label className="text-xs font-medium text-[#cccccc] block mb-1">Endpoint URL</label>
                         <input
                           type="text"
                           value={s3Endpoint}
                           onChange={(e) => setS3Endpoint(e.target.value)}
                           placeholder="https://s3.amazonaws.com"
-                          className="w-full bg-[#050505] border border-[#2a2a2a] px-2 py-1 text-xs text-[#ffffff] focus:outline-none focus:border-amber-400"
+                          className="w-full bg-[#050505] border border-[#2a2a2a] px-2.5 py-1.5 text-xs text-[#ffffff] focus:outline-none focus:border-amber-400 font-sans"
                         />
                       </div>
                       <div>
-                        <label className="text-[10px] text-[#888888] uppercase block mb-1">Bucket Name *</label>
+                        <label className="text-xs font-medium text-[#cccccc] block mb-1">Bucket Name *</label>
                         <input
                           type="text"
                           value={s3Bucket}
                           onChange={(e) => setS3Bucket(e.target.value)}
                           placeholder="my-vault-bucket"
-                          className="w-full bg-[#050505] border border-[#2a2a2a] px-2 py-1 text-xs text-[#ffffff] focus:outline-none focus:border-amber-400"
+                          className="w-full bg-[#050505] border border-[#2a2a2a] px-2.5 py-1.5 text-xs text-[#ffffff] focus:outline-none focus:border-amber-400 font-sans"
                         />
                       </div>
                       <div>
-                        <label className="text-[10px] text-[#888888] uppercase block mb-1">Access Key ID *</label>
+                        <label className="text-xs font-medium text-[#cccccc] block mb-1">Access Key ID *</label>
                         <input
                           type="text"
                           value={s3AccessKey}
                           onChange={(e) => setS3AccessKey(e.target.value)}
                           placeholder="AKIA..."
-                          className="w-full bg-[#050505] border border-[#2a2a2a] px-2 py-1 text-xs text-[#ffffff] focus:outline-none focus:border-amber-400"
+                          className="w-full bg-[#050505] border border-[#2a2a2a] px-2.5 py-1.5 text-xs text-[#ffffff] focus:outline-none focus:border-amber-400 font-mono"
                         />
                       </div>
                       <div>
-                        <label className="text-[10px] text-[#888888] uppercase block mb-1">
+                        <label className="text-xs font-medium text-[#cccccc] block mb-1">
                           Secret Key {storageConfigs?.s3?.has_secret_key ? '(Stored)' : '*'}
                         </label>
                         <input
@@ -621,7 +782,7 @@ export const SettingsView: React.FC = () => {
                           value={s3SecretKey}
                           onChange={(e) => setS3SecretKey(e.target.value)}
                           placeholder={storageConfigs?.s3?.has_secret_key ? "•••••••••••• (Leave blank to keep)" : "Secret Key"}
-                          className="w-full bg-[#050505] border border-[#2a2a2a] px-2 py-1 text-xs text-[#ffffff] focus:outline-none focus:border-amber-400"
+                          className="w-full bg-[#050505] border border-[#2a2a2a] px-2.5 py-1.5 text-xs text-[#ffffff] focus:outline-none focus:border-amber-400 font-mono"
                         />
                       </div>
                     </div>
@@ -665,18 +826,18 @@ export const SettingsView: React.FC = () => {
                 <div className="flex items-center justify-between">
                   <div className="flex items-center gap-2">
                     <span className={`w-2 h-2 rounded-full ${storageConfigs?.nextcloud?.configured ? 'bg-purple-500' : 'bg-[#555555]'}`} />
-                    <span className="text-xs font-bold text-[#e5e5e5]">Nextcloud WebDAV</span>
+                    <span className="text-xs font-semibold text-[#f0f0f0]">Nextcloud WebDAV</span>
                   </div>
                   <Badge variant={storageConfigs?.nextcloud?.configured ? 'success' : 'default'}>
                     {storageConfigs?.nextcloud?.configured ? 'Connected' : 'Not Configured'}
                   </Badge>
                 </div>
-                <p className="text-[10px] text-[#888888]">
+                <p className="text-xs text-[#a3a3a3]">
                   Connect your personal Nextcloud or ownCloud server.
                 </p>
                 {storageConfigs?.nextcloud?.configured && (
-                  <div className="text-[10px] text-[#aaaaaa] font-mono">
-                    User: <span className="text-[#e5e5e5]">{storageConfigs.nextcloud.username}</span>
+                  <div className="text-xs text-[#a3a3a3]">
+                    User: <span className="text-[#f0f0f0] font-mono">{storageConfigs.nextcloud.username}</span>
                   </div>
                 )}
                 <div className="pt-1">
@@ -684,7 +845,6 @@ export const SettingsView: React.FC = () => {
                     variant={ncFormOpen ? "secondary" : "outline"}
                     size="sm"
                     onClick={() => { setNcFormOpen(!ncFormOpen); setS3FormOpen(false); }}
-                    className="text-[10px]"
                   >
                     {ncFormOpen ? 'Close Settings' : (storageConfigs?.nextcloud?.configured ? 'Configure NC' : 'Connect Nextcloud')}
                   </Button>
@@ -692,30 +852,30 @@ export const SettingsView: React.FC = () => {
 
                 {/* Nextcloud Inline Form */}
                 {ncFormOpen && (
-                  <div className="p-3 bg-[#0a0a0a] border border-purple-500/30 space-y-3 font-mono text-xs mt-2">
+                  <div className="p-3 bg-[#0a0a0a] border border-purple-500/30 space-y-3 text-xs mt-2 font-sans">
                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
                       <div className="sm:col-span-2">
-                        <label className="text-[10px] text-[#888888] uppercase block mb-1">WebDAV URL *</label>
+                        <label className="text-xs font-medium text-[#cccccc] block mb-1">WebDAV URL *</label>
                         <input
                           type="text"
                           value={ncUrl}
                           onChange={(e) => setNcUrl(e.target.value)}
                           placeholder="https://nextcloud.example.com/remote.php/dav/files/user/"
-                          className="w-full bg-[#050505] border border-[#2a2a2a] px-2 py-1 text-xs text-[#ffffff] focus:outline-none focus:border-purple-400"
+                          className="w-full bg-[#050505] border border-[#2a2a2a] px-2.5 py-1.5 text-xs text-[#ffffff] focus:outline-none focus:border-purple-400 font-sans"
                         />
                       </div>
                       <div>
-                        <label className="text-[10px] text-[#888888] uppercase block mb-1">Username *</label>
+                        <label className="text-xs font-medium text-[#cccccc] block mb-1">Username *</label>
                         <input
                           type="text"
                           value={ncUser}
                           onChange={(e) => setNcUser(e.target.value)}
                           placeholder="username"
-                          className="w-full bg-[#050505] border border-[#2a2a2a] px-2 py-1 text-xs text-[#ffffff] focus:outline-none focus:border-purple-400"
+                          className="w-full bg-[#050505] border border-[#2a2a2a] px-2.5 py-1.5 text-xs text-[#ffffff] focus:outline-none focus:border-purple-400 font-sans"
                         />
                       </div>
                       <div>
-                        <label className="text-[10px] text-[#888888] uppercase block mb-1">
+                        <label className="text-xs font-medium text-[#cccccc] block mb-1">
                           App Password {storageConfigs?.nextcloud?.has_password ? '(Stored)' : '*'}
                         </label>
                         <input
@@ -723,7 +883,7 @@ export const SettingsView: React.FC = () => {
                           value={ncPassword}
                           onChange={(e) => setNcPassword(e.target.value)}
                           placeholder={storageConfigs?.nextcloud?.has_password ? "•••••••••••• (Leave blank to keep)" : "App password"}
-                          className="w-full bg-[#050505] border border-[#2a2a2a] px-2 py-1 text-xs text-[#ffffff] focus:outline-none focus:border-purple-400"
+                          className="w-full bg-[#050505] border border-[#2a2a2a] px-2.5 py-1.5 text-xs text-[#ffffff] focus:outline-none focus:border-purple-400 font-mono"
                         />
                       </div>
                     </div>
@@ -761,239 +921,336 @@ export const SettingsView: React.FC = () => {
                   </div>
                 )}
               </div>
-
             </div>
           </div>
+        )}
+      </div>
+    )}
 
-        </div>
+        {/* ================= 3. FOLDER AUTOMATION ================= */}
+        {(activeCategory === 'all' || activeCategory === 'automation') && (
+          <div className="bg-[#0a0a0a] border border-[#222222] transition-colors">
+            <button
+              type="button"
+              onClick={() => toggleCard('automation')}
+              className="w-full p-4 sm:p-5 flex items-center justify-between text-left hover:bg-[#111111]/70 transition-colors select-none"
+            >
+              <div className="flex items-center gap-3">
+                <div className="w-8 h-8 bg-[#3b82f6]/20 border border-[#3b82f6]/40 flex items-center justify-center text-[#60a5fa] shrink-0">
+                  <FolderSync size={16} />
+                </div>
+                <div>
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs font-semibold text-[#f0f0f0]">
+                      Automatic Folder Monitoring
+                    </span>
+                    <span className="text-[10px] px-1.5 py-0.5 bg-[#181818] border border-[#262626] text-[#888888] font-mono">
+                      OBS & Ingest
+                    </span>
+                  </div>
+                  <span className="text-[11px] text-[#888888] hidden sm:block">
+                    Auto-upload from OBS recordings, camera SD card drops, and watched local folders
+                  </span>
+                </div>
+              </div>
 
-        {/* ================= COLUMN 2: SAFEGUARDS, AUTOMATION & DIAGNOSTICS ================= */}
-        <div className="space-y-6">
+              <div className="flex items-center gap-2">
+                <span className="text-xs text-[#888888] hidden md:inline font-mono">
+                  {expandedCards.automation ? 'Collapse' : 'Configure'}
+                </span>
+                <div className="p-1 text-[#888888] hover:text-[#ffffff]">
+                  {expandedCards.automation ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
+                </div>
+              </div>
+            </button>
 
-          {/* 3. Backup & Recovery */}
-          <div className="p-5 bg-[#0a0a0a] border border-[#222222] space-y-4">
-            <div className="flex items-center justify-between pb-3 border-b border-[#1a1a1a]">
-              <div className="flex items-center gap-2.5">
-                <div className="w-8 h-8 bg-[#22c55e]/20 border border-[#22c55e]/40 flex items-center justify-center text-[#22c55e]">
+            {expandedCards.automation && (
+              <div className="p-5 pt-0 border-t border-[#1a1a1a] space-y-4 animate-in fade-in duration-150">
+                <WatchFolderManager />
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* ================= 4. BACKUP & RECOVERY ================= */}
+        {(activeCategory === 'all' || activeCategory === 'backup') && (
+          <div className="bg-[#0a0a0a] border border-[#222222] transition-colors">
+            <button
+              type="button"
+              onClick={() => toggleCard('backup')}
+              className="w-full p-4 sm:p-5 flex items-center justify-between text-left hover:bg-[#111111]/70 transition-colors select-none"
+            >
+              <div className="flex items-center gap-3">
+                <div className="w-8 h-8 bg-[#22c55e]/20 border border-[#22c55e]/40 flex items-center justify-center text-[#22c55e] shrink-0">
                   <ShieldCheck size={16} />
                 </div>
                 <div>
-                  <span className="text-xs font-bold text-[#f0f0f0] uppercase tracking-wider block">
-                    Backup and Recovery
-                  </span>
-                  <span className="text-[10px] text-[#777777]">
-                    Multi-tier data redundancy and instant restores
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs font-semibold text-[#f0f0f0]">
+                      Backup and Recovery
+                    </span>
+                    <Badge variant={channelHealth?.primary_channel?.healthy ? 'success' : 'danger'}>
+                      {channelHealth?.primary_channel?.healthy ? 'Healthy (Can Post)' : 'Attention Required'}
+                    </Badge>
+                  </div>
+                  <span className="text-[11px] text-[#888888] hidden sm:block">
+                    Multi-tier data redundancy, secondary Telegram mirror channels, and catalog backups
                   </span>
                 </div>
               </div>
-            </div>
 
-            <p className="text-[11px] text-[#777777] leading-relaxed">
-              Safeguard your library against accidental channel loss or server migration. Your library can be mirrored to a secondary channel and backed up locally.
-            </p>
-
-            {/* Health Tiers */}
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 text-xs">
-              <div className="p-2.5 bg-[#111111] border border-[#1f1f1f] space-y-1">
-                <span className="text-[10px] text-[#666666] uppercase block">Primary Channel</span>
-                <Badge variant={channelHealth?.primary_channel?.healthy ? 'success' : 'danger'}>
-                  {channelHealth?.primary_channel?.healthy ? 'Healthy (Can Post)' : 'Attention Required'}
-                </Badge>
-              </div>
-
-              <div className="p-2.5 bg-[#111111] border border-[#1f1f1f] space-y-1">
-                <span className="text-[10px] text-[#666666] uppercase block">Saved Messages Mirror</span>
-                <Badge variant={channelHealth?.saved_messages_mirror ? 'success' : 'default'}>
-                  {channelHealth?.saved_messages_mirror ? 'Active (Private)' : 'Not Active'}
-                </Badge>
-              </div>
-            </div>
-
-            {/* Secondary Mirror Channel Configuration */}
-            <div className="pt-2 border-t border-[#1a1a1a] space-y-2">
-              <span className="text-xs font-semibold text-[#f0f0f0] block">
-                Secondary Telegram Backup Channel
-              </span>
-              <p className="text-[10px] text-[#777777]">
-                Mirror all uploads to a second private Telegram channel (e.g. <code className="text-[#e5e5e5]">-1001234567890</code>).
-              </p>
               <div className="flex items-center gap-2">
-                <input
-                  type="text"
-                  placeholder="-100xxxxxxxxxx"
-                  value={backupChannelInput}
-                  onChange={(e) => setBackupChannelInput(e.target.value)}
-                  className="flex-1 px-3 py-1.5 bg-[#141414] border border-[#2a2a2a] text-[#ffffff] text-xs focus:outline-none focus:border-[#444444]"
-                />
-                <Button
-                  variant="primary"
-                  size="sm"
-                  onClick={handleSaveBackupChannel}
-                  disabled={isSavingBackupChannel || !backupChannelInput.trim()}
-                >
-                  {isSavingBackupChannel ? 'Saving...' : 'Save Mirror'}
-                </Button>
-              </div>
-              {backupChannelStatusMsg && (
-                <div className={`text-[10px] ${backupChannelStatusMsg.startsWith('✓') ? 'text-[#22c55e]' : 'text-[#ef4444]'}`}>
-                  {backupChannelStatusMsg}
-                </div>
-              )}
-            </div>
-
-            {/* 1-Click Catalog Export & Restore */}
-            <div className="pt-2 border-t border-[#1a1a1a] space-y-2">
-              <span className="text-xs font-semibold text-[#f0f0f0] block">
-                Offline Catalog Backup & Restore
-              </span>
-              <p className="text-[10px] text-[#777777]">
-                Export your entire file database to a single JSON file. Restore anytime on a new computer with zero scanning delay.
-              </p>
-              <div className="flex flex-wrap items-center gap-2">
-                <Button
-                  variant="secondary"
-                  size="sm"
-                  onClick={handleExportCatalog}
-                  icon={<Download size={12} />}
-                >
-                  Export Catalog Backup (.json)
-                </Button>
-
-                <input
-                  type="file"
-                  ref={fileInputRef}
-                  onChange={handleImportCatalog}
-                  accept=".json"
-                  className="hidden"
-                  id="catalog-backup-input"
-                />
-                <Button
-                  variant="secondary"
-                  size="sm"
-                  onClick={() => fileInputRef.current?.click()}
-                  disabled={isImporting}
-                  icon={<Upload size={12} />}
-                >
-                  {isImporting ? 'Restoring...' : 'Restore from Backup'}
-                </Button>
-              </div>
-              {importStatusMsg && (
-                <div className={`text-[10px] ${importStatusMsg.startsWith('✓') ? 'text-[#22c55e]' : 'text-[#f59e0b]'}`}>
-                  {importStatusMsg}
-                </div>
-              )}
-            </div>
-          </div>
-
-          {/* 4. Automated Folder Monitoring (Watch Folders) */}
-          <div className="p-5 bg-[#0a0a0a] border border-[#222222] space-y-3">
-            <div className="flex items-center gap-2.5 pb-2 border-b border-[#1a1a1a]">
-              <div className="w-8 h-8 bg-[#3b82f6]/20 border border-[#3b82f6]/40 flex items-center justify-center text-[#60a5fa]">
-                <FolderSync size={16} />
-              </div>
-              <div>
-                <span className="text-xs font-bold text-[#f0f0f0] uppercase tracking-wider block">
-                  Automatic Folder Monitoring
+                <span className="text-xs text-[#888888] hidden md:inline font-mono">
+                  {expandedCards.backup ? 'Collapse' : 'Configure'}
                 </span>
-                <span className="text-[10px] text-[#777777]">
-                  Auto-upload from OBS, camera drops, and download folders
-                </span>
+                <div className="p-1 text-[#888888] hover:text-[#ffffff]">
+                  {expandedCards.backup ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
+                </div>
               </div>
-            </div>
-            <WatchFolderManager />
-          </div>
-
-          {/* 5. System Diagnostics & Maintenance (Progressive Disclosure) */}
-          <div className="p-4 bg-[#0a0a0a] border border-[#222222] space-y-3">
-            <button
-              onClick={() => setDiagnosticsOpen(!diagnosticsOpen)}
-              className="w-full flex items-center justify-between text-left text-xs font-semibold text-[#888888] hover:text-[#ffffff] transition-colors"
-            >
-              <span className="flex items-center gap-2 uppercase tracking-wider">
-                <Activity size={13} /> Advanced Diagnostics & Index Rebuild
-              </span>
-              {diagnosticsOpen ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
             </button>
 
-            {diagnosticsOpen && (
-              <div className="space-y-4 pt-3 border-t border-[#1a1a1a] text-xs font-mono">
-                {/* Diagnostics Grid */}
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
-                  <div className="p-2 bg-[#121212] border border-[#1e1e1e]">
-                    <span className="text-[10px] text-[#666666] uppercase block">Anti-Ban Worker Pool</span>
-                    <span className="text-[#e5e5e5]">
-                      {channelHealth?.flood_wait_seconds > 0 
-                        ? `Cooldown (${channelHealth.flood_wait_seconds}s)` 
-                        : `${channelHealth?.max_concurrent_workers || 3} Active Workers`}
-                    </span>
+            {expandedCards.backup && (
+              <div className="p-5 pt-0 border-t border-[#1a1a1a] space-y-4 animate-in fade-in duration-150">
+                <p className="text-xs text-[#a3a3a3] leading-relaxed pt-4">
+                  Safeguard your library against accidental channel loss or server migration. Your library can be mirrored to a secondary channel and backed up locally.
+                </p>
+
+                {/* Health Tiers */}
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 text-xs">
+                  <div className="p-2.5 bg-[#111111] border border-[#1f1f1f] space-y-1">
+                    <span className="text-[11px] font-medium text-[#888888] block">Primary Channel</span>
+                    <Badge variant={channelHealth?.primary_channel?.healthy ? 'success' : 'danger'}>
+                      {channelHealth?.primary_channel?.healthy ? 'Healthy (Can Post)' : 'Attention Required'}
+                    </Badge>
                   </div>
 
-                  <div className="p-2 bg-[#121212] border border-[#1e1e1e]">
-                    <span className="text-[10px] text-[#666666] uppercase block">Catalog WAL Sync</span>
-                    <span className="text-[#22c55e] flex items-center gap-1">
-                      <Check size={11} /> Synced & Verified
-                    </span>
+                  <div className="p-2.5 bg-[#111111] border border-[#1f1f1f] space-y-1">
+                    <span className="text-[11px] font-medium text-[#888888] block">Saved Messages Mirror</span>
+                    <Badge variant={channelHealth?.saved_messages_mirror ? 'success' : 'default'}>
+                      {channelHealth?.saved_messages_mirror ? 'Active (Private)' : 'Not Active'}
+                    </Badge>
                   </div>
                 </div>
 
-                {/* Rebuild Index Tool */}
-                <div className="space-y-2">
-                  <span className="text-[11px] font-semibold text-[#e5e5e5] block">
-                    Rebuild Local Index from Telegram Storage
+                {/* Secondary Mirror Channel Configuration */}
+                <div className="pt-2 border-t border-[#1a1a1a] space-y-2">
+                  <span className="text-xs font-semibold text-[#f0f0f0] block">
+                    Secondary Telegram Backup Channel
                   </span>
-                  <p className="text-[10px] text-[#777777]">
-                    Reads metadata envelopes directly from Telegram messages to reconstruct your local catalog.
+                  <p className="text-xs text-[#888888]">
+                    Mirror all uploads to a second private Telegram channel (e.g. <code className="text-[#e5e5e5] font-mono">-1001234567890</code>).
                   </p>
-                  <Button
-                    variant="secondary"
-                    size="sm"
-                    onClick={handleRebuildIndex}
-                    disabled={isRebuilding}
-                    icon={<RefreshCw size={11} className={isRebuilding ? 'animate-spin' : ''} />}
-                  >
-                    {isRebuilding ? 'Rebuilding Index...' : 'Rebuild Index'}
-                  </Button>
-
-                  {/* Terminal Log Output */}
-                  {rebuildLogs.length > 0 && (
-                    <div className="p-2.5 bg-[#050505] border border-[#1f1f1f] text-[10px] space-y-1 font-mono text-[#aaaaaa] max-h-40 overflow-y-auto">
-                      <div className="text-[9px] text-[#555555] uppercase pb-1 flex items-center gap-1 border-b border-[#181818]">
-                        <Terminal size={10} /> Recovery Console
-                      </div>
-                      {rebuildLogs.map((log, idx) => (
-                        <div key={idx} className="leading-tight">
-                          {log}
-                        </div>
-                      ))}
-                      {rebuildDone && (
-                        <div className="text-[#22c55e] font-semibold pt-1">
-                          ✓ Catalog successfully synchronized with Telegram storage.
-                        </div>
-                      )}
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="text"
+                      placeholder="-100xxxxxxxxxx"
+                      value={backupChannelInput}
+                      onChange={(e) => setBackupChannelInput(e.target.value)}
+                      className="flex-1 px-3 py-1.5 bg-[#141414] border border-[#2a2a2a] text-[#ffffff] text-xs font-mono focus:outline-none focus:border-[#444444]"
+                    />
+                    <Button
+                      variant="primary"
+                      size="sm"
+                      onClick={handleSaveBackupChannel}
+                      disabled={isSavingBackupChannel || !backupChannelInput.trim()}
+                    >
+                      {isSavingBackupChannel ? 'Saving...' : 'Save Mirror'}
+                    </Button>
+                  </div>
+                  {backupChannelStatusMsg && (
+                    <div className={`text-xs font-sans ${backupChannelStatusMsg.startsWith('✓') ? 'text-[#22c55e]' : 'text-[#ef4444]'}`}>
+                      {backupChannelStatusMsg}
                     </div>
                   )}
                 </div>
 
-                {/* Service Checklist */}
-                <div className="p-2.5 bg-[#111111] border border-[#1a1a1a] space-y-1.5 text-[10px] text-[#888888]">
-                  <div className="flex items-center gap-1.5">
-                    <CheckCircle size={12} className="text-[#22c55e]" />
-                    <span>Direct MTProto Bot Client: Active</span>
+                {/* 1-Click Catalog Export & Restore */}
+                <div className="pt-2 border-t border-[#1a1a1a] space-y-2">
+                  <span className="text-xs font-semibold text-[#f0f0f0] block">
+                    Offline Catalog Backup & Restore
+                  </span>
+                  <p className="text-xs text-[#888888]">
+                    Export your entire file database to a single JSON file. Restore anytime on a new computer with zero scanning delay.
+                  </p>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <Button
+                      variant="secondary"
+                      size="sm"
+                      onClick={handleExportCatalog}
+                      icon={<Download size={12} />}
+                    >
+                      Export Catalog Backup (.json)
+                    </Button>
+
+                    <input
+                      type="file"
+                      ref={fileInputRef}
+                      onChange={handleImportCatalog}
+                      accept=".json"
+                      className="hidden"
+                      id="catalog-backup-input"
+                    />
+                    <Button
+                      variant="secondary"
+                      size="sm"
+                      onClick={() => fileInputRef.current?.click()}
+                      disabled={isImporting}
+                      icon={<Upload size={12} />}
+                    >
+                      {isImporting ? 'Restoring...' : 'Restore from Backup'}
+                    </Button>
                   </div>
-                  <div className="flex items-center gap-1.5">
-                    <CheckCircle size={12} className="text-[#22c55e]" />
-                    <span>Unified Single-Service Server: Active</span>
+                  {importStatusMsg && (
+                    <div className={`text-xs font-sans ${importStatusMsg.startsWith('✓') ? 'text-[#22c55e]' : 'text-[#f59e0b]'}`}>
+                      {importStatusMsg}
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* ================= 5. SYSTEM & DIAGNOSTICS ================= */}
+        {(activeCategory === 'all' || activeCategory === 'diagnostics') && (
+          <div className="bg-[#0a0a0a] border border-[#222222] transition-colors">
+            <button
+              type="button"
+              onClick={() => toggleCard('diagnostics')}
+              className="w-full p-4 sm:p-5 flex items-center justify-between text-left hover:bg-[#111111]/70 transition-colors select-none"
+            >
+              <div className="flex items-center gap-3">
+                <div className="w-8 h-8 bg-[#fbbf24]/20 border border-[#fbbf24]/40 flex items-center justify-center text-[#fbbf24] shrink-0">
+                  <Activity size={16} />
+                </div>
+                <div>
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs font-semibold text-[#f0f0f0]">
+                      System Diagnostics & Maintenance
+                    </span>
+                    <span className="text-[10px] px-1.5 py-0.5 bg-[#181818] border border-[#262626] text-[#22c55e] font-mono">
+                      Active & Synced
+                    </span>
                   </div>
-                  <div className="flex items-center gap-1.5">
-                    <CheckCircle size={12} className="text-[#22c55e]" />
-                    <span>Ephemeral Disk Auto-Sync: Active</span>
+                  <span className="text-[11px] text-[#888888] hidden sm:block">
+                    Catalog WAL verification, Anti-ban pool, and index reconstruction
+                  </span>
+                </div>
+              </div>
+
+              <div className="flex items-center gap-2">
+                <span className="text-xs text-[#888888] hidden md:inline font-mono">
+                  {expandedCards.diagnostics ? 'Collapse' : 'Configure'}
+                </span>
+                <div className="p-1 text-[#888888] hover:text-[#ffffff]">
+                  {expandedCards.diagnostics ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
+                </div>
+              </div>
+            </button>
+
+            {expandedCards.diagnostics && (
+              <div className="p-5 pt-0 border-t border-[#1a1a1a] space-y-4 animate-in fade-in duration-150">
+                {/* Quick-Start Walkthrough Re-launch Banner */}
+                <div className="p-4 bg-[#111111] border border-[#222222] flex flex-col sm:flex-row sm:items-center justify-between gap-4 mt-4">
+                  <div className="space-y-1">
+                    <span className="text-xs font-semibold text-[#f0f0f0] flex items-center gap-2">
+                      <HelpCircle size={14} className="text-[#38bdf8]" /> Interactive Setup & Onboarding Guide
+                    </span>
+                    <p className="text-xs text-[#888888]">
+                      Revisit the 4-step walkthrough covering storage architecture, client-side encryption, and desktop shortcuts.
+                    </p>
+                  </div>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => window.dispatchEvent(new CustomEvent('open-vayom-guide'))}
+                    icon={<HelpCircle size={12} />}
+                  >
+                    Launch Setup Guide
+                  </Button>
+                </div>
+
+                <div className="space-y-4 text-xs font-sans">
+                  {/* Diagnostics Grid */}
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                    <div className="p-3 bg-[#121212] border border-[#1e1e1e]">
+                      <span className="text-[11px] font-medium text-[#888888] block">Anti-Ban Worker Pool</span>
+                      <span className="text-[#f0f0f0] font-mono text-xs">
+                        {channelHealth?.flood_wait_seconds > 0 
+                          ? `Cooldown (${channelHealth.flood_wait_seconds}s)` 
+                          : `${channelHealth?.max_concurrent_workers || 3} Active Workers`}
+                      </span>
+                    </div>
+
+                    <div className="p-3 bg-[#121212] border border-[#1e1e1e]">
+                      <span className="text-[11px] font-medium text-[#888888] block">Catalog WAL Sync</span>
+                      <span className="text-[#22c55e] font-mono text-xs flex items-center gap-1">
+                        <Check size={11} /> Synced & Verified
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* Rebuild Index Tool */}
+                  <div className="pt-2 border-t border-[#1a1a1a] space-y-2">
+                    <span className="text-xs font-semibold text-[#f0f0f0] block">
+                      Rebuild Local Index from Telegram Storage
+                    </span>
+                    <p className="text-xs text-[#a3a3a3]">
+                      Reads metadata envelopes directly from Telegram messages to reconstruct your local catalog.
+                    </p>
+                    <Button
+                      variant="secondary"
+                      size="sm"
+                      onClick={handleRebuildIndex}
+                      disabled={isRebuilding}
+                      icon={<RefreshCw size={11} className={isRebuilding ? 'animate-spin' : ''} />}
+                    >
+                      {isRebuilding ? 'Rebuilding Index...' : 'Rebuild Index'}
+                    </Button>
+
+                    {/* Terminal Log Output */}
+                    {rebuildLogs.length > 0 && (
+                      <div className="p-2.5 bg-[#050505] border border-[#1f1f1f] text-[10px] space-y-1 font-mono text-[#aaaaaa] max-h-40 overflow-y-auto">
+                        <div className="text-[9px] text-[#555555] uppercase pb-1 flex items-center gap-1 border-b border-[#181818]">
+                          <Terminal size={10} /> Recovery Console
+                        </div>
+                        {rebuildLogs.map((log, idx) => (
+                          <div key={idx} className="leading-tight">
+                            {log}
+                          </div>
+                        ))}
+                        {rebuildDone && (
+                          <div className="text-[#22c55e] font-semibold pt-1">
+                            ✓ Catalog successfully synchronized with Telegram storage.
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Service Checklist */}
+                  <div className="pt-2 border-t border-[#1a1a1a]">
+                    <span className="text-[11px] font-semibold text-[#888888] block mb-2 uppercase">Service Status</span>
+                    <div className="p-3 bg-[#111111] border border-[#1a1a1a] space-y-2 text-[11px] text-[#888888]">
+                      <div className="flex items-center gap-2">
+                        <CheckCircle size={13} className="text-[#22c55e]" />
+                        <span>Direct MTProto Bot Client: Active</span>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <CheckCircle size={13} className="text-[#22c55e]" />
+                        <span>Unified Single-Service Server: Active</span>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <CheckCircle size={13} className="text-[#22c55e]" />
+                        <span>Ephemeral Disk Auto-Sync: Active</span>
+                      </div>
+                    </div>
                   </div>
                 </div>
               </div>
             )}
           </div>
-
-        </div>
+        )}
 
       </div>
     </div>

@@ -2,6 +2,7 @@ import React, { useRef, useState, useEffect } from 'react'
 import { useVaultStore } from '../../store/useVaultStore'
 import { Play, Pause, Volume2, VolumeX, X, Download, Music } from 'lucide-react'
 import { formatBytes } from '../../utils/format'
+import { resolveMediaUrl } from '../../utils/apiUrl'
 
 export const AudioPlayerBar: React.FC = () => {
   const { activeAudioItem, setActiveAudioItem } = useVaultStore()
@@ -25,7 +26,7 @@ export const AudioPlayerBar: React.FC = () => {
     const audio = audioRef.current
     if (!audio) return
 
-    audio.src = activeAudioItem.preview_url || `/api/v1/files/${activeAudioItem.id}/download`
+    audio.src = resolveMediaUrl(activeAudioItem.preview_url || `/api/v1/files/${activeAudioItem.id}/download`)
     audio.load()
     audio.play().then(() => setIsPlaying(true)).catch(() => setIsPlaying(false))
 
@@ -59,8 +60,7 @@ export const AudioPlayerBar: React.FC = () => {
       audioRef.current.pause()
       setIsPlaying(false)
     } else {
-      audioRef.current.play()
-      setIsPlaying(true)
+      audioRef.current.play().then(() => setIsPlaying(true)).catch(() => setIsPlaying(false))
     }
   }
 
@@ -87,13 +87,13 @@ export const AudioPlayerBar: React.FC = () => {
 
   const handleDownload = () => {
     const a = document.createElement('a')
-    a.href = activeAudioItem.preview_url || `/api/v1/files/${activeAudioItem.id}/download`
+    a.href = resolveMediaUrl(activeAudioItem.preview_url || `/api/v1/files/${activeAudioItem.id}/download`)
     a.download = activeAudioItem.filename
     a.click()
   }
 
   return (
-    <aside aria-label="Audio player" className="fixed bottom-0 left-0 right-0 z-40 bg-[#080808] border-t border-[#282828] text-[#f0f0f0] font-mono text-xs select-none">
+    <aside aria-label="Audio player" className="fixed left-0 right-0 z-40 bottom-[calc(3.5rem+env(safe-area-inset-bottom))] md:bottom-0 bg-[#080808] border-t border-[#282828] text-[#f0f0f0] font-mono text-xs select-none">
       <audio ref={audioRef} />
 
       {/* Scrubber line across top edge */}
@@ -115,10 +115,10 @@ export const AudioPlayerBar: React.FC = () => {
             <Music size={14} />
           </div>
           <div className="truncate">
-            <div className="font-semibold text-xs text-[#ffffff] truncate" title={activeAudioItem.filename}>
+            <div className="font-medium text-xs text-[#ffffff] truncate" title={activeAudioItem.filename}>
               {activeAudioItem.filename}
             </div>
-            <div className="text-[10px] text-[#777777]">
+            <div className="text-xs text-[#888888] font-mono mt-0.5">
               {formatSecs(currentTime)} / {formatSecs(duration || 0)} • {formatBytes(activeAudioItem.size_bytes)}
             </div>
           </div>

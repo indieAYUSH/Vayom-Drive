@@ -1,8 +1,9 @@
 import React, { useState, useEffect, useRef } from 'react'
 import { FileItem } from '../../types/vault'
 import { Button } from '../common/Button'
-import { Download, Copy, Check, FileText, Music, Play, Pause, Volume2, VolumeX } from 'lucide-react'
+import { Download, Copy, Check, FileText, Music, Play, Pause, Volume2, VolumeX, ExternalLink } from 'lucide-react'
 import { formatBytes } from '../../utils/format'
+import { resolveMediaUrl } from '../../utils/apiUrl'
 
 interface DocPreviewProps {
   item: FileItem
@@ -50,7 +51,8 @@ export const DocPreview: React.FC<DocPreviewProps> = ({ item, onDownload }) => {
     const controller = new AbortController()
     setIsLoadingText(true)
 
-    fetch(item.preview_url || `/api/v1/files/${item.id}/download`, { signal: controller.signal })
+    const previewUrl = resolveMediaUrl(item.preview_url || `/api/v1/files/${item.id}/view`)
+    fetch(previewUrl, { signal: controller.signal })
       .then((res) => {
         if (!res.ok) throw new Error('Failed to load file preview')
         return res.text()
@@ -121,25 +123,63 @@ export const DocPreview: React.FC<DocPreviewProps> = ({ item, onDownload }) => {
 
   // PDF Preview
   if (isPdf) {
+    const viewUrl = resolveMediaUrl(`/api/v1/files/${item.id}/view`)
     return (
-      <div className="w-full h-full flex flex-col bg-[#0a0a0a] border border-[#222222]">
-        <div className="h-9 bg-[#111111] border-b border-[#222222] px-3 flex items-center justify-between font-mono text-xs text-[#888888]">
-          <span>PDF DOCUMENT PREVIEW</span>
-          <Button variant="outline" size="sm" onClick={onDownload} icon={<Download size={12} />}>
-            Download
-          </Button>
+      <div className="w-full h-full max-w-6xl flex flex-col bg-[#0a0a0a] border border-[#222222] shadow-2xl">
+        <div className="h-10 bg-[#111111] border-b border-[#222222] px-3.5 flex items-center justify-between font-mono text-xs text-[#888888] select-none">
+          <div className="flex items-center gap-2.5 truncate mr-2">
+            <span className="px-1.5 py-0.5 bg-[#181818] text-[#ffffff] border border-[#333333] text-[10px] font-bold tracking-wider">
+              PDF
+            </span>
+            <span className="font-sans text-xs font-semibold text-[#f0f0f0] truncate" title={item.filename}>
+              {item.filename}
+            </span>
+            <span className="text-[11px] text-[#666666] font-mono shrink-0">
+              ({formatBytes(item.size_bytes)})
+            </span>
+          </div>
+          <div className="flex items-center gap-2 shrink-0">
+            <a
+              href={viewUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="px-2.5 py-1 border border-[#282828] hover:border-[#444444] text-[#cccccc] hover:text-[#ffffff] flex items-center gap-1.5 text-[11px] font-sans transition-colors"
+              title="Open PDF in a full-screen browser tab"
+            >
+              <ExternalLink size={12} />
+              <span className="hidden sm:inline">Open in New Tab</span>
+            </a>
+            <Button variant="outline" size="sm" onClick={onDownload} icon={<Download size={12} />}>
+              Download
+            </Button>
+          </div>
         </div>
-        <div className="flex-1 w-full h-full relative">
+        <div className="flex-1 w-full h-full relative bg-[#141414] min-h-[500px]">
           <object
-            data={item.preview_url || `/api/v1/files/${item.id}/download`}
+            data={viewUrl}
             type="application/pdf"
-            className="w-full h-full"
+            className="w-full h-full border-0"
           >
             <div className="flex flex-col items-center justify-center p-8 h-full text-center font-mono">
-              <p className="text-sm text-[#888888] mb-4">Embedded PDF viewer not supported by your browser.</p>
-              <Button variant="primary" onClick={onDownload} icon={<Download size={13} />}>
-                Download PDF to View
-              </Button>
+              <FileText size={48} className="text-[#888888] mb-3" />
+              <p className="text-sm font-semibold text-[#f0f0f0] mb-1">{item.filename}</p>
+              <p className="text-xs text-[#888888] mb-4 max-w-md">
+                Your browser could not embed this PDF directly. You can view it in a new tab or download the file.
+              </p>
+              <div className="flex items-center gap-3">
+                <a
+                  href={viewUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="px-3.5 py-1.5 bg-[#222222] text-[#ffffff] text-xs border border-[#333333] hover:border-[#555555] flex items-center gap-1.5 font-sans transition-colors"
+                >
+                  <ExternalLink size={13} />
+                  Open in New Tab
+                </a>
+                <Button variant="primary" onClick={onDownload} icon={<Download size={13} />}>
+                  Download PDF
+                </Button>
+              </div>
             </div>
           </object>
         </div>
@@ -153,7 +193,7 @@ export const DocPreview: React.FC<DocPreviewProps> = ({ item, onDownload }) => {
       <div className="flex flex-col items-center justify-center p-8 bg-[#0c0c0c] border border-[#222222] font-mono max-w-lg w-full">
         <audio
           ref={audioRef}
-          src={item.preview_url || `/api/v1/files/${item.id}/download`}
+          src={item.preview_url || `/api/v1/files/${item.id}/view`}
           onTimeUpdate={() => audioRef.current && setAudioTime(audioRef.current.currentTime)}
           onLoadedMetadata={() => audioRef.current && setAudioDuration(audioRef.current.duration)}
           onEnded={() => setIsPlayingAudio(false)}
@@ -212,8 +252,8 @@ export const DocPreview: React.FC<DocPreviewProps> = ({ item, onDownload }) => {
       <div className="w-full h-full max-w-5xl flex flex-col bg-[#0a0a0a] border border-[#222222] font-mono text-xs">
         <div className="h-9 bg-[#111111] border-b border-[#222222] px-3 flex items-center justify-between text-[#888888] select-none">
           <div className="flex items-center gap-2">
-            <span className="uppercase text-[11px] font-semibold text-[#f0f0f0]">{ext || 'TEXT'} FILE PREVIEW</span>
-            <span className="text-[10px] text-[#555555]">({formatBytes(item.size_bytes)})</span>
+            <span className="uppercase text-xs font-semibold text-[#f0f0f0]">{ext || 'TEXT'} FILE PREVIEW</span>
+            <span className="text-xs text-[#888888] font-mono">({formatBytes(item.size_bytes)})</span>
           </div>
           <div className="flex items-center gap-2">
             {textContent && (

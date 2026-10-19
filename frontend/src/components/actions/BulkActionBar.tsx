@@ -2,6 +2,7 @@ import React from 'react'
 import { useVaultStore } from '../../store/useVaultStore'
 import { Trash2, Download, FolderPlus, Tag, X } from 'lucide-react'
 import { Button } from '../common/Button'
+import { apiUrl } from '../../utils/apiUrl'
 
 export const BulkActionBar: React.FC = () => {
   const { 
@@ -19,7 +20,7 @@ export const BulkActionBar: React.FC = () => {
     // H-33: fall back to the download endpoint instead of silently skipping items,
     // and stagger the anchor clicks so the browser doesn't throttle parallel downloads
     const downloads = selectedFiles.map((file) => ({
-      url: `/api/v1/files/${file.id}/download`,
+      url: apiUrl(`/api/v1/files/${file.id}/download`),
       filename: file.filename,
     }))
     downloads.forEach((d, index) => {
@@ -38,8 +39,8 @@ export const BulkActionBar: React.FC = () => {
   }
 
   return (
-    <div className="fixed bottom-16 sm:bottom-6 left-1/2 -translate-x-1/2 z-40 bg-[#000000] border-2 border-[#ffffff] text-[#ffffff] px-3 sm:px-4 py-2 sm:py-2.5 font-mono text-xs flex flex-wrap sm:flex-nowrap items-center justify-between sm:justify-center gap-2 sm:gap-4 select-none shadow-none max-w-[calc(100vw-1rem)] w-auto">
-      <div className="font-semibold whitespace-nowrap text-[11px] sm:text-xs">
+    <div className="fixed bottom-16 sm:bottom-6 left-1/2 -translate-x-1/2 z-40 bg-[#000000] border-2 border-[#ffffff] text-[#ffffff] px-3 sm:px-4 py-2 sm:py-2.5 text-xs flex flex-wrap sm:flex-nowrap items-center justify-between sm:justify-center gap-2 sm:gap-4 select-none shadow-none max-w-[calc(100vw-1rem)] w-auto">
+      <div className="font-mono font-medium whitespace-nowrap text-xs text-[#ffffff]">
         [ {selectedIds.length} {selectedIds.length === 1 ? 'item' : 'items'} ]
       </div>
 

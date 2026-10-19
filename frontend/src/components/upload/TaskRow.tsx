@@ -54,10 +54,10 @@ export const TaskRow: React.FC<TaskRowProps> = ({
   }
 
   return (
-    <div className="p-3 bg-[#141414] border border-[#222222] font-mono text-xs flex flex-col gap-2 select-none">
+    <div className="p-3 bg-[#141414] border border-[#222222] text-xs flex flex-col gap-2 select-none">
       {/* Header Info */}
       <div className="flex items-center justify-between">
-        <div className="truncate max-w-[200px] font-medium text-[#f0f0f0]" title={task.filename}>
+        <div className="truncate max-w-[200px] font-medium text-xs text-[#f0f0f0]" title={task.filename}>
           {task.filename}
         </div>
         <div className="flex items-center gap-1.5">
@@ -121,7 +121,7 @@ export const TaskRow: React.FC<TaskRowProps> = ({
       </div>
 
       {/* Speed, Stage & Size Stats */}
-      <div className="flex items-center justify-between text-[10px] text-[#777777]">
+      <div className="flex items-center justify-between text-xs text-[#888888] font-mono">
         <div className="flex items-center gap-1.5 truncate">
           {task.status === 'buffering' && (
             <span>
@@ -138,7 +138,7 @@ export const TaskRow: React.FC<TaskRowProps> = ({
           {task.status === 'uploading' && (
             <>
               <span>
-                Cloud Upload: {formatBytes(task.uploaded_bytes)} / {formatBytes(task.size_bytes)} ({task.progress_percent}%)
+                Upload: {formatBytes(task.uploaded_bytes)} / {formatBytes(task.size_bytes)} ({task.progress_percent}%)
               </span>
               {task.stage && (
                 <span className="text-[#888888] truncate hidden sm:inline">• {task.stage}</span>
@@ -148,7 +148,7 @@ export const TaskRow: React.FC<TaskRowProps> = ({
 
           {task.status === 'verifying' && (
             <span>
-              Catalog WAL: Syncing encrypted index to Telegram...
+              Syncing encrypted index...
             </span>
           )}
 
@@ -166,15 +166,15 @@ export const TaskRow: React.FC<TaskRowProps> = ({
           )}
         </div>
 
-        <div className="flex items-center gap-1.5 shrink-0">
+        <div className="flex items-center gap-1.5 shrink-0 font-mono">
           {task.status === 'buffering' && task.speed_bps > 0 && (
-            <span className="text-[#3b82f6]">
+            <span className="text-[#38bdf8]">
               {formatSpeed(task.speed_bps)} • Gateway
             </span>
           )}
 
           {task.status === 'uploading' && task.speed_bps > 0 && (
-            <span className="text-[#3b82f6]">
+            <span className="text-[#38bdf8]">
               {formatSpeed(task.speed_bps)} • ETA {task.eta_seconds}s
             </span>
           )}

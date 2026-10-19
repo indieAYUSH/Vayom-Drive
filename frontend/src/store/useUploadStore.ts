@@ -2,7 +2,7 @@ import { create } from 'zustand'
 import { UploadTask } from '../types/upload'
 import { AlbumItem } from '../types/vault'
 import { useVaultStore } from './useVaultStore'
-import { api } from '../services/api'
+import { api, API_BASE } from '../services/api'
 
 interface UploadState {
   tasks: UploadTask[]
@@ -24,6 +24,10 @@ interface UploadState {
 // Map of active XMLHttpRequest instances for pause/cancellation
 const activeUploads = new Map<string, XMLHttpRequest>()
 const activePollIntervals = new Map<string, any>()
+// H-41: chunked tasks with a live worker (claimed synchronously, released in finally)
+const activeChunkWorkers = new Set<string>()
+// H-39: prevents recursive re-entry of the flood-wait requeue path
+let isRequeuingRateLimited = false
 
 // Anti-Ban Invariant 4: Limit upload concurrency to 3-4 parallel workers
 const MAX_CONCURRENT_UPLOADS = 3
@@ -54,6 +58,25 @@ function findOrCreateAlbum(folderName: string): Promise<AlbumItem> {
   return promise
 }
 
+// H-55: associate a completed upload with the album captured at enqueue time,
+// falling back to the dropped folder's top-level name. Shared by both the
+// single-part and chunked completion paths so they can't diverge.
+function associateUploadedFile(fileId: string, task: UploadTask) {
+  const albumId = task.target_album_id
+  if (albumId) {
+    api.addFileToAlbum(albumId, fileId).catch(() => {})
+    return
+  }
+  const rel = ((task.file as any).customRelativePath || (task.file as any).webkitRelativePath) as string | undefined
+  if (!rel) return
+  const parts = rel.split('/')
+  if (parts.length <= 1) return
+  // H-16: concurrent completions from one directory drop share a single create
+  findOrCreateAlbum(parts[0])
+    .then((album) => api.addFileToAlbum(album.id, fileId).catch(() => {}))
+    .catch(() => {})
+}
+
 function updateFloodWaitTicker() {
   const now = Date.now()
   if (floodWaitCooldownUntil > now) {
@@ -72,32 +95,53 @@ function updateFloodWaitTicker() {
 }
 
 function requeueAllRateLimitedTasks() {
+  // H-39: aborting an xhr runs its handler synchronously, and that handler calls
+  // processQueue() → this function again. Without the guard the inner call would
+  // requeue and restart workers while the outer loop is still aborting/deleting.
+  if (isRequeuingRateLimited) return
+
   const state = useUploadStore.getState()
-  const hasRateLimited = state.tasks.some((t) => t.status === 'rate_limited')
-  if (hasRateLimited) {
-    state.tasks.forEach((t) => {
-      if (t.status === 'rate_limited') {
-        const xhr = activeUploads.get(t.id)
-        if (xhr) {
-          xhr.abort()
-          activeUploads.delete(t.id)
-        }
-        const poll = activePollIntervals.get(t.id)
+  const rateLimitedIds = new Set(
+    state.tasks.filter((t) => t.status === 'rate_limited').map((t) => t.id)
+  )
+
+  if (rateLimitedIds.size > 0) {
+    isRequeuingRateLimited = true
+    try {
+      for (const id of rateLimitedIds) {
+        // Clear the old poll interval *before* aborting so a re-entrant restart
+        // can install a fresh one without this cleanup removing it.
+        const poll = activePollIntervals.get(id)
         if (poll) {
           clearInterval(poll)
-          activePollIntervals.delete(t.id)
+          activePollIntervals.delete(id)
+        }
+
+        const xhr = activeUploads.get(id)
+        if (xhr) {
+          xhr.abort()
+          // H-39: only remove our own registration — the abort handler may
+          // already have started and registered a newer worker for this task.
+          if (activeUploads.get(id) === xhr) {
+            activeUploads.delete(id)
+          }
         }
       }
-    })
 
-    useUploadStore.setState((s) => ({
-      tasks: s.tasks.map((t) =>
-        t.status === 'rate_limited'
-          ? { ...t, status: 'queued', error_message: undefined, speed_bps: 0 }
-          : t
-      ),
-    }))
+      // Requeue only after every abort has finished unwinding so no worker can
+      // start while its predecessor's abort handler is still on the stack.
+      useUploadStore.setState((s) => ({
+        tasks: s.tasks.map((t) =>
+          rateLimitedIds.has(t.id)
+            ? { ...t, status: 'queued', error_message: undefined, speed_bps: 0 }
+            : t
+        ),
+      }))
+    } finally {
+      isRequeuingRateLimited = false
+    }
   }
+
   updateFloodWaitTicker()
   processQueue()
 }
@@ -184,6 +228,8 @@ export const useUploadStore = create<UploadState>((set, get) => ({
     if (fileArray.length === 0) return
 
     const currentBackend = get().selectedBackend
+    // H-55: capture the destination album now, not when the upload completes
+    const targetAlbumId = useVaultStore.getState().selectedAlbumId ?? null
     const newTasks: UploadTask[] = fileArray.map((file) => {
       const isLarge = file.size > 1887436800
       const totalParts = (isLarge && currentBackend === 'telegram') ? Math.ceil(file.size / 1887436800) : 1
@@ -200,6 +246,7 @@ export const useUploadStore = create<UploadState>((set, get) => ({
         current_part: 1,
         total_parts: totalParts,
         storage_backend: currentBackend,
+        target_album_id: targetAlbumId,
         created_at: Date.now(),
       }
     })
@@ -215,31 +262,37 @@ export const useUploadStore = create<UploadState>((set, get) => ({
 
   pauseTask: (id) => {
     const xhr = activeUploads.get(id)
-    if (xhr) {
-      xhr.abort()
-      activeUploads.delete(id)
-    }
     const pollInterval = activePollIntervals.get(id)
     if (pollInterval) {
       clearInterval(pollInterval)
       activePollIntervals.delete(id)
     }
+    // Mark paused before aborting so a re-entrant callback cannot restart it.
     set((state) => ({
       tasks: state.tasks.map((t) => (t.id === id ? { ...t, status: 'paused', speed_bps: 0 } : t)),
     }))
+    if (xhr) {
+      xhr.abort()
+      // H-39: only remove our own registration, never a newer worker's.
+      if (activeUploads.get(id) === xhr) {
+        activeUploads.delete(id)
+      }
+    }
     processQueue()
   },
 
   resumeTask: (id) => {
     const xhr = activeUploads.get(id)
-    if (xhr) {
-      xhr.abort()
-      activeUploads.delete(id)
-    }
     const pollInterval = activePollIntervals.get(id)
     if (pollInterval) {
       clearInterval(pollInterval)
       activePollIntervals.delete(id)
+    }
+    if (xhr) {
+      xhr.abort()
+      if (activeUploads.get(id) === xhr) {
+        activeUploads.delete(id)
+      }
     }
     set((state) => ({
       tasks: state.tasks.map((t) =>
@@ -252,14 +305,22 @@ export const useUploadStore = create<UploadState>((set, get) => ({
   cancelTask: (id) => {
     const task = get().tasks.find((t) => t.id === id)
     const xhr = activeUploads.get(id)
-    if (xhr) {
-      xhr.abort()
-      activeUploads.delete(id)
-    }
     const pollInterval = activePollIntervals.get(id)
     if (pollInterval) {
       clearInterval(pollInterval)
       activePollIntervals.delete(id)
+    }
+
+    // Remove the task first so no abort/poll callback can restart it.
+    set((state) => ({
+      tasks: state.tasks.filter((t) => t.id !== id),
+    }))
+
+    if (xhr) {
+      xhr.abort()
+      if (activeUploads.get(id) === xhr) {
+        activeUploads.delete(id)
+      }
     }
 
     // H-6: Call cleanupIncompleteUpload to purge orphan Telegram message parts
@@ -267,9 +328,6 @@ export const useUploadStore = create<UploadState>((set, get) => ({
       api.cleanupIncompleteUpload(task.server_file_id).catch(() => {})
     }
 
-    set((state) => ({
-      tasks: state.tasks.filter((t) => t.id !== id),
-    }))
     processQueue()
   },
 
@@ -321,23 +379,25 @@ function executeRealUpload(taskId: string) {
   const xhr = new XMLHttpRequest()
   activeUploads.set(taskId, xhr)
 
+  let pollInterval: any = null
   const cleanupPolling = () => {
-    const interval = activePollIntervals.get(taskId)
-    if (interval) {
-      clearInterval(interval)
+    // H-39: only clear the interval installed by *this* worker. A restarted
+    // worker may have installed a fresh interval for the same task id.
+    if (pollInterval && activePollIntervals.get(taskId) === pollInterval) {
+      clearInterval(pollInterval)
       activePollIntervals.delete(taskId)
     }
   }
 
   // Poll real-time MTProto upload progress from backend every 300ms with concurrency guard
   let isPolling = false
-  const pollInterval = setInterval(async () => {
+  pollInterval = setInterval(async () => {
     if (isPolling) return
     isPolling = true
     try {
       const controller = new AbortController()
       const timeoutId = setTimeout(() => controller.abort(), 2500)
-      const res = await fetch(`/api/v1/upload/${encodeURIComponent(taskId)}/progress`, {
+      const res = await fetch(`${API_BASE}/upload/${encodeURIComponent(taskId)}/progress`, {
         signal: controller.signal,
       })
       clearTimeout(timeoutId)
@@ -412,10 +472,13 @@ function executeRealUpload(taskId: string) {
             updates.progress_percent = Math.min(99, Math.max(0, data.progress_percent))
           }
         } else if (data.status === 'failed') {
-          const xhr = activeUploads.get(taskId)
-          if (xhr) {
-            xhr.abort()
-            activeUploads.delete(taskId)
+          const activeXhr = activeUploads.get(taskId)
+          if (activeXhr) {
+            activeXhr.abort()
+            // H-39: never delete a newer worker's registration.
+            if (activeUploads.get(taskId) === activeXhr) {
+              activeUploads.delete(taskId)
+            }
           }
           cleanupPolling()
           updates.status = 'failed'
@@ -477,7 +540,11 @@ function executeRealUpload(taskId: string) {
 
   xhr.onload = () => {
     cleanupPolling()
-    activeUploads.delete(taskId)
+    // H-39: identity guard — a flood-wait restart may already have registered
+    // a newer xhr for this task.
+    if (activeUploads.get(taskId) === xhr) {
+      activeUploads.delete(taskId)
+    }
     if (xhr.status >= 200 && xhr.status < 300) {
       updateTask({
         status: 'done',
@@ -495,18 +562,10 @@ function executeRealUpload(taskId: string) {
         if (json.file_id) {
           updateTask({ server_file_id: json.file_id })
         }
-        const currentAlbumId = useVaultStore.getState().selectedAlbumId
-        if (json.file_id && currentAlbumId) {
-          api.addFileToAlbum(currentAlbumId, json.file_id).catch(() => {})
-        } else if (json.file_id && (task.file as any).webkitRelativePath) {
-          const rel = (task.file as any).webkitRelativePath as string
-          const parts = rel.split('/')
-          if (parts.length > 1) {
-            // H-16: concurrent completions from one directory drop share a single create
-            findOrCreateAlbum(parts[0])
-              .then((album) => api.addFileToAlbum(album.id, json.file_id).catch(() => {}))
-              .catch(() => {})
-          }
+        // H-55: use the album captured when the task was enqueued (plus the
+        // dropped-folder fallback), not whatever is selected right now.
+        if (json.file_id) {
+          associateUploadedFile(json.file_id, task)
         }
       } catch {}
 
@@ -567,7 +626,9 @@ function executeRealUpload(taskId: string) {
 
   xhr.onerror = () => {
     cleanupPolling()
-    activeUploads.delete(taskId)
+    if (activeUploads.get(taskId) === xhr) {
+      activeUploads.delete(taskId)
+    }
     updateTask({
       status: 'failed',
       error_message: 'Network connection error during MTProto upload',
@@ -578,7 +639,11 @@ function executeRealUpload(taskId: string) {
 
   xhr.onabort = () => {
     cleanupPolling()
-    activeUploads.delete(taskId)
+    // H-39: only remove our own registration; a re-entrant restart may have
+    // already registered a replacement xhr for this task id.
+    if (activeUploads.get(taskId) === xhr) {
+      activeUploads.delete(taskId)
+    }
     processQueue()
   }
 
@@ -586,7 +651,7 @@ function executeRealUpload(taskId: string) {
   formData.append('file', task.file)
   formData.append('task_id', taskId)
 
-  xhr.open('POST', `/api/v1/upload?task_id=${encodeURIComponent(taskId)}`)
+  xhr.open('POST', `${API_BASE}/upload?task_id=${encodeURIComponent(taskId)}`)
   xhr.setRequestHeader('X-Task-ID', taskId)
   if (task.storage_backend) {
     xhr.setRequestHeader('X-Storage-Backend', task.storage_backend)
@@ -594,8 +659,26 @@ function executeRealUpload(taskId: string) {
   xhr.send(formData)
 }
 
-// H-5: Resumable chunked upload worker for multi-part files
+// H-41: chunked worker entry point. The guard is claimed synchronously before
+// any await so two processQueue() passes cannot run the same task in parallel.
 async function executeChunkedUpload(taskId: string) {
+  if (activeChunkWorkers.has(taskId)) return
+  activeChunkWorkers.add(taskId)
+  try {
+    await executeChunkedUploadInner(taskId)
+  } finally {
+    activeChunkWorkers.delete(taskId)
+    // If the task was re-queued while the old worker was still unwinding
+    // (pause → resume, or a flood restart), make sure it gets a new worker.
+    const current = useUploadStore.getState().tasks.find((t) => t.id === taskId)
+    if (current?.status === 'queued') {
+      processQueue()
+    }
+  }
+}
+
+// H-5: Resumable chunked upload worker for multi-part files
+async function executeChunkedUploadInner(taskId: string) {
   const updateTask = (updates: Partial<UploadTask>) => {
     useUploadStore.setState((state) => ({
       tasks: state.tasks.map((t) => (t.id === taskId ? { ...t, ...updates } : t)),
@@ -634,11 +717,21 @@ async function executeChunkedUpload(taskId: string) {
       return
     }
   } else {
+    // H-41: leave the selectable 'queued' state before awaiting the status query
+    // so a concurrent processQueue() cannot pick this task for a second worker.
+    updateTask({
+      status: 'buffering',
+      stage: 'Resuming upload session...',
+    })
     // Session already exists: query backend upload status for one-click resumption!
     try {
       const statusRes = await api.getUploadStatus(fileId)
       uploadedPartsList = statusRes.uploaded_parts || []
-      const completedBytes = uploadedPartsList.length * Math.min(PART_SIZE, file.size / totalParts)
+      // H-48: exact bytes from uploaded part indices (last part is usually smaller than PART_SIZE)
+      const completedBytes = uploadedPartsList.reduce((sum, idx) => {
+        const start = idx * PART_SIZE
+        return sum + Math.max(0, Math.min(PART_SIZE, file.size - start))
+      }, 0)
       const pct = Math.min(99, Math.round((completedBytes / file.size) * 100))
       updateTask({
         uploaded_bytes: completedBytes,
@@ -715,14 +808,57 @@ async function executeChunkedUpload(taskId: string) {
 
     try {
       await promise
-      activeUploads.delete(taskId)
+      // H-39: identity guard — only clear this request's own registration.
+      if (activeUploads.get(taskId) === xhr) {
+        activeUploads.delete(taskId)
+      }
       uploadedPartsList.push(partIdx)
     } catch (err: any) {
-      activeUploads.delete(taskId)
+      const isCurrent = activeUploads.get(taskId) === xhr
+      if (isCurrent) {
+        activeUploads.delete(taskId)
+      }
       const checkTask = useUploadStore.getState().tasks.find((t) => t.id === taskId)
       if (checkTask?.status === 'paused') {
         return
       }
+      // H-39: this request was superseded (pause/resume/cancel/flood restart);
+      // a stale rejection must not overwrite the state of the new worker.
+      if (!isCurrent) {
+        return
+      }
+
+      // H-42: mirror the single-part flood handling — a FLOOD_WAIT on a chunk
+      // pauses the queue instead of failing the file; the next attempt resumes
+      // from the committed parts.
+      let floodWaitSec = 0
+      try {
+        const errJson = JSON.parse(xhr.responseText)
+        if (errJson.flood_wait_seconds) {
+          floodWaitSec = errJson.flood_wait_seconds
+        } else if (typeof errJson.detail === 'string' && errJson.detail.includes('FLOOD_WAIT_')) {
+          const match = errJson.detail.match(/FLOOD_WAIT_(\d+)/)
+          if (match) floodWaitSec = parseInt(match[1], 10)
+        }
+      } catch {}
+      if (!floodWaitSec) {
+        const retryAfter = parseInt(xhr.getResponseHeader('Retry-After') || '0', 10)
+        if (retryAfter > 0) floodWaitSec = retryAfter
+      }
+
+      if (xhr.status === 429 || floodWaitSec > 0) {
+        const waitPenalty = (floodWaitSec || 10) + 2
+        const cooldownUntil = Date.now() + waitPenalty * 1000
+        updateTask({
+          status: 'rate_limited',
+          error_message: `Telegram FloodWait: pausing queue for ${waitPenalty}s to safeguard account...`,
+          speed_bps: 0,
+          eta_seconds: 0,
+        })
+        scheduleFloodWaitCooldown(cooldownUntil)
+        return
+      }
+
       updateTask({ status: 'failed', error_message: err.message || 'Chunk upload failed' })
       processQueue()
       return
@@ -740,10 +876,10 @@ async function executeChunkedUpload(taskId: string) {
     error_message: undefined,
   })
 
-  // Auto-associate with current folder
-  const currentAlbumId = useVaultStore.getState().selectedAlbumId
-  if (fileId && currentAlbumId) {
-    api.addFileToAlbum(currentAlbumId, fileId).catch(() => {})
+  // H-55: same album/folder association as the single-part path (album captured
+  // at enqueue time, dropped-folder name as fallback)
+  if (fileId) {
+    associateUploadedFile(fileId, task)
   }
 
   useVaultStore.getState().fetchFiles()

@@ -98,48 +98,64 @@ export const LoginView: React.FC = () => {
   const handle2FASubmit = async (e: React.FormEvent) => {
     e.preventDefault()
     if (!twoFactorPassword) return
-    await submit2FA(twoFactorPassword)
+    try {
+      await submit2FA(twoFactorPassword)
+    } catch {
+      // H-49: failure is surfaced via store error state
+    }
   }
 
   const handleQrFinalize = async () => {
-    await finalizeQr(
-      displayName.trim() || 'Vault User',
-      selectedChannelAction,
-      selectedChannelAction === 'select_existing' ? selectedChannelId : undefined
-    )
+    try {
+      await finalizeQr(
+        displayName.trim() || 'Vault User',
+        selectedChannelAction,
+        selectedChannelAction === 'select_existing' ? selectedChannelId : undefined
+      )
+    } catch {
+      // H-49: failure is surfaced via store error state
+    }
   }
 
   const handleBotSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
     if (!botToken || !botChannelId) return
-    await loginWithBot(botToken, botChannelId, botDisplayName)
+    try {
+      await loginWithBot(botToken, botChannelId, botDisplayName)
+    } catch {
+      // H-49: failure is surfaced via store error state
+    }
   }
 
   const handleDeveloperSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
     if (!devApiId || !devApiHash || !devBotToken || !devChannelId) return
-    await loginWithDeveloper(Number(devApiId), devApiHash, devBotToken, devChannelId, devDisplayName)
+    try {
+      await loginWithDeveloper(Number(devApiId), devApiHash, devBotToken, devChannelId, devDisplayName)
+    } catch {
+      // H-49: failure is surfaced via store error state
+    }
   }
 
   return (
-    <div className="min-h-screen bg-[#000000] text-[#e5e5e5] font-mono flex flex-col justify-between selection:bg-[#ffffff] selection:text-[#000000]">
+    <div className="min-h-screen bg-[#000000] text-[#e5e5e5] flex flex-col justify-between selection:bg-[#ffffff] selection:text-[#000000]">
       {/* Top Cyber Navigation Bar */}
       <header className="h-14 border-b border-[#222222] px-4 sm:px-6 flex items-center justify-between bg-[#080808]">
         <div className="flex items-center gap-3">
           <div className="w-5 h-5 bg-[#ffffff] flex items-center justify-center">
             <div className="w-2.5 h-2.5 bg-[#000000]" />
           </div>
-          <span className="text-sm font-bold tracking-widest text-[#ffffff] uppercase">
+          <span className="text-sm font-bold tracking-wider text-[#ffffff] uppercase">
             VAYOM DRIVE
           </span>
           <span className="text-[#444444] hidden sm:inline">|</span>
-          <span className="text-xs text-[#777777] hidden sm:inline">NODE GATEWAY</span>
+          <span className="text-xs text-[#888888] hidden sm:inline font-mono">NODE GATEWAY</span>
         </div>
 
         <div className="flex items-center gap-2">
           <span className="w-2 h-2 rounded-full bg-[#f59e0b] animate-pulse" />
-          <span className="text-[11px] text-[#f59e0b] tracking-wider uppercase">
-            AUTHENTICATION REQUIRED
+          <span className="text-xs text-[#f59e0b] font-medium">
+            Authentication Required
           </span>
         </div>
       </header>
@@ -148,17 +164,17 @@ export const LoginView: React.FC = () => {
       <main className="flex-1 flex items-center justify-center p-4 sm:p-6 my-4">
         <div className="w-full max-w-xl bg-[#0a0a0a] border border-[#282828] shadow-none">
           {/* Method Selector Tabs */}
-          <div className="grid grid-cols-3 border-b border-[#282828] text-xs font-semibold">
+          <div className="grid grid-cols-3 border-b border-[#282828] text-xs font-medium">
             <button
               onClick={() => { setActiveTab('qr'); clearError(); }}
               className={`p-3 text-center border-r border-[#282828] transition-colors flex items-center justify-center gap-1.5 ${
                 activeTab === 'qr'
                   ? 'bg-[#141414] text-[#ffffff] border-b-2 border-b-[#ffffff]'
-                  : 'text-[#666666] hover:text-[#aaaaaa] hover:bg-[#0d0d0d]'
+                  : 'text-[#888888] hover:text-[#cccccc] hover:bg-[#0d0d0d]'
               }`}
             >
               <QrCode size={14} className={activeTab === 'qr' ? 'text-[#22c55e]' : ''} />
-              <span>QR LOGIN</span>
+              <span>QR Login</span>
             </button>
 
             <button
@@ -166,11 +182,11 @@ export const LoginView: React.FC = () => {
               className={`p-3 text-center border-r border-[#282828] transition-colors flex items-center justify-center gap-1.5 ${
                 activeTab === 'bot'
                   ? 'bg-[#141414] text-[#ffffff] border-b-2 border-b-[#ffffff]'
-                  : 'text-[#666666] hover:text-[#aaaaaa] hover:bg-[#0d0d0d]'
+                  : 'text-[#888888] hover:text-[#cccccc] hover:bg-[#0d0d0d]'
               }`}
             >
               <Bot size={14} />
-              <span>BOT TOKEN</span>
+              <span>Bot Token</span>
             </button>
 
             <button
@@ -178,11 +194,11 @@ export const LoginView: React.FC = () => {
               className={`p-3 text-center transition-colors flex items-center justify-center gap-1.5 ${
                 activeTab === 'developer'
                   ? 'bg-[#141414] text-[#ffffff] border-b-2 border-b-[#ffffff]'
-                  : 'text-[#666666] hover:text-[#aaaaaa] hover:bg-[#0d0d0d]'
+                  : 'text-[#888888] hover:text-[#cccccc] hover:bg-[#0d0d0d]'
               }`}
             >
               <Terminal size={14} />
-              <span>SOVEREIGN</span>
+              <span>Sovereign</span>
             </button>
           </div>
 
@@ -199,10 +215,10 @@ export const LoginView: React.FC = () => {
             <div className="p-6 space-y-6">
               <div className="flex items-center justify-between pb-3 border-b border-[#1c1c1c]">
                 <div>
-                  <h2 className="text-sm font-bold uppercase tracking-wider text-[#ffffff] flex items-center gap-2">
+                  <h2 className="text-sm font-semibold tracking-normal text-[#ffffff] flex items-center gap-2">
                     Official Telegram QR Scan
                   </h2>
-                  <p className="text-[11px] text-[#777777] mt-0.5">
+                  <p className="text-xs text-[#888888] mt-0.5">
                     Instant 1-click MTProto login • 4 GB Premium support • Zero setup
                   </p>
                 </div>
@@ -235,7 +251,7 @@ export const LoginView: React.FC = () => {
                           <RefreshCw size={11} /> Retry Connection
                         </Button>
                       </div>
-                    ) : qrStatus === 'expired' || (qrStatus === 'waiting' && timeLeft === 0) ? (
+                    ) : qrStatus === 'expired' || (qrStatus === 'waiting' && qrExpiresAt != null && timeLeft === 0) ? (
                       <div className="w-full h-full bg-[#0d0d0d] p-3 flex flex-col items-center justify-center text-center space-y-2.5">
                         <div className="w-7 h-7 rounded-full bg-[#1f0a0a] border border-[#ef4444] flex items-center justify-center text-[#ef4444]">
                           <AlertTriangle size={14} />
@@ -275,24 +291,24 @@ export const LoginView: React.FC = () => {
 
                   {/* Step Instructions */}
                   <div className="space-y-3 text-xs flex-1">
-                    <div className="text-[11px] uppercase tracking-wider text-[#888888]">
+                    <div className="text-xs font-medium text-[#f0f0f0]">
                       How to connect in 5 seconds:
                     </div>
-                    <ol className="space-y-2 text-[#cccccc] list-decimal list-inside text-[11px] leading-relaxed">
-                      <li>Open <strong className="text-[#ffffff]">Telegram</strong> on your phone</li>
-                      <li>Go to <strong className="text-[#ffffff]">Settings</strong> → <strong className="text-[#ffffff]">Devices</strong></li>
-                      <li>Tap <strong className="text-[#22c55e]">Link Desktop Device</strong></li>
+                    <ol className="space-y-2 text-[#cccccc] list-decimal list-inside text-xs leading-relaxed">
+                      <li>Open <strong className="text-[#ffffff] font-medium">Telegram</strong> on your phone</li>
+                      <li>Go to <strong className="text-[#ffffff] font-medium">Settings</strong> → <strong className="text-[#ffffff] font-medium">Devices</strong></li>
+                      <li>Tap <strong className="text-[#22c55e] font-medium">Link Desktop Device</strong></li>
                       <li>Point your phone camera at this QR code</li>
                     </ol>
 
-                    <div className="pt-2 flex items-center justify-between text-[11px] text-[#666666] border-t border-[#1c1c1c]">
-                      <div className="flex items-center gap-1.5">
+                    <div className="pt-2 flex items-center justify-between text-xs text-[#888888] border-t border-[#1c1c1c]">
+                      <div className="flex items-center gap-1.5 font-mono text-[11px]">
                         <span className={`w-1.5 h-1.5 rounded-full ${timeLeft > 0 && qrStatus !== 'expired' && qrStatus !== 'failed' ? 'bg-[#22c55e] animate-pulse' : 'bg-[#ef4444]'}`} />
                         <span>
                           {qrStatus === 'failed' ? (
-                            <strong className="text-[#ef4444] font-bold tracking-wider">Connection Error</strong>
+                            <strong className="text-[#ef4444] font-semibold">Connection Error</strong>
                           ) : (
-                            <>Expires in: <strong className="text-[#ffffff] font-bold tracking-wider">{formatTime(timeLeft)}</strong></>
+                            <>Expires in: <strong className="text-[#ffffff] font-semibold">{formatTime(timeLeft)}</strong></>
                           )}
                         </span>
                       </div>
@@ -301,7 +317,7 @@ export const LoginView: React.FC = () => {
                           hasAttemptedRef.current = true
                           startQrSession()
                         }}
-                        className="text-[#22c55e] hover:underline flex items-center gap-1 font-mono text-[11px]"
+                        className="text-[#22c55e] hover:underline flex items-center gap-1 text-xs font-medium"
                       >
                         <RefreshCw size={11} /> {qrStatus === 'failed' ? 'Retry' : 'Refresh'}
                       </button>
@@ -367,14 +383,14 @@ export const LoginView: React.FC = () => {
                       placeholder="e.g. Ayush"
                       className="w-full bg-[#111111] border border-[#333333] px-3 py-2 text-xs text-[#ffffff] focus:border-[#ffffff] outline-none"
                     />
-                    <span className="text-[10px] text-[#555555]">
+                    <span className="text-xs text-[#888888]">
                       Automatically detected from your Telegram profile. You can keep or edit it.
                     </span>
                   </div>
 
                   {/* Channel Provisioning / Selection */}
                   <div className="space-y-2 pt-2 border-t border-[#1c1c1c]">
-                    <label className="text-[11px] uppercase text-[#888888] block">
+                    <label className="text-xs font-medium text-[#cccccc] block">
                       Storage Channel Allocation
                     </label>
 
@@ -419,7 +435,7 @@ export const LoginView: React.FC = () => {
                         <span className="font-semibold text-[#ffffff] block">
                           Auto-Create New Private Storage Channel (Sign-Up)
                         </span>
-                        <span className="text-[10px] text-[#777777] block mt-0.5">
+                        <span className="text-xs text-[#888888] block mt-0.5">
                           Creates a private channel named "{displayName || 'User'}'s Vayom Vault" automatically.
                         </span>
                       </div>
@@ -430,7 +446,7 @@ export const LoginView: React.FC = () => {
                     onClick={handleQrFinalize}
                     variant="primary"
                     size="md"
-                    className="w-full justify-center text-xs tracking-wider uppercase font-bold"
+                    className="w-full justify-center text-xs font-medium"
                     disabled={isLoading}
                     icon={<ArrowRight size={14} />}
                   >
@@ -463,40 +479,40 @@ export const LoginView: React.FC = () => {
           {activeTab === 'bot' && (
             <form onSubmit={handleBotSubmit} className="p-6 space-y-5">
               <div className="pb-3 border-b border-[#1c1c1c]">
-                <h2 className="text-sm font-bold uppercase tracking-wider text-[#ffffff]">
+                <h2 className="text-sm font-semibold tracking-normal text-[#ffffff]">
                   Dedicated Storage Bot Wizard
                 </h2>
-                <p className="text-[11px] text-[#777777] mt-0.5">
+                <p className="text-xs text-[#888888] mt-0.5">
                   Sandboxed bot mode • Zero personal chat access • 2 GB chunk limits
                 </p>
               </div>
 
               {/* Step-by-Step Interactive Guide */}
               <div className="p-3.5 bg-[#0f0f0f] border border-[#222222] space-y-2.5 text-xs text-[#bbbbbb]">
-                <div className="font-semibold text-[#ffffff] uppercase text-[10px] tracking-wider flex items-center justify-between">
+                <div className="font-medium text-[#ffffff] text-xs flex items-center justify-between">
                   <span>How to create your storage bot:</span>
                   <a
                     href="https://t.me/BotFather"
                     target="_blank"
                     rel="noreferrer"
-                    className="text-[#22c55e] hover:underline flex items-center gap-1 text-[10px]"
+                    className="text-[#22c55e] hover:underline flex items-center gap-1 text-xs"
                   >
-                    Open @BotFather <ExternalLink size={10} />
+                    Open @BotFather <ExternalLink size={11} />
                   </a>
                 </div>
-                <ol className="space-y-1.5 list-decimal list-inside text-[11px] text-[#999999] leading-relaxed">
-                  <li>Message <strong className="text-[#ffffff]">@BotFather</strong> on Telegram and send <code className="bg-[#1c1c1c] text-[#ffffff] px-1 py-0.5">/newbot</code></li>
-                  <li>Choose a bot name and username (e.g. <code className="text-[#e5e5e5]">MyVaultStorageBot</code>)</li>
+                <ol className="space-y-1.5 list-decimal list-inside text-xs text-[#999999] leading-relaxed">
+                  <li>Message <strong className="text-[#ffffff]">@BotFather</strong> on Telegram and send <code className="bg-[#1c1c1c] text-[#ffffff] px-1 py-0.5 font-mono">/newbot</code></li>
+                  <li>Choose a bot name and username (e.g. <code className="text-[#e5e5e5] font-mono">MyVaultStorageBot</code>)</li>
                   <li>Copy the HTTP API Token provided by BotFather</li>
                   <li>Create a new <strong className="text-[#ffffff]">Private Channel</strong> and add your bot as an <strong className="text-[#ffffff]">Administrator</strong></li>
                 </ol>
               </div>
 
               {/* Persistent Telegram App Notice */}
-              <div className="p-3 bg-[#171408] border border-[#78350f] text-[11px] text-[#f59e0b] flex items-start gap-2.5">
+              <div className="p-3 bg-[#171408] border border-[#78350f] text-xs text-[#f59e0b] flex items-start gap-2.5">
                 <AlertTriangle size={16} className="flex-shrink-0 mt-0.5" />
                 <div>
-                  <strong className="block text-[#fbbf24]">Best Experience Recommendation:</strong>
+                  <strong className="block text-[#fbbf24] font-medium">Best Experience Recommendation:</strong>
                   Do not uninstall Telegram from at least one of your devices so your private storage channel and bot remain active and recoverable.
                 </div>
               </div>
@@ -504,7 +520,7 @@ export const LoginView: React.FC = () => {
               {/* Inputs */}
               <div className="space-y-3 text-xs">
                 <div className="space-y-1">
-                  <label className="text-[11px] uppercase text-[#888888] block">Telegram Bot Token *</label>
+                  <label className="text-xs font-medium text-[#cccccc] block">Telegram Bot Token *</label>
                   <input
                     type="text"
                     value={botToken}
@@ -516,7 +532,7 @@ export const LoginView: React.FC = () => {
                 </div>
 
                 <div className="space-y-1">
-                  <label className="text-[11px] uppercase text-[#888888] block">Storage Channel ID *</label>
+                  <label className="text-xs font-medium text-[#cccccc] block">Storage Channel ID *</label>
                   <input
                     type="text"
                     value={botChannelId}
@@ -528,7 +544,7 @@ export const LoginView: React.FC = () => {
                 </div>
 
                 <div className="space-y-1">
-                  <label className="text-[11px] uppercase text-[#888888] block">Account Display Name (Optional)</label>
+                  <label className="text-xs font-medium text-[#cccccc] block">Account Display Name (Optional)</label>
                   <input
                     type="text"
                     value={botDisplayName}
@@ -543,7 +559,7 @@ export const LoginView: React.FC = () => {
                 type="submit"
                 variant="primary"
                 size="md"
-                className="w-full justify-center text-xs tracking-wider uppercase font-bold"
+                className="w-full justify-center text-xs font-medium"
                 disabled={isLoading}
               >
                 {isLoading ? 'Connecting...' : 'Connect Storage Bot'}
@@ -555,39 +571,39 @@ export const LoginView: React.FC = () => {
           {activeTab === 'developer' && (
             <form onSubmit={handleDeveloperSubmit} className="p-6 space-y-5">
               <div className="pb-3 border-b border-[#1c1c1c]">
-                <h2 className="text-sm font-bold uppercase tracking-wider text-[#ffffff]">
+                <h2 className="text-sm font-semibold tracking-normal text-[#ffffff]">
                   Sovereign Mode (Developer Direct Node)
                 </h2>
-                <p className="text-[11px] text-[#777777] mt-0.5">
+                <p className="text-xs text-[#888888] mt-0.5">
                   Bring your own API_ID & API_HASH • Complete architectural sovereignty
                 </p>
               </div>
 
               {/* Developer Documentation Box */}
               <div className="p-3.5 bg-[#0f0f0f] border border-[#222222] space-y-2 text-xs text-[#bbbbbb]">
-                <div className="font-semibold text-[#ffffff] uppercase text-[10px] tracking-wider flex items-center justify-between">
+                <div className="font-medium text-[#ffffff] text-xs flex items-center justify-between">
                   <span>How to get Telegram API Credentials:</span>
                   <a
                     href="https://my.telegram.org"
                     target="_blank"
                     rel="noreferrer"
-                    className="text-[#22c55e] hover:underline flex items-center gap-1 text-[10px]"
+                    className="text-[#22c55e] hover:underline flex items-center gap-1 text-xs"
                   >
-                    my.telegram.org <ExternalLink size={10} />
+                    my.telegram.org <ExternalLink size={11} />
                   </a>
                 </div>
-                <ol className="space-y-1 list-decimal list-inside text-[11px] text-[#999999] leading-relaxed">
+                <ol className="space-y-1 list-decimal list-inside text-xs text-[#999999] leading-relaxed">
                   <li>Log in to <strong className="text-[#ffffff]">my.telegram.org</strong> with your phone number</li>
                   <li>Click <strong className="text-[#ffffff]">API development tools</strong></li>
-                  <li>Fill in App title (e.g. <code className="text-[#e5e5e5]">VayomVault</code>) and submit</li>
-                  <li>Copy your numeric <code className="text-[#ffffff]">api_id</code> and 32-char <code className="text-[#ffffff]">api_hash</code></li>
+                  <li>Fill in App title (e.g. <code className="text-[#e5e5e5] font-mono">VayomVault</code>) and submit</li>
+                  <li>Copy your numeric <code className="text-[#ffffff] font-mono">api_id</code> and 32-char <code className="text-[#ffffff] font-mono">api_hash</code></li>
                 </ol>
               </div>
 
               <div className="space-y-3 text-xs">
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                   <div className="space-y-1">
-                    <label className="text-[11px] uppercase text-[#888888] block">API ID (Numeric) *</label>
+                    <label className="text-xs font-medium text-[#cccccc] block">API ID (Numeric) *</label>
                     <input
                       type="number"
                       value={devApiId}
@@ -598,7 +614,7 @@ export const LoginView: React.FC = () => {
                     />
                   </div>
                   <div className="space-y-1">
-                    <label className="text-[11px] uppercase text-[#888888] block">API Hash *</label>
+                    <label className="text-xs font-medium text-[#cccccc] block">API Hash *</label>
                     <input
                       type="text"
                       value={devApiHash}
@@ -611,7 +627,7 @@ export const LoginView: React.FC = () => {
                 </div>
 
                 <div className="space-y-1">
-                  <label className="text-[11px] uppercase text-[#888888] block">Bot Token *</label>
+                  <label className="text-xs font-medium text-[#cccccc] block">Bot Token *</label>
                   <input
                     type="text"
                     value={devBotToken}
@@ -623,7 +639,7 @@ export const LoginView: React.FC = () => {
                 </div>
 
                 <div className="space-y-1">
-                  <label className="text-[11px] uppercase text-[#888888] block">Storage Channel ID *</label>
+                  <label className="text-xs font-medium text-[#cccccc] block">Storage Channel ID *</label>
                   <input
                     type="text"
                     value={devChannelId}
@@ -639,7 +655,7 @@ export const LoginView: React.FC = () => {
                 type="submit"
                 variant="primary"
                 size="md"
-                className="w-full justify-center text-xs tracking-wider uppercase font-bold"
+                className="w-full justify-center text-xs font-medium"
                 disabled={isLoading}
               >
                 {isLoading ? 'Verifying...' : 'Initialize Sovereign Node'}

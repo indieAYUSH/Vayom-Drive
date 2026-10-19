@@ -1,4 +1,5 @@
 import { create } from 'zustand'
+import { API_BASE } from '../utils/apiUrl'
 
 export interface UserProfile {
   display_name: string
@@ -84,7 +85,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
 
   checkAuth: async () => {
     try {
-      const res = await fetch('/api/v1/auth/status')
+      const res = await fetch(`${API_BASE}/auth/status`)
       if (!res.ok) throw new Error('Failed to verify authentication status')
       const data = await res.json()
       set({
@@ -110,7 +111,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
 
     set({ qrStatus: 'waiting', error: null, scannedUser: null, availableChannels: [] })
     try {
-      const res = await fetch('/api/v1/auth/qr/start', {
+      const res = await fetch(`${API_BASE}/auth/qr/start`, {
         method: 'POST',
         signal: qrAbortController.signal,
       })
@@ -154,7 +155,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     }
 
     try {
-      const res = await fetch(`/api/v1/auth/qr/poll?session_id=${qrSessionId}`)
+      const res = await fetch(`${API_BASE}/auth/qr/poll?session_id=${qrSessionId}`)
       if (!res.ok) {
         if (res.status === 404) {
           set({ qrStatus: 'expired' })
@@ -201,7 +202,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     if (!qrSessionId) return
     set({ isLoading: true, error: null })
     try {
-      const res = await fetch('/api/v1/auth/qr/2fa', {
+      const res = await fetch(`${API_BASE}/auth/qr/2fa`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ session_id: qrSessionId, password }),
@@ -224,7 +225,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     if (!qrSessionId) return
     set({ isLoading: true, error: null })
     try {
-      const res = await fetch('/api/v1/auth/qr/finalize', {
+      const res = await fetch(`${API_BASE}/auth/qr/finalize`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -260,7 +261,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     stopQrPolling()
     set({ isLoading: true, error: null })
     try {
-      const res = await fetch('/api/v1/auth/bot', {
+      const res = await fetch(`${API_BASE}/auth/bot`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -296,7 +297,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     stopQrPolling()
     set({ isLoading: true, error: null })
     try {
-      const res = await fetch('/api/v1/auth/developer', {
+      const res = await fetch(`${API_BASE}/auth/developer`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -333,7 +334,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     stopQrPolling()
     set({ isLoading: true })
     try {
-      await fetch('/api/v1/auth/logout', { method: 'POST' })
+      await fetch(`${API_BASE}/auth/logout`, { method: 'POST' })
     } catch (e) {
       // ignore
     }

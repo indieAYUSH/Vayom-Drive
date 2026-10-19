@@ -4,6 +4,7 @@ import { VideoPlayer } from './VideoPlayer'
 import { MetadataDrawer } from './MetadataDrawer'
 import { DocPreview } from '../drive/DocPreview'
 import { useVaultStore } from '../../store/useVaultStore'
+import { resolveMediaUrl } from '../../utils/apiUrl'
 import { 
   X, 
   ChevronLeft, 
@@ -55,7 +56,7 @@ export const LightboxModal: React.FC<LightboxModalProps> = ({
 
   const handleDownload = () => {
     if (!item) return
-    const url = `/api/v1/files/${item.id}/download`
+    const url = resolveMediaUrl(`/api/v1/files/${item.id}/download`)
     if (url) {
       const a = document.createElement('a')
       a.href = url
@@ -150,10 +151,10 @@ export const LightboxModal: React.FC<LightboxModalProps> = ({
           >
             <Star size={13} fill={isStarred ? 'white' : 'none'} />
           </button>
-          <span className="font-mono text-xs font-semibold text-[#f0f0f0] truncate" title={item.filename}>
+          <span className="text-xs font-medium text-[#f0f0f0] truncate" title={item.filename}>
             {item.filename}
           </span>
-          <span className="text-[10px] font-mono text-[#666666] hidden sm:inline">
+          <span className="text-[11px] font-mono text-[#888888] hidden sm:inline">
             {formatBytes(item.size_bytes)}
           </span>
         </div>
@@ -171,7 +172,7 @@ export const LightboxModal: React.FC<LightboxModalProps> = ({
               </button>
               <button
                 onClick={() => setZoomLevel(1)}
-                className="px-1 text-[10px] font-mono text-[#888888] hover:text-[#ffffff]"
+                className="px-1 text-xs font-mono text-[#888888] hover:text-[#ffffff]"
               >
                 {Math.round(zoomLevel * 100)}%
               </button>
@@ -207,9 +208,9 @@ export const LightboxModal: React.FC<LightboxModalProps> = ({
           <Button
             variant="outline"
             size="sm"
-            onClick={() => window.open(item.preview_url || `/api/v1/files/${item.id}/download`, '_blank')}
+            onClick={() => window.open(resolveMediaUrl(item.preview_url || `/api/v1/files/${item.id}/view`), '_blank')}
             icon={<ExternalLink size={13} />}
-            title="Open stream in native player or new browser tab"
+            title="Open file in native player or new browser tab"
           >
             <span className="hidden sm:inline">Native</span>
           </Button>
@@ -265,15 +266,15 @@ export const LightboxModal: React.FC<LightboxModalProps> = ({
             <VideoPlayer
               key={item.id}
               item={item}
-              src={item.preview_url || `/api/v1/virtual-stream/${item.id}`}
-              poster={item.thumbnail_url}
+              src={resolveMediaUrl(item.preview_url || `/api/v1/virtual-stream/${item.id}`)}
+              poster={resolveMediaUrl(item.thumbnail_url)}
               filename={item.filename}
             />
           ) : item.file_category === 'image' ? (
             <div className="w-full h-full flex items-center justify-center overflow-auto">
               <img
                 key={item.id}
-                src={item.preview_url || item.thumbnail_url || `/api/v1/files/${item.id}/download`}
+                src={resolveMediaUrl(item.preview_url || item.thumbnail_url || `/api/v1/files/${item.id}/view`)}
                 alt={item.filename}
                 draggable={false}
                 onDragStart={(e) => e.preventDefault()}

@@ -1,7 +1,8 @@
 import { FileItem, AlbumItem, StorageMetrics, WatchFolder, WatchFolderEvent, LicenseStatus } from '../types/vault'
 import { useAuthStore } from '../store/useAuthStore'
 
-const API_BASE = '/api/v1'
+export { getBackendOrigin, BACKEND_ORIGIN, API_BASE, apiUrl, resolveMediaUrl } from '../utils/apiUrl'
+import { API_BASE } from '../utils/apiUrl'
 
 // H-11: Central fetch wrapper that intercepts 401 and notifies useAuthStore of session expiration
 async function authFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
