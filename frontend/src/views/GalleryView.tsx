@@ -3,10 +3,11 @@ import type { FileItem } from '../types/vault'
 import { useVaultStore } from '../store/useVaultStore'
 import { VirtualizedGrid } from '../components/gallery/VirtualizedGrid'
 import { TableView } from '../components/gallery/TableView'
-import { LayoutGrid, List, X, ArrowLeft, Calendar } from 'lucide-react'
+import { LayoutGrid, List, X, ArrowLeft, Calendar, Download } from 'lucide-react'
 import { Badge } from '../components/common/Badge'
 import { BreadcrumbNav } from '../components/drive/BreadcrumbNav'
 import { WorkstationFilterBar } from '../components/gallery/WorkstationFilterBar'
+import { apiUrl } from '../utils/apiUrl'
 
 export const GalleryView: React.FC = () => {
   const { 
@@ -162,6 +163,18 @@ export const GalleryView: React.FC = () => {
 
         {/* Right: Layout Switcher & Selection */}
         <div className="flex items-center gap-2">
+          {selectedAlbumId && (
+            <a
+              href={apiUrl(`/api/v1/albums/${selectedAlbumId}/download-zip`)}
+              download={`${activeAlbum?.name || 'folder'}.zip`}
+              className="text-xs font-sans text-[#cccccc] hover:text-[#ffffff] px-2.5 py-1 border border-[#282828] hover:border-[#444444] bg-[#111111] flex items-center gap-1.5 transition-colors"
+              title="Download folder contents as a .ZIP archive"
+            >
+              <Download size={12} />
+              <span className="hidden sm:inline">Download .ZIP</span>
+            </a>
+          )}
+
           {selectedIds.length > 0 ? (
             <button
               onClick={clearSelection}

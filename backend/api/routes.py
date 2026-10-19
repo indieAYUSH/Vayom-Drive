@@ -789,7 +789,7 @@ async def list_files(
                 f_dict["thumbnail_url"] = None
 
             if not f_dict.get("is_deleted"):
-                f_dict["preview_url"] = f"/api/v1/virtual-stream/{file_id}" if f_dict.get("file_category") == "video" else f"/api/v1/files/{file_id}/download"
+                f_dict["preview_url"] = f"/api/v1/virtual-stream/{file_id}" if f_dict.get("file_category") == "video" else f"/api/v1/files/{file_id}/view"
             else:
                 f_dict["preview_url"] = None
 
@@ -2034,11 +2034,12 @@ async def get_thumbnail(file_id: str):
 async def download_file(
     file_id: str,
     request: Request,
-    range_header: Optional[str] = Header(None, alias="Range")
+    range_header: Optional[str] = Header(None, alias="Range"),
+    inline: bool = Query(False)
 ):
     """
     Streams file bytes with full HTTP Range request support (206 Partial Content).
-    Enables instant seeking in 4K videos without downloading the full file!
+    Supports both attachment download and inline streaming/viewing.
     """
     async with get_db() as db:
         cursor = await db.execute("SELECT * FROM files WHERE id = ? AND is_deleted = 0", (file_id,))
@@ -2056,6 +2057,20 @@ async def download_file(
     total_size = file_item["size_bytes"]
     filename = file_item["filename"]
 
+    # Infer or correct media_type (critical for inline PDF and document preview)
+    media_type = file_item.get("mime_type")
+    if not media_type or media_type == "application/octet-stream":
+        guessed, _ = mimetypes.guess_type(filename)
+        media_type = guessed or ("application/pdf" if filename.lower().endswith(".pdf") else "application/octet-stream")
+
+    # Determine disposition: inline if requested via param, if path is /view, or if inline query is set
+    is_inline = (
+        inline
+        or request.url.path.endswith("/view")
+        or request.query_params.get("inline", "").lower() in ("true", "1", "yes")
+    )
+    disposition_type = "inline" if is_inline else "attachment"
+
     # Parse range for downloads: do not cap range so downloads & resume stream continuously
     range_spec = parse_and_clamp_range(range_header, total_size, max_chunk_bytes=None)
 
@@ -2069,7 +2084,7 @@ async def download_file(
     headers = {
         "Accept-Ranges": "bytes",
         "Content-Length": str(range_spec.content_length),
-        "Content-Disposition": format_content_disposition(filename, disposition_type="attachment")
+        "Content-Disposition": format_content_disposition(filename, disposition_type=disposition_type)
     }
     if range_spec.is_range:
         headers["Content-Range"] = range_spec.content_range_header
@@ -2078,7 +2093,7 @@ async def download_file(
         status_code = status.HTTP_200_OK
 
     if request.method == "HEAD":
-        return Response(status_code=status_code, headers=headers, media_type=file_item["mime_type"])
+        return Response(status_code=status_code, headers=headers, media_type=media_type)
 
     encryption = file_item.get("encryption", "none")
     nonce = file_item.get("nonce")
@@ -2095,6 +2110,12 @@ async def download_file(
         from ..crypto import vault_manager
         key = vault_manager.get_key()
 
+    if encryption == "ctr" and key is None:
+        raise HTTPException(
+            status_code=423,
+            detail="Vault is locked. Decryption key or passphrase required to decrypt this file."
+        )
+
     return StreamingResponse(
         streaming_engine.stream_range(
             parts=parts,
@@ -2107,8 +2128,22 @@ async def download_file(
         ),
         status_code=status_code,
         headers=headers,
-        media_type=file_item["mime_type"]
+        media_type=media_type
     )
+
+
+@router.api_route("/files/{file_id}/view", methods=["GET", "HEAD"])
+async def view_file(
+    file_id: str,
+    request: Request,
+    range_header: Optional[str] = Header(None, alias="Range")
+):
+    """
+    Streams file bytes inline (Content-Disposition: inline) for in-app document/PDF
+    viewing, image display, and media preview without triggering browser downloads.
+    """
+    return await download_file(file_id=file_id, request=request, range_header=range_header, inline=True)
+
 
 
 async def purge_parts_from_storage(parts: List[Dict[str, Any]]):
@@ -2377,6 +2412,8 @@ async def delete_album(album_id: str):
         if not await cur.fetchone():
             raise HTTPException(status_code=404, detail="Album not found")
         await db.execute("DELETE FROM albums WHERE id = ?", (album_id,))
+        # I-35: clear dangling watch-folder targets so watcher ingest can't hit an FK violation
+        await db.execute("UPDATE watch_folders SET target_album_id = NULL WHERE target_album_id = ?", (album_id,))
         await db.commit()
     return {"success": True}
 
@@ -2408,6 +2445,96 @@ async def remove_file_from_album(album_id: str, file_id: str):
         )
         await db.commit()
     return {"success": True}
+
+
+@router.get("/albums/{album_id}/download-zip")
+async def download_album_zip(album_id: str, request: Request):
+    """
+    Streams all files inside an album/folder as a compressed .zip archive.
+    Decrypts encrypted files on-the-fly using the active vault key or request header.
+    """
+    import zipfile
+    from ..streaming.router import RangeSpec
+
+    async with get_db() as db:
+        cur_a = await db.execute("SELECT name FROM albums WHERE id = ?", (album_id,))
+        alb_row = await cur_a.fetchone()
+        if not alb_row:
+            raise HTTPException(status_code=404, detail="Album not found")
+        album_name = alb_row[0] or f"album_{album_id}"
+
+        cur_f = await db.execute(
+            """
+            SELECT f.id, f.filename, f.size_bytes, f.encryption, f.nonce, f.storage_backend
+            FROM files f
+            JOIN file_albums fa ON f.id = fa.file_id
+            WHERE fa.album_id = ? AND f.is_deleted = 0 AND f.kind = 'original'
+            ORDER BY f.filename ASC
+            """,
+            (album_id,)
+        )
+        file_rows = [dict(r) for r in await cur_f.fetchall()]
+
+    if not file_rows:
+        raise HTTPException(status_code=404, detail="No files found in this album")
+
+    key_hex = request.headers.get("x-decryption-key") or request.query_params.get("key")
+    key = bytes.fromhex(key_hex.strip()) if key_hex and len(key_hex.strip()) == 64 else None
+    if key is None:
+        from ..crypto import vault_manager
+        key = vault_manager.get_key()
+
+    safe_album_name = re.sub(r'[^a-zA-Z0-9_\-\. ]', '_', album_name).strip() or "folder"
+
+    async def zip_streamer():
+        mem_buffer = io.BytesIO()
+        with zipfile.ZipFile(mem_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+            for f_item in file_rows:
+                fid = f_item["id"]
+                fname = f_item["filename"]
+                enc = f_item.get("encryption", "none")
+                nonce = f_item.get("nonce")
+                tot_sz = f_item["size_bytes"]
+
+                async with get_db() as db:
+                    p_cur = await db.execute(
+                        "SELECT * FROM file_parts WHERE file_id = ? ORDER BY part_index ASC",
+                        (fid,)
+                    )
+                    parts = [dict(p) for p in await p_cur.fetchall()]
+
+                spec = RangeSpec(
+                    start=0,
+                    end=tot_sz - 1,
+                    total_size=tot_sz,
+                    content_length=tot_sz,
+                    is_range=False,
+                    is_satisfiable=True,
+                    is_capped=False
+                )
+                file_data = bytearray()
+                async for chunk in streaming_engine.stream_range(
+                    parts=parts,
+                    total_size=tot_sz,
+                    range_spec=spec,
+                    storage_client=storage_client,
+                    encryption=enc,
+                    nonce=nonce,
+                    key=key
+                ):
+                    file_data.extend(chunk)
+
+                zf.writestr(fname, bytes(file_data))
+
+        mem_buffer.seek(0)
+        while data := mem_buffer.read(256 * 1024):
+            yield data
+
+    headers = {
+        "Content-Disposition": f'attachment; filename="{safe_album_name}.zip"',
+        "Content-Type": "application/zip",
+    }
+    return StreamingResponse(zip_streamer(), headers=headers, media_type="application/zip")
 
 
 # --- Share Links Endpoints (F-4: Gated behind ENABLE_SHARE_LINKS until frontend UI is built) ---

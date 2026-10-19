@@ -1,24 +1,25 @@
 import React from 'react'
 import { useVaultStore } from '../store/useVaultStore'
-import { Folder, Plus } from 'lucide-react'
+import { Folder, Plus, Download } from 'lucide-react'
 import { Button } from '../components/common/Button'
 import { BreadcrumbNav } from '../components/drive/BreadcrumbNav'
+import { apiUrl } from '../utils/apiUrl'
 
 export const AlbumsView: React.FC = () => {
   const { albums, setSelectedAlbumId, setCreateAlbumModalOpen } = useVaultStore()
 
   return (
-    <div className="flex-1 flex flex-col h-full bg-[#000000] select-none font-mono overflow-hidden">
+    <div className="flex-1 flex flex-col h-full bg-[#000000] select-none overflow-hidden">
       <BreadcrumbNav currentFolderName={null} onNewFolder={() => setCreateAlbumModalOpen(true)} />
       <div className="flex-1 overflow-y-auto p-6">
         {/* Top Header */}
       <div className="flex items-center justify-between pb-6 border-b border-[#282828] mb-6">
         <div>
-          <h1 className="text-base font-bold uppercase tracking-wider text-[#ffffff] flex items-center gap-2">
-            <Folder size={18} />
+          <h1 className="text-sm font-semibold tracking-normal text-[#ffffff] flex items-center gap-2">
+            <Folder size={16} />
             <span>Folders & Directories</span>
           </h1>
-          <p className="text-xs text-[#666666] mt-1">
+          <p className="text-xs text-[#888888] mt-1">
             Group and organize uploaded files, photos, and archives into structured folders
           </p>
         </div>
@@ -39,8 +40,8 @@ export const AlbumsView: React.FC = () => {
           <div className="w-12 h-12 border border-[#222222] flex items-center justify-center mb-3 text-[#444444]">
             <Folder size={24} />
           </div>
-          <p className="text-sm uppercase tracking-wider text-[#888888]">No folders created yet</p>
-          <p className="text-xs text-[#444444] mt-1">Click "New Folder" to create your first organized folder</p>
+          <p className="text-sm font-medium text-[#cccccc]">No folders created yet</p>
+          <p className="text-xs text-[#888888] mt-1">Click "New Folder" to create your first organized folder</p>
         </div>
       ) : (
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
@@ -65,22 +66,31 @@ export const AlbumsView: React.FC = () => {
                   <Folder size={48} strokeWidth={1} />
                 </div>
               )}
-              <div className="absolute top-2 right-2 bg-[#000000] px-2 py-0.5 border border-[#282828] text-[10px] text-[#ffffff]">
+              <a
+                href={apiUrl(`/api/v1/albums/${album.id}/download-zip`)}
+                download={`${album.name}.zip`}
+                onClick={(e) => e.stopPropagation()}
+                className="absolute top-2 left-2 bg-[#000000]/90 backdrop-blur-sm p-1.5 border border-[#282828] hover:border-[#ffffff] text-[#888888] hover:text-[#ffffff] transition-colors"
+                title="Download folder as .ZIP"
+              >
+                <Download size={13} />
+              </a>
+              <div className="absolute top-2 right-2 bg-[#000000]/90 backdrop-blur-sm px-2 py-0.5 border border-[#282828] text-[11px] font-mono text-[#cccccc]">
                 {album.file_count} items
               </div>
             </div>
 
             {/* Info */}
             <div className="p-3 bg-[#0a0a0a] border-t border-[#1c1c1c] flex flex-col gap-1">
-              <h3 className="font-semibold text-xs text-[#f0f0f0] truncate group-hover:text-[#ffffff]">
+              <h3 className="font-medium text-xs text-[#f0f0f0] truncate group-hover:text-[#ffffff]">
                 {album.name}
               </h3>
               {album.description && (
-                <p className="text-[11px] text-[#666666] line-clamp-2">
+                <p className="text-xs text-[#888888] line-clamp-2">
                   {album.description}
                 </p>
               )}
-              <span className="text-[9px] text-[#444444] mt-1">
+              <span className="text-[11px] font-mono text-[#666666] mt-1">
                 Created: {new Date(album.created_at).toLocaleDateString()}
               </span>
             </div>

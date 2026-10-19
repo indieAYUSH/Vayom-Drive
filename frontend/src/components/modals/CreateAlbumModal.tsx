@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react'
+import React, { useState, useEffect, useRef } from 'react'
 import { Modal } from '../common/Modal'
 import { Button } from '../common/Button'
 import { Input } from '../common/Input'
@@ -22,8 +22,12 @@ export const CreateAlbumModal: React.FC = () => {
   const [description, setDescription] = useState('')
   const [isSubmitting, setIsSubmitting] = useState(false)
 
+  const wasOpenRef = useRef(false)
   useEffect(() => {
-    if (isCreateAlbumModalOpen) {
+    const justOpened = isCreateAlbumModalOpen && !wasOpenRef.current
+    wasOpenRef.current = isCreateAlbumModalOpen
+    // H-40: reset the form only on the open transition — not when `albums`/`hasSelected` change
+    if (justOpened) {
       if (hasSelected && albums.length > 0) {
         setMode('existing')
         setSelectedAlbumId(albums[0].id)
@@ -72,7 +76,7 @@ export const CreateAlbumModal: React.FC = () => {
       title={title}
       maxWidth="sm"
     >
-      <form onSubmit={handleSubmit} className="space-y-4 font-mono text-xs">
+      <form onSubmit={handleSubmit} className="space-y-4 text-xs">
         {hasSelected && albums.length > 0 && (
           <div className="flex border border-[#282828] bg-[#080808] p-0.5 mb-3">
             <button
@@ -101,8 +105,8 @@ export const CreateAlbumModal: React.FC = () => {
         )}
 
         {hasSelected && mode === 'existing' && albums.length > 0 ? (
-          <div className="flex flex-col gap-1 w-full">
-            <label className="text-[11px] text-[#999999] uppercase tracking-wider">
+          <div className="flex flex-col gap-1.5 w-full">
+            <label className="text-xs font-medium text-[#cccccc]">
               Select Destination Folder
             </label>
             <select
@@ -128,8 +132,8 @@ export const CreateAlbumModal: React.FC = () => {
               autoFocus
             />
 
-            <div className="flex flex-col gap-1 w-full">
-              <label className="text-[11px] text-[#999999] uppercase tracking-wider">
+            <div className="flex flex-col gap-1.5 w-full">
+              <label className="text-xs font-medium text-[#cccccc]">
                 Description (Optional)
               </label>
               <textarea
@@ -137,7 +141,7 @@ export const CreateAlbumModal: React.FC = () => {
                 placeholder="Notes or tags for this folder..."
                 value={description}
                 onChange={(e) => setDescription(e.target.value)}
-                className="w-full bg-[#080808] text-[#f0f0f0] border border-[#282828] focus:border-[#666666] focus:outline-none p-2 text-xs placeholder:text-[#444444]"
+                className="w-full bg-[#080808] text-[#f0f0f0] border border-[#282828] focus:border-[#666666] focus:outline-none p-2 text-xs placeholder:text-[#555555]"
               />
             </div>
           </>
