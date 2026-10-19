@@ -201,6 +201,15 @@ async def enforce_api_security(request: Request, call_next):
 
     return await call_next(request)
 
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request: Request, exc: Exception):
+    """Prevents server internal stack traces or paths from leaking to client responses."""
+    logger.exception(f"Unhandled server error at {request.method} {request.url.path}: {exc}")
+    return JSONResponse(
+        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        content={"detail": "A server error occurred while processing your request. Please try again later."}
+    )
+
 # Include REST API endpoints
 app.include_router(api_router)
 app.include_router(auth_router)

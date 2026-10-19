@@ -436,7 +436,9 @@ class VaultKeyManager:
             from ..config import settings
             if getattr(settings, "VAULT_PASSPHRASE", None):
                 salt = getattr(settings, "VAULT_SALT", b"vayom_vault_salt_default")
-                return derive_key_pbkdf2(settings.VAULT_PASSPHRASE, salt)
+                derived = derive_key_pbkdf2(settings.VAULT_PASSPHRASE, salt)
+                self._active_key = derived
+                return self._active_key
         except Exception:
             pass
         return None

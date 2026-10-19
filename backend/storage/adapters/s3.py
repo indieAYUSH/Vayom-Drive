@@ -247,6 +247,29 @@ class S3StorageAdapter(BaseStorageAdapter):
         # B-10: keep the logical key canonical; `_build_url` percent-encodes it.
         object_key = normalize_object_path(raw_key)
 
+        # B-11: S3 duplicate filename collision guard
+        try:
+            from ...db.connection import get_db
+            async with get_db() as db:
+                cur = await db.execute(
+                    "SELECT 1 FROM file_parts WHERE storage_backend = ? AND storage_uri = ? AND file_id != ? LIMIT 1",
+                    (self.backend_name, object_key, file_id)
+                )
+                if await cur.fetchone():
+                    stem = Path(safe_filename).stem
+                    ext = Path(safe_filename).suffix
+                    safe_filename = f"{stem}_{file_id[:8]}{ext}"
+                    if is_proxy:
+                        raw_key = f"{self.vault_prefix}/.vayom/proxies/{file_id}/{safe_filename}"
+                    elif folder_name:
+                        clean_folder = folder_name.strip("/").replace("\\", "/")
+                        raw_key = f"{self.vault_prefix}/{clean_folder}/{safe_filename}"
+                    else:
+                        raw_key = f"{self.vault_prefix}/{safe_filename}"
+                    object_key = normalize_object_path(raw_key)
+        except Exception as e:
+            logger.debug(f"S3 collision guard check: {e}")
+
         if file_size > MULTIPART_THRESHOLD:
             await self._upload_multipart(local_p, object_key, file_size, mime_type, progress_callback)
         else:

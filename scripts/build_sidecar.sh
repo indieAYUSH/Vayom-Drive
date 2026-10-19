@@ -41,13 +41,38 @@ DIST_DIR="dist_sidecar"
 BUILD_DIR="build_sidecar"
 rm -rf "$DIST_DIR" "$BUILD_DIR"
 
+# PyInstaller must import backend.main as a package. Running backend/main.py
+# directly breaks its relative imports, so use a tiny top-level launcher.
+ENTRYPOINT="$(mktemp --suffix=.py)"
+trap 'rm -f "$ENTRYPOINT"' EXIT
+cat > "$ENTRYPOINT" <<'PY'
+import multiprocessing
+import uvicorn
+from backend.main import app
+from backend.config import settings
+
+if __name__ == "__main__":
+    multiprocessing.freeze_support()
+    uvicorn.run(app, host=settings.HOST, port=settings.PORT, reload=False)
+PY
+
+# PyInstaller --add-data uses ':' on Linux/macOS and ';' on Windows.
+if [ "$OS" = "linux" ] || [ "$OS" = "darwin" ]; then
+    DATA_SEP=":"
+else
+    DATA_SEP=";"
+fi
+
 echo "Running PyInstaller..."
 "$PYINSTALLER" \
     --name "vayom-backend" \
     --onefile \
     --clean \
+    --paths "$PROJECT_ROOT" \
     --distpath "$DIST_DIR" \
     --workpath "$BUILD_DIR" \
+    --add-data "backend/db/schema.sql${DATA_SEP}backend/db" \
+    --hidden-import "backend.main" \
     --hidden-import "uvicorn" \
     --hidden-import "uvicorn.logging" \
     --hidden-import "uvicorn.loops" \
@@ -57,18 +82,18 @@ echo "Running PyInstaller..."
     --hidden-import "uvicorn.protocols.http.auto" \
     --hidden-import "uvicorn.protocols.websockets" \
     --hidden-import "uvicorn.protocols.websockets.auto" \
-    --hidden-import "uvicorn.lifespans" \
-    --hidden-import "uvicorn.lifespans.auto" \
+    --hidden-import "uvicorn.lifespan" \
+    --hidden-import "uvicorn.lifespan.on" \
     --hidden-import "aiosqlite" \
     --hidden-import "telethon" \
     --hidden-import "cryptography" \
     --hidden-import "cryptg" \
     --hidden-import "PIL" \
-    --hidden-import "fpdf2" \
+    --hidden-import "fpdf" \
     --hidden-import "dotenv" \
     --copy-metadata "uvicorn" \
     --copy-metadata "fastapi" \
-    backend/main.py
+    "$ENTRYPOINT"
 
 echo "Copying binary to Tauri externalBin locations..."
 cp "$DIST_DIR/vayom-backend" "src-tauri/binaries/vayom-backend"

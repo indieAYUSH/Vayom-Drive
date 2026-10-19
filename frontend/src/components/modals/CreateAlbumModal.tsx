@@ -4,6 +4,7 @@ import { Button } from '../common/Button'
 import { Input } from '../common/Input'
 import { useVaultStore } from '../../store/useVaultStore'
 import { FolderPlus, FolderCheck } from 'lucide-react'
+import { translateErrorMessage } from '../../utils/errorTranslation'
 
 export const CreateAlbumModal: React.FC = () => {
   const { 
@@ -59,7 +60,7 @@ export const CreateAlbumModal: React.FC = () => {
       setDescription('')
       setCreateAlbumModalOpen(false)
     } catch (err: any) {
-      alert(err.message || 'Failed to update folder')
+      alert(translateErrorMessage(err))
     } finally {
       setIsSubmitting(false)
     }

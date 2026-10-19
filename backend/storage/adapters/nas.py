@@ -367,6 +367,8 @@ class NASStorageAdapter(BaseStorageAdapter):
                     continue
                 else:
                     await db.execute(f"RELEASE {savepoint}")
+                    # I-36: commit per file so concurrent readers/writers are not blocked during large scans
+                    await db.commit()
                     if mapped_album:
                         mapped_albums.add(mapped_album)
                     indexed_count += 1

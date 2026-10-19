@@ -196,8 +196,9 @@ class LRUChunkCache:
                 self._in_flight[key] = fut
                 # We are the designated fetcher
                 asyncio.create_task(self._execute_fetch(key, fetcher_coro_fn, fut))
-
-        return await fut
+        # C-10: Shield the shared future so one client disconnecting/seeking does not cancel
+        # the chunk future for other concurrent stream waiters.
+        return await asyncio.shield(fut)
 
     async def _execute_fetch(self, key: Tuple[Any, int], fetcher_coro_fn, fut: asyncio.Future[bytes]):
         try:

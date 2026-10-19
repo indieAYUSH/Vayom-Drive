@@ -523,9 +523,23 @@ class LocalFolderWatcher:
             category = detect_file_category(mime_type, file_path.name)
 
             # Targeted Client Encryption: encrypt photos, docs, audio, archives; keep video unencrypted for native streaming
+            # I-43: If encryption is enabled in settings but vault is locked, refuse ingestion to avoid plaintext leak
             vault_key = vault_manager.get_key()
-            is_encrypted = (category != "video") and (settings.ENCRYPTION_ENABLED or vault_key is not None)
-            if is_encrypted and vault_key is not None:
+            encryption_required = (category != "video") and settings.ENCRYPTION_ENABLED
+            if encryption_required and vault_key is None:
+                logger.warning(
+                    f"Vault is locked: deferring ingestion for encrypted category '{category}' file '{file_path.name}' "
+                    f"to prevent plaintext upload. Unlock the vault to ingest."
+                )
+                async with get_db() as db:
+                    await db.execute(
+                        "UPDATE watch_folder_events SET status = 'vault_locked_deferred', error_message = 'Vault is locked' WHERE id = ?",
+                        (event_id,)
+                    )
+                    await db.commit()
+                return
+
+            if (category != "video") and vault_key is not None:
                 file_nonce = generate_file_nonce()
                 encryption_mode = "ctr"
             else:

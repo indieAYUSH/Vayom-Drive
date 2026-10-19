@@ -42,38 +42,38 @@ def verify_license_key(license_key: str, public_key_hex: str = MASTER_PUBLIC_KEY
     Format: VAYOM-PRO.<payload_b64>.<signature_b64>
     """
     if not license_key or not isinstance(license_key, str):
-        raise InvalidLicenseError("License key is empty or not a string")
+        raise InvalidLicenseError("License key cannot be empty.")
 
     parts = license_key.strip().split(".")
     if len(parts) != 3 or parts[0] != "VAYOM-PRO":
-        raise InvalidLicenseError("Malformed license key format (must start with VAYOM-PRO.<payload>.<sig>)")
+        raise InvalidLicenseError("The provided license key is invalid or unrecognized.")
 
     payload_b64, sig_b64 = parts[1], parts[2]
 
     try:
         payload_bytes = base64.urlsafe_b64decode(_pad_base64(payload_b64))
         sig_bytes = base64.urlsafe_b64decode(_pad_base64(sig_b64))
-    except Exception as e:
-        raise InvalidLicenseError(f"Failed to decode base64 license data: {e}")
+    except Exception:
+        raise InvalidLicenseError("The provided license key is invalid or unrecognized.")
 
     try:
         pub_bytes = bytes.fromhex(public_key_hex)
         pub_key = ed25519.Ed25519PublicKey.from_public_bytes(pub_bytes)
         pub_key.verify(sig_bytes, payload_bytes)
     except InvalidSignature:
-        raise InvalidLicenseError("Cryptographic signature verification failed; invalid or forged license key")
-    except Exception as e:
-        raise InvalidLicenseError(f"Public key verification error: {e}")
+        raise InvalidLicenseError("The provided license key is invalid or unrecognized.")
+    except Exception:
+        raise InvalidLicenseError("License verification failed.")
 
     try:
         payload = json.loads(payload_bytes.decode("utf-8"))
-    except Exception as e:
-        raise InvalidLicenseError(f"Invalid JSON payload: {e}")
+    except Exception:
+        raise InvalidLicenseError("The provided license key is invalid or unrecognized.")
 
     # Check expiration if set
     expires_at = payload.get("expires_at")
     if expires_at is not None and time.time() > float(expires_at):
-        raise ExpiredLicenseError(f"License expired at {expires_at}")
+        raise ExpiredLicenseError("This license key has expired.")
 
     return payload
 

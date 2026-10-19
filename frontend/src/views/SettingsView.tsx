@@ -121,7 +121,7 @@ export const SettingsView: React.FC = () => {
       setLicenseStatusMsg('✓ Pro License Activated! All storage connections unlocked.')
       setLicenseKeyInput('')
     } catch (err: any) {
-      setLicenseStatusMsg(`Activation Failed: ${translateErrorMessage(err)}`)
+      setLicenseStatusMsg(`✗ ${translateErrorMessage(err)}`)
     } finally {
       setIsActivatingLicense(false)
     }

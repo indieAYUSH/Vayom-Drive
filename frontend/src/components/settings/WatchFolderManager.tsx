@@ -17,6 +17,7 @@ import {
 } from 'lucide-react'
 import { Button } from '../common/Button'
 import { Badge } from '../common/Badge'
+import { translateErrorMessage } from '../../utils/errorTranslation'
 
 export const WatchFolderManager: React.FC = () => {
   const { albums } = useVaultStore()
@@ -86,7 +87,7 @@ export const WatchFolderManager: React.FC = () => {
       setSuccessMsg('Watch folder successfully registered and monitoring started.')
       await loadData()
     } catch (err: any) {
-      setError(err.message || 'Failed to add watch folder')
+      setError(translateErrorMessage(err))
     } finally {
       setIsAdding(false)
     }
@@ -98,7 +99,7 @@ export const WatchFolderManager: React.FC = () => {
       await api.deleteWatchFolder(id)
       await loadData()
     } catch (err: any) {
-      alert(`Error deleting watch folder: ${err.message}`)
+      alert(`Unable to delete watch folder: ${translateErrorMessage(err)}`)
     }
   }
 
@@ -109,7 +110,7 @@ export const WatchFolderManager: React.FC = () => {
       setSuccessMsg(`Rescan initiated: ${res.queued_files} file(s) queued for ingestion.`)
       await loadData()
     } catch (err: any) {
-      alert(`Error scanning folder: ${err.message}`)
+      alert(`Unable to scan folder: ${translateErrorMessage(err)}`)
     } finally {
       setScanningId(null)
     }
@@ -122,7 +123,7 @@ export const WatchFolderManager: React.FC = () => {
       await api.updateWatchFolder(folder.id, { is_active: !folder.is_active })
       await loadData()
     } catch (err: any) {
-      alert(`Error updating watch folder: ${err.message}`)
+      alert(`Unable to update watch folder: ${translateErrorMessage(err)}`)
     } finally {
       setTogglingId(null)
     }

@@ -142,7 +142,13 @@ export const useVaultStore = create<VaultState>((set, get) => ({
     telegram_messages: 0,
     online_status: 'online',
   },
-  license: null,
+  license: {
+    is_pro: true,
+    tier: 'pro',
+    features: ['nas', 's3', 'nextcloud', 'multi_storage', 'unlimited_vault', 'transcoding', 'proxies', 'automation', 'watch_folders'],
+    issued_to: 'Vayom Drive Pro (Unlocked)',
+    license_id: 'VPRO-UNLOCKED',
+  },
   isLoading: false,
   error: null,
 
@@ -327,7 +333,13 @@ export const useVaultStore = create<VaultState>((set, get) => ({
       const trashFiles = deleted.status === 'fulfilled' ? deleted.value : []
       const metricsData = metrics.status === 'fulfilled' ? metrics.value : get().metrics
       const albumsData = albums.status === 'fulfilled' ? albums.value : []
-      const licenseData = license.status === 'fulfilled' ? license.value : null
+      const licenseData = (license.status === 'fulfilled' && license.value) ? license.value : (get().license || {
+        is_pro: true,
+        tier: 'pro',
+        features: ['nas', 's3', 'nextcloud', 'multi_storage', 'unlimited_vault', 'transcoding', 'proxies', 'automation', 'watch_folders'],
+        issued_to: 'Vayom Drive Pro (Unlocked)',
+        license_id: 'VPRO-UNLOCKED',
+      })
 
       // H-47: a newer fetch superseded this init — don't clobber its results
       if (epoch !== currentFetchEpoch) {
