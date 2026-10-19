@@ -7,11 +7,30 @@ from dotenv import load_dotenv
 
 import sys
 # Load .env file from project root
-if getattr(sys, "frozen", False):
+IS_FROZEN = getattr(sys, "frozen", False)
+if IS_FROZEN:
     ROOT_DIR = Path(sys.executable).resolve().parent
+    if sys.platform == "win32":
+        DEFAULT_DATA_DIR = Path(os.getenv("APPDATA", str(Path.home()))) / "Vayom Drive"
+    elif sys.platform == "darwin":
+        DEFAULT_DATA_DIR = Path.home() / "Library" / "Application Support" / "Vayom Drive"
+    else:
+        DEFAULT_DATA_DIR = Path.home() / ".local" / "share" / "vayom-drive"
 else:
     ROOT_DIR = Path(__file__).resolve().parent.parent
+    DEFAULT_DATA_DIR = ROOT_DIR / "data"
+
 load_dotenv(ROOT_DIR / ".env")
+if IS_FROZEN:
+    # Packaged installs (AppImage/deb) are read-only; allow an owner config file
+    # in the per-user config directory without requiring a writable app bundle.
+    if sys.platform == "win32":
+        _user_config = Path(os.getenv("APPDATA", str(Path.home()))) / "Vayom Drive" / ".env"
+    elif sys.platform == "darwin":
+        _user_config = Path.home() / "Library" / "Application Support" / "Vayom Drive" / ".env"
+    else:
+        _user_config = Path.home() / ".config" / "vayom-drive" / ".env"
+    load_dotenv(_user_config, override=False)
 
 logger = logging.getLogger("vayom.config")
 
@@ -49,7 +68,7 @@ class Settings:
     PORT: int = int(os.getenv("PORT", "8000"))
 
     # Storage Paths
-    DATA_DIR: Path = ROOT_DIR / os.getenv("DATA_DIR", "data")
+    DATA_DIR: Path = Path(os.getenv("DATA_DIR", str(DEFAULT_DATA_DIR)))
     DB_PATH: Path = DATA_DIR / "vayom.db"
     UPLOAD_TEMP_DIR: Path = DATA_DIR / "uploads"
     THUMBNAIL_DIR: Path = DATA_DIR / "thumbnails"

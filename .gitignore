@@ -7,7 +7,11 @@
 # Markdown files (per user requirement)
 *.md
 **/*.md
-!docs/architecture_and_progress.md
+!README.md
+
+# Private docs — keep local only (not for public repo)
+docs/architecture_and_progress.md
+docs/native_deployment_guide.md
 
 # Python
 __pycache__/
@@ -59,3 +63,24 @@ Thumbs.db
 .vscode/
 *.swp
 *.swo
+
+# Premium subscription model & licensing
+backend/license/
+scripts/issue_license.py
+tests/test_multi_storage_phase4_license.py
+*.lic
+*.license
+*license_key*
+*subscription*
+
+# TypeScript backend & desktop sidecar
+ts-backend/
+backend-ts/
+src-tauri/target/
+src-tauri/binaries/
+scripts/build_sidecar.sh
+dist_sidecar/
+build_sidecar/
+
+
+*.spec
