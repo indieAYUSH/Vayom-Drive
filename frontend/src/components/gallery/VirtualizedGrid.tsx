@@ -60,7 +60,7 @@ export const VirtualizedGrid: React.FC<VirtualizedGridProps> = ({
 }) => {
   const parentRef = useRef<HTMLDivElement>(null)
   const [columns, setColumns] = useState(4)
-  const { selectIds, deselectIds } = useVaultStore()
+  const { selectIds, deselectIds, hasMore, isLoadingMore, fetchMoreFiles } = useVaultStore()
 
   // Dynamic responsive column adjustment based on container width
   useEffect(() => {
@@ -161,6 +161,16 @@ export const VirtualizedGrid: React.FC<VirtualizedGridProps> = ({
   useEffect(() => {
     rowVirtualizer.measure()
   }, [columns, groupByDate, rowVirtualizer])
+
+  // H-19: Auto-load more files when approaching the bottom of the virtual list
+  const virtualItems = rowVirtualizer.getVirtualItems()
+  useEffect(() => {
+    const lastItem = virtualItems[virtualItems.length - 1]
+    if (!lastItem) return
+    if (lastItem.index >= virtualRows.length - 2 && hasMore && !isLoadingMore) {
+      fetchMoreFiles()
+    }
+  }, [virtualItems, virtualRows.length, hasMore, isLoadingMore, fetchMoreFiles])
 
   if (items.length === 0) {
     return (
@@ -270,6 +280,25 @@ export const VirtualizedGrid: React.FC<VirtualizedGridProps> = ({
           )
         })}
       </div>
+
+      {/* Infinite Scroll Footer (H-19) */}
+      {(hasMore || isLoadingMore) && (
+        <div className="py-6 flex items-center justify-center text-xs font-mono text-[#888888]">
+          {isLoadingMore ? (
+            <span className="flex items-center gap-2">
+              <span className="w-2 h-2 rounded-full bg-[#ffffff] animate-ping" />
+              Loading more files...
+            </span>
+          ) : (
+            <button
+              onClick={() => fetchMoreFiles()}
+              className="px-3 py-1.5 border border-[#333333] hover:border-[#ffffff] text-[#cccccc] hover:text-[#ffffff] transition-colors"
+            >
+              Load More Files
+            </button>
+          )}
+        </div>
+      )}
     </div>
   )
 }

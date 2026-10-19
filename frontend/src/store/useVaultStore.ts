@@ -41,6 +41,11 @@ interface VaultState {
   isCommandBarOpen: boolean
   isCreateAlbumModalOpen: boolean
 
+  // Pagination & Infinite Scroll (H-19)
+  hasMore: boolean
+  isLoadingMore: boolean
+  fetchMoreFiles: () => Promise<void>
+
   // Data Actions
   fetchFiles: () => Promise<void>
   refreshCatalog: () => Promise<void>
@@ -120,6 +125,7 @@ const readNamespacedStarred = (namespace: string): string[] | null => {
 }
 
 // H-10: Request sequencing & cancellation to prevent stale-wins race conditions
+const PAGE_SIZE = 150
 let fetchFilesController: AbortController | null = null
 let currentFetchEpoch = 0
 
@@ -139,6 +145,9 @@ export const useVaultStore = create<VaultState>((set, get) => ({
   license: null,
   isLoading: false,
   error: null,
+
+  hasMore: false,
+  isLoadingMore: false,
 
   activeTab: 'all',
   primaryMode: 'photos',
@@ -188,9 +197,9 @@ export const useVaultStore = create<VaultState>((set, get) => ({
       const isTrash = activeTab === 'trash'
 
       if (isTrash) {
-        const files = await api.listFiles({ is_deleted: true, limit: 1000 }, { signal })
+        const files = await api.listFiles({ is_deleted: true, limit: PAGE_SIZE, offset: 0 }, { signal })
         if (epoch !== currentFetchEpoch || signal.aborted) return
-        set({ files, trashCount: files.length, error: null })
+        set({ files, trashCount: files.length, hasMore: files.length === PAGE_SIZE, isLoadingMore: false, error: null })
         return
       }
 
@@ -206,7 +215,8 @@ export const useVaultStore = create<VaultState>((set, get) => ({
         tag: selectedTag || undefined,
         album_id: isFolderTab && selectedAlbumId ? selectedAlbumId : undefined,
         is_deleted: false,
-        limit: 1000,
+        limit: PAGE_SIZE,
+        offset: 0,
       }, { signal })
 
       if (epoch !== currentFetchEpoch || signal.aborted) return
@@ -216,11 +226,55 @@ export const useVaultStore = create<VaultState>((set, get) => ({
       set((state) => ({
         files,
         catalogFiles: isGeneralAll ? files : state.catalogFiles.length === 0 ? files : state.catalogFiles,
+        hasMore: files.length === PAGE_SIZE,
+        isLoadingMore: false,
         error: null,
       }))
     } catch (err: any) {
       if (err?.name === 'AbortError' || epoch !== currentFetchEpoch) return
-      set({ error: err.message || 'Failed to fetch files' })
+      set({ error: err.message || 'Failed to fetch files', isLoadingMore: false })
+    }
+  },
+
+  fetchMoreFiles: async () => {
+    const { isLoadingMore, hasMore, files, activeTab, selectedAlbumId, selectedTag } = get()
+    if (isLoadingMore || !hasMore) return
+
+    set({ isLoadingMore: true })
+    try {
+      const isTrash = activeTab === 'trash'
+      let cat: string | undefined = undefined
+      if (activeTab === 'images') cat = 'image'
+      else if (activeTab === 'videos') cat = 'video'
+      else if (activeTab === 'documents') cat = 'document'
+      else if (activeTab === 'archives') cat = 'archive'
+
+      const isFolderTab = activeTab === 'folders' || activeTab === 'albums'
+      const newFiles = await api.listFiles({
+        category: cat,
+        tag: selectedTag || undefined,
+        album_id: isFolderTab && selectedAlbumId ? selectedAlbumId : undefined,
+        is_deleted: isTrash,
+        limit: PAGE_SIZE,
+        offset: files.length,
+      })
+
+      if (newFiles.length === 0) {
+        set({ hasMore: false, isLoadingMore: false })
+        return
+      }
+
+      set((state) => {
+        const existingIds = new Set(state.files.map((f) => f.id))
+        const deduplicated = newFiles.filter((f) => !existingIds.has(f.id))
+        return {
+          files: [...state.files, ...deduplicated],
+          hasMore: newFiles.length === PAGE_SIZE,
+          isLoadingMore: false,
+        }
+      })
+    } catch (err) {
+      set({ isLoadingMore: false })
     }
   },
 
@@ -259,6 +313,7 @@ export const useVaultStore = create<VaultState>((set, get) => ({
 
   init: async () => {
     set({ isLoading: true })
+    const epoch = ++currentFetchEpoch
     try {
       const [allActive, deleted, metrics, albums, license] = await Promise.allSettled([
         api.listFiles({ is_deleted: false, limit: 1000 }),
@@ -273,6 +328,12 @@ export const useVaultStore = create<VaultState>((set, get) => ({
       const metricsData = metrics.status === 'fulfilled' ? metrics.value : get().metrics
       const albumsData = albums.status === 'fulfilled' ? albums.value : []
       const licenseData = license.status === 'fulfilled' ? license.value : null
+
+      // H-47: a newer fetch superseded this init — don't clobber its results
+      if (epoch !== currentFetchEpoch) {
+        set({ isLoading: false })
+        return
+      }
 
       set({
         catalogFiles: activeFiles,
@@ -423,7 +484,7 @@ export const useVaultStore = create<VaultState>((set, get) => ({
       selectedIds: [],
       trashCount: Math.max(0, state.trashCount - ids.length),
     }))
-    await Promise.all([get().fetchFiles(), get().fetchTrashCount(), get().fetchMetrics()])
+    await Promise.all([get().fetchFiles(), get().fetchTrashCount(), get().fetchMetrics(), get().refreshCatalog()])
   },
 
   purgeFiles: async (ids) => {

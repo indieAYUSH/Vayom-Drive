@@ -177,7 +177,10 @@ export const MediaCard: React.FC<MediaCardProps> = ({
       </div>
 
       {/* Metadata Footer */}
-      <div className="p-2.5 bg-[#0e0e0e] border-t border-[#1a1a1a] flex flex-col gap-1 font-sans">
+      <div 
+        onClick={handleCardClick}
+        className="p-2.5 bg-[#0e0e0e] border-t border-[#1a1a1a] flex flex-col gap-1 font-sans cursor-pointer hover:bg-[#121212] transition-colors"
+      >
         <div className="text-xs text-[#f0f0f0] truncate font-medium" title={item.filename}>
           {item.filename}
         </div>

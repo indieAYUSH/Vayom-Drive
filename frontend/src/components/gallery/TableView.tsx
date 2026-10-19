@@ -4,6 +4,7 @@ import { Checkbox } from '../common/Checkbox'
 import { Badge } from '../common/Badge'
 import { useVaultStore } from '../../store/useVaultStore'
 import { formatBytes } from '../../utils/format'
+import { resolveMediaUrl } from '../../utils/apiUrl'
 import { 
   Copy, 
   Check, 
@@ -38,10 +39,17 @@ export const TableView: React.FC<TableViewProps> = ({
   onOpenLightbox,
   onMoveToTrash,
 }) => {
-  const { starredIds, toggleStar, setActiveAudioItem, cleanupIncomplete } = useVaultStore()
+  const { starredIds, toggleStar, setActiveAudioItem, cleanupIncomplete, hasMore, isLoadingMore, fetchMoreFiles } = useVaultStore()
   const [copiedSha, setCopiedSha] = useState<string | null>(null)
   const [sortField, setSortField] = useState<SortField>('created_at')
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc')
+
+  const handleScroll = (e: React.UIEvent<HTMLDivElement>) => {
+    const { scrollTop, scrollHeight, clientHeight } = e.currentTarget
+    if (scrollHeight - (scrollTop + clientHeight) < 200 && hasMore && !isLoadingMore) {
+      fetchMoreFiles()
+    }
+  }
   const copiedTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   useEffect(() => {
@@ -109,7 +117,7 @@ export const TableView: React.FC<TableViewProps> = ({
   }
 
   return (
-    <div className="flex-1 overflow-x-auto overflow-y-auto border-t border-[#1c1c1c] font-sans text-xs select-none">
+    <div onScroll={handleScroll} className="flex-1 overflow-x-auto overflow-y-auto border-t border-[#1c1c1c] font-sans text-xs select-none">
       <table className="w-full min-w-[480px] text-left border-collapse">
         <thead>
           <tr className="bg-[#0c0c0c] border-b border-[#222222] text-[#888888] text-[11px] font-semibold uppercase tracking-wider sticky top-0 z-10">
@@ -275,7 +283,7 @@ export const TableView: React.FC<TableViewProps> = ({
                           <Eye size={13} />
                         </button>
                         <a
-                          href={item.preview_url || `/api/v1/files/${item.id}/download`}
+                          href={resolveMediaUrl(item.preview_url || `/api/v1/files/${item.id}/download`)}
                           download={item.filename}
                           className="p-1 text-[#888888] hover:text-[#ffffff] border border-transparent hover:border-[#333333]"
                           title="Download"
@@ -298,6 +306,25 @@ export const TableView: React.FC<TableViewProps> = ({
           })}
         </tbody>
       </table>
+
+      {/* Infinite Scroll Footer (H-19) */}
+      {(hasMore || isLoadingMore) && (
+        <div className="py-4 flex items-center justify-center text-xs font-mono text-[#888888]">
+          {isLoadingMore ? (
+            <span className="flex items-center gap-2">
+              <span className="w-1.5 h-1.5 rounded-full bg-[#ffffff] animate-ping" />
+              Loading more files...
+            </span>
+          ) : (
+            <button
+              onClick={() => fetchMoreFiles()}
+              className="px-3 py-1 border border-[#333333] hover:border-[#ffffff] text-[#cccccc] hover:text-[#ffffff] transition-colors"
+            >
+              Load More Files
+            </button>
+          )}
+        </div>
+      )}
     </div>
   )
 }
