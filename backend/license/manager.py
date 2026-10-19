@@ -1,4 +1,5 @@
 import logging
+import time
 from typing import Optional, Dict, Any, List
 from .crypto import verify_license_key, InvalidLicenseError, ExpiredLicenseError
 from ..config import settings
@@ -41,9 +42,13 @@ class LicenseManager:
                 "license_id": "VPRO-DEV-MODE",
             }
 
-        # 2. In-memory cached license verification
+        # 2. In-memory cached license verification (A-8: re-check expiry on every call)
         if self._cached_license is not None:
-            return self._cached_license
+            expires_at = self._cached_license.get("expires_at")
+            if expires_at is None or time.time() <= float(expires_at):
+                return self._cached_license
+            logger.warning("Cached Pro license expired — falling back to free tier.")
+            self._cached_license = None
 
         # 3. Check environment configuration
         env_key = getattr(settings, "VAYOM_LICENSE_KEY", "").strip()

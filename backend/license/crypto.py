@@ -1,3 +1,4 @@
+import os
 import base64
 import json
 import logging
@@ -10,10 +11,10 @@ logger = logging.getLogger("vayom.license.crypto")
 
 # Master Public Key (32-byte Ed25519 Raw Public Key in Hex)
 # Embedded into Vayom Drive for 100% offline license verification
-MASTER_PUBLIC_KEY_HEX = "3e057e80901cb033c6f69e97c5308a83ea6114b978ee87b356361626e315cb65"
-
-# Creator Private Key for generating signed keys (used by developer or license issuer)
-DEFAULT_PRIVATE_KEY_HEX = "***REMOVED***"
+MASTER_PUBLIC_KEY_HEX = os.environ.get(
+    "VAYOM_LICENSE_PUBLIC_KEY",
+    "3e057e80901cb033c6f69e97c5308a83ea6114b978ee87b356361626e315cb65"
+)
 
 
 class LicenseError(Exception):
@@ -83,12 +84,19 @@ def issue_license_key(
     features: Optional[List[str]] = None,
     expires_at: Optional[int] = None,
     license_id: Optional[str] = None,
-    private_key_hex: str = DEFAULT_PRIVATE_KEY_HEX,
+    private_key_hex: Optional[str] = None,
 ) -> str:
     """
     Issues a cryptographically signed license key using the Ed25519 private key.
     Used by the developer to generate keys for paying customers.
+    Requires private_key_hex or VAYOM_LICENSE_PRIVATE_KEY environment variable.
     """
+    signing_key = private_key_hex or os.environ.get("VAYOM_LICENSE_PRIVATE_KEY")
+    if not signing_key:
+        raise ValueError(
+            "Private signing key not provided. Set VAYOM_LICENSE_PRIVATE_KEY or pass private_key_hex to issue licenses."
+        )
+
     if features is None:
         features = ["nas", "s3", "nextcloud", "multi_storage", "unlimited_vault"]
 
@@ -104,7 +112,7 @@ def issue_license_key(
     payload_bytes = json.dumps(payload, sort_keys=True).encode("utf-8")
     payload_b64 = base64.urlsafe_b64encode(payload_bytes).decode("utf-8").rstrip("=")
 
-    priv_bytes = bytes.fromhex(private_key_hex)
+    priv_bytes = bytes.fromhex(signing_key.strip())
     priv_key = ed25519.Ed25519PrivateKey.from_private_bytes(priv_bytes)
     signature = priv_key.sign(payload_bytes)
     sig_b64 = base64.urlsafe_b64encode(signature).decode("utf-8").rstrip("=")
