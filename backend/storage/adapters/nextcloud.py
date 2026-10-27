@@ -8,7 +8,7 @@ import urllib.parse
 import uuid
 import xml.etree.ElementTree as ET
 from pathlib import Path
-from typing import Optional, Dict, Any, AsyncIterator, List, Union
+from typing import Optional, Dict, Any, AsyncIterator, List, Union, ClassVar, Tuple
 
 import httpx
 
@@ -62,6 +62,8 @@ class NextcloudWebDAVAdapter(BaseStorageAdapter):
     - App password redaction in all outputs (Constraint 6)
     """
     backend_name: str = "nextcloud"
+    _active_upload_keys: ClassVar[Dict[str, Tuple[str, float]]] = {}
+    _keys_lock: ClassVar[asyncio.Lock] = asyncio.Lock()
 
     def __init__(
         self,
@@ -138,78 +140,109 @@ class NextcloudWebDAVAdapter(BaseStorageAdapter):
         if not safe_filename or safe_filename in (".", ".."):
             safe_filename = f"{file_id}.bin"
 
-        if is_proxy:
-            raw_path = f"{self.vault_prefix}/.vayom/proxies/{file_id}/{safe_filename}"
-        elif folder_name:
-            clean_folder = folder_name.strip("/").replace("\\", "/")
-            raw_path = f"{self.vault_prefix}/{clean_folder}/{safe_filename}"
-        else:
-            raw_path = f"{self.vault_prefix}/{safe_filename}"
-        # B-10: keep the logical path canonical; `_build_url` percent-encodes it.
-        rel_path = normalize_webdav_path(raw_path)
+        # B-11 / H-6: Nextcloud duplicate filename collision guard (DB check + concurrent in-flight guard)
+        now = time.time()
+        async with self._keys_lock:
+            # Prune stale in-flight keys older than 300 seconds
+            for k, (_, ts) in list(self._active_upload_keys.items()):
+                if now - ts > 300:
+                    self._active_upload_keys.pop(k, None)
 
-        # B-11: Nextcloud duplicate filename collision guard
-        try:
-            from ...db.connection import get_db
-            async with get_db() as db:
-                cur = await db.execute(
-                    "SELECT 1 FROM file_parts WHERE storage_backend = ? AND storage_uri = ? AND file_id != ? LIMIT 1",
-                    (self.backend_name, rel_path, file_id)
-                )
-                if await cur.fetchone():
+            while True:
+                if is_proxy:
+                    raw_path = f"{self.vault_prefix}/.vayom/proxies/{file_id}/{safe_filename}"
+                elif folder_name:
+                    clean_folder = folder_name.strip("/").replace("\\", "/")
+                    raw_path = f"{self.vault_prefix}/{clean_folder}/{safe_filename}"
+                else:
+                    raw_path = f"{self.vault_prefix}/{safe_filename}"
+                # B-10: keep the logical path canonical; `_build_url` percent-encodes it.
+                rel_path = normalize_webdav_path(raw_path)
+
+                active_entry = self._active_upload_keys.get(rel_path)
+                in_flight_conflict = active_entry is not None and active_entry[0] != file_id
+
+                in_db_conflict = False
+                try:
+                    from ...db.connection import get_db
+                    async with get_db() as db:
+                        cur = await db.execute(
+                            "SELECT 1 FROM file_parts WHERE storage_backend = ? AND storage_uri = ? AND file_id != ? LIMIT 1",
+                            (self.backend_name, rel_path, file_id)
+                        )
+                        if await cur.fetchone():
+                            in_db_conflict = True
+                except Exception as e:
+                    logger.debug(f"Nextcloud collision guard check: {e}")
+
+                if in_flight_conflict or in_db_conflict:
                     stem = Path(safe_filename).stem
                     ext = Path(safe_filename).suffix
-                    safe_filename = f"{stem}_{file_id[:8]}{ext}"
-                    if is_proxy:
-                        raw_path = f"{self.vault_prefix}/.vayom/proxies/{file_id}/{safe_filename}"
-                    elif folder_name:
-                        clean_folder = folder_name.strip("/").replace("\\", "/")
-                        raw_path = f"{self.vault_prefix}/{clean_folder}/{safe_filename}"
+                    suffix = f"_{file_id[:8]}"
+                    if not stem.endswith(suffix):
+                        safe_filename = f"{stem}{suffix}{ext}"
                     else:
-                        raw_path = f"{self.vault_prefix}/{safe_filename}"
-                    rel_path = normalize_webdav_path(raw_path)
-        except Exception as e:
-            logger.debug(f"Nextcloud collision guard check: {e}")
+                        import uuid
+                        safe_filename = f"{stem}_{uuid.uuid4().hex[:4]}{ext}"
+                    continue
+
+                self._active_upload_keys[rel_path] = (file_id, time.time())
+                break
 
         target_url = self._build_url(rel_path)
 
-        async with httpx.AsyncClient(timeout=600.0) as client:
-            # 1. MKCOL parent directories (Constraint 3)
-            await self._ensure_parent_dirs(client, rel_path)
+        try:
+            async with httpx.AsyncClient(timeout=600.0) as client:
+                # 1. MKCOL parent directories (Constraint 3)
+                await self._ensure_parent_dirs(client, rel_path)
 
-            # 2. Async file chunk generator (Constraint 3: prevents loading entire files into RAM)
-            async def _chunk_generator():
-                bytes_sent = 0
-                chunk_sz = 512 * 1024
-                with open(local_p, "rb") as f:
-                    while True:
-                        chunk = f.read(chunk_sz)
-                        if not chunk:
-                            break
-                        bytes_sent += len(chunk)
-                        if progress_callback:
-                            try:
-                                progress_callback(bytes_sent, file_size)
-                            except Exception:
-                                pass
-                        yield chunk
+                # 2. Async file chunk generator (Constraint 3: prevents loading entire files into RAM)
+                async def _chunk_generator():
+                    bytes_sent = 0
+                    chunk_sz = 512 * 1024
+                    def _open_file():
+                        return open(local_p, "rb")
 
-            headers = {
-                "Content-Type": mime_type or "application/octet-stream",
-                "Content-Length": str(file_size),
-            }
+                    f = await asyncio.to_thread(_open_file)
+                    try:
+                        while True:
+                            chunk = await asyncio.to_thread(f.read, chunk_sz)
+                            if not chunk:
+                                break
+                            bytes_sent += len(chunk)
+                            if progress_callback:
+                                try:
+                                    progress_callback(bytes_sent, file_size)
+                                except Exception:
+                                    pass
+                            yield chunk
+                    finally:
+                        await asyncio.to_thread(f.close)
 
-            resp = await client.put(
-                target_url,
-                content=_chunk_generator(),
-                headers=headers,
-                auth=self._auth
-            )
+                headers = {
+                    "Content-Type": mime_type or "application/octet-stream",
+                    "Content-Length": str(file_size),
+                }
 
-            if resp.status_code not in (200, 201, 204):
-                raise RuntimeError(
-                    f"Nextcloud WebDAV PUT failed ({resp.status_code}): {resp.text}"
-                )
+                gen = _chunk_generator()
+                try:
+                    resp = await client.put(
+                        target_url,
+                        content=gen,
+                        headers=headers,
+                        auth=self._auth
+                    )
+
+                    if resp.status_code not in (200, 201, 204):
+                        raise RuntimeError(
+                            f"Nextcloud WebDAV PUT failed ({resp.status_code}): {resp.text}"
+                        )
+                finally:
+                    if hasattr(gen, "aclose"):
+                        await gen.aclose()
+        finally:
+            async with self._keys_lock:
+                self._active_upload_keys.pop(rel_path, None)
 
         return {
             "storage_backend": self.backend_name,
@@ -234,6 +267,11 @@ class NextcloudWebDAVAdapter(BaseStorageAdapter):
         Streams contiguous byte ranges from Nextcloud WebDAV using HTTP Range headers.
         HTTP Range is inclusive: end = offset + limit - 1 (Constraint 3).
         """
+        if offset < 0:
+            raise ValueError(f"Offset cannot be negative: {offset}")
+        if limit is not None and limit <= 0:
+            return
+
         url = self._build_url(storage_uri)
         headers = {}
         if limit is not None:
@@ -242,13 +280,24 @@ class NextcloudWebDAVAdapter(BaseStorageAdapter):
         elif offset > 0:
             headers["Range"] = f"bytes={offset}-"
 
+        range_requested = limit is not None or offset > 0
+
         async with httpx.AsyncClient(timeout=300.0) as client:
             async with client.stream("GET", url, headers=headers, auth=self._auth) as response:
                 if response.status_code not in (200, 206):
                     logger.warning(
                         f"Nextcloud stream failed for {storage_uri}: status {response.status_code}"
                     )
-                    return
+                    raise RuntimeError(
+                        f"Nextcloud stream failed for {storage_uri} (HTTP {response.status_code})"
+                    )
+                if range_requested and response.status_code != 206:
+                    # H-7: a 200 here is the whole object from offset 0, not
+                    # the requested range — fail instead of serving wrong bytes.
+                    raise RuntimeError(
+                        f"Nextcloud endpoint ignored Range request for {storage_uri} "
+                        f"(HTTP {response.status_code}); refusing to stream wrong bytes"
+                    )
                 async for chunk in response.aiter_bytes(chunk_size=chunk_size):
                     yield chunk
 

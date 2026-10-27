@@ -8,6 +8,14 @@ from typing import Optional, Dict, Any, List
 
 logger = logging.getLogger("vayom.transcoding.encoder")
 
+# Bump this whenever the proxy recipe changes. It is persisted in the Telegram
+# caption and SQLite so old, large proxies are never mistaken for a current one.
+PROXY_PROFILE = "stream_v2_480p"
+PROXY_MAX_HEIGHT = 480
+PROXY_MAX_FPS = 30.0
+PROXY_MAXRATE = "1200k"
+PROXY_BUFSIZE = "2400k"
+
 
 async def _communicate_with_timeout(proc, timeout: float):
     """Waits for a subprocess, killing it on timeout so it cannot leak."""
@@ -179,64 +187,67 @@ def _build_encoder_args(encoder: str, fps: float) -> List[str]:
         return common + [
             "-preset", "p4",
             "-rc", "vbr",
-            "-cq", "26",
+            "-cq", "30",
             "-b:v", "0",
-            "-maxrate", "5M",
-            "-bufsize", "10M"
+            "-maxrate", PROXY_MAXRATE,
+            "-bufsize", PROXY_BUFSIZE
         ]
     elif encoder == "h264_qsv":
         return common + [
             "-preset", "medium",
-            "-global_quality", "26",
-            "-maxrate", "5M",
-            "-bufsize", "10M"
+            "-global_quality", "30",
+            "-maxrate", PROXY_MAXRATE,
+            "-bufsize", PROXY_BUFSIZE
         ]
     elif encoder == "h264_amf":
         return common + [
             "-quality", "speed",
             "-rc", "cqp",
-            "-qp_i", "26",
-            "-qp_p", "26",
-            "-maxrate", "5M",
-            "-bufsize", "10M"
+            "-qp_i", "30",
+            "-qp_p", "30",
+            "-maxrate", PROXY_MAXRATE,
+            "-bufsize", PROXY_BUFSIZE
         ]
     elif encoder == "h264_videotoolbox":
         return common + [
-            "-q:v", "60",
-            "-b:v", "2500k",
-            "-maxrate", "5M",
-            "-bufsize", "10M"
+            "-q:v", "70",
+            "-b:v", "1000k",
+            "-maxrate", PROXY_MAXRATE,
+            "-bufsize", PROXY_BUFSIZE
         ]
     elif encoder == "h264_mf":
         return common + [
-            "-b:v", "2500k",
-            "-maxrate", "5M"
+            "-b:v", "1000k",
+            "-maxrate", PROXY_MAXRATE,
+            "-bufsize", PROXY_BUFSIZE
         ]
     elif encoder == "libopenh264":
         return common + [
-            "-b:v", "2500k",
-            "-maxrate", "5M",
-            "-bufsize", "10M"
+            "-b:v", "1000k",
+            "-maxrate", PROXY_MAXRATE,
+            "-bufsize", PROXY_BUFSIZE
         ]
     else:
-        # Default libx264 software
+        # Default libx264 software. CRF keeps static scenes small, while the
+        # maxrate caps motion-heavy recordings so 480p stays bandwidth-friendly.
         return common + [
             "-preset", "veryfast",
-            "-crf", "26",
-            "-maxrate", "5M",
-            "-bufsize", "10M"
+            "-crf", "28",
+            "-maxrate", PROXY_MAXRATE,
+            "-bufsize", PROXY_BUFSIZE
         ]
 
 
-async def encode_stream_v1(source_path: Path, target_path: Path) -> Dict[str, Any]:
+async def encode_stream_v2_480p(source_path: Path, target_path: Path) -> Dict[str, Any]:
     """
-    Encodes video into the standard 'stream_v1' proxy profile:
-    - H.264 High 8-bit yuv420p
-    - Max 1080p (scale=-2:min(1080,ih), never upscale)
-    - Constant frame rate at source fps (prevents A/V drift)
+    Encodes video into the compact 'stream_v2_480p' proxy profile:
+    - H.264 8-bit yuv420p
+    - Max 480p (height capped, width derived; never upscale)
+    - Max 30 fps (drops excess frames from high-fps screen recordings)
+    - Constant frame rate (prevents A/V drift)
     - Keyframe every ~2 seconds (-g, -sc_threshold 0) for instant seeking
     - FastStart enabled (-movflags +faststart) so moov atom is at byte 0
-    - AAC 128k stereo audio
+    - AAC 96k stereo audio
     - Map first video stream and default audio only, drop subtitle/data streams
     - Returns technical metadata of generated proxy
     """
@@ -248,7 +259,10 @@ async def encode_stream_v1(source_path: Path, target_path: Path) -> Dict[str, An
         raise TranscodeError("No functional H.264 encoder is available on this system.")
 
     meta = await probe_stream_metadata(source_path)
-    fps = meta.get("fps", 30.0)
+    source_fps = float(meta.get("fps") or 30.0)
+    # Keep 60 fps sources at 30 fps: 480p proxy playback does not benefit from
+    # the extra frames, and halving them cuts bandwidth and encode time.
+    fps = min(source_fps, PROXY_MAX_FPS) if source_fps > 0 else PROXY_MAX_FPS
 
     # Build video filter chain
     vf_filters = []
@@ -256,11 +270,16 @@ async def encode_stream_v1(source_path: Path, target_path: Path) -> Dict[str, An
         vf_filters.append("yadif=0:-1:0")
 
     if meta.get("is_hdr"):
-        # Graceful tone mapping for HDR content
-        vf_filters.append("tonemap=hable:desat=0")
+        # H-06: tonemap operates on linear-light float pixels. Without the
+        # zscale linear conversion the filter either fails or washes out.
+        vf_filters.append(
+            "zscale=t=linear:npl=100,format=gbrpf32le,"
+            "zscale=p=bt709,tonemap=tonemap=hable:desat=0,"
+            "zscale=t=bt709:m=bt709:r=tv,format=yuv420p"
+        )
 
-    # Downscale to max 1080p, preserving aspect ratio with even dimensions; never upscale
-    vf_filters.append("scale=-2:'trunc(min(1080\\,ih)/2)*2'")
+    # Downscale to max 480p, preserving aspect ratio with even dimensions; never upscale
+    vf_filters.append(f"scale=-2:'trunc(min({PROXY_MAX_HEIGHT}\\,ih)/2)*2'")
 
     vf_arg = ",".join(vf_filters)
 
@@ -276,7 +295,7 @@ async def encode_stream_v1(source_path: Path, target_path: Path) -> Dict[str, An
 
     # Audio flags
     if meta.get("has_audio"):
-        cmd.extend(["-c:a", "aac", "-b:a", "128k", "-ac", "2"])
+        cmd.extend(["-c:a", "aac", "-b:a", "96k", "-ac", "2"])
     else:
         cmd.extend(["-an"])
 
@@ -330,9 +349,15 @@ async def encode_stream_v1(source_path: Path, target_path: Path) -> Dict[str, An
     proxy_meta = await probe_stream_metadata(target_path)
     return {
         "size_bytes": target_path.stat().st_size,
-        "profile": "stream_v1",
+        "profile": PROXY_PROFILE,
         "encoder_used": encoder,
         "width": proxy_meta.get("width") or 0,
         "height": proxy_meta.get("height") or 0,
+        "fps": fps,
         "duration_s": proxy_meta.get("duration_s") or meta.get("duration_s") or 0.0
     }
+
+
+# Backwards compatibility alias
+encode_stream_v1 = encode_stream_v2_480p
+

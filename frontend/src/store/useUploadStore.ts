@@ -643,6 +643,10 @@ function executeRealUpload(taskId: string) {
           if (match) floodWaitSec = parseInt(match[1], 10)
         }
       } catch {}
+      if (!floodWaitSec) {
+        const retryAfter = parseInt(xhr.getResponseHeader('Retry-After') || '0', 10)
+        if (retryAfter > 0) floodWaitSec = retryAfter
+      }
 
       if (xhr.status === 429 || floodWaitSec > 0) {
         const waitPenalty = (floodWaitSec || 10) + 2

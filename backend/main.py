@@ -1,5 +1,9 @@
 import asyncio
+import ipaddress
 import logging
+import os
+import signal
+import sys
 import httpx
 import re
 from pathlib import Path
@@ -26,6 +30,82 @@ logger = logging.getLogger("vayom.main")
 
 FRONTEND_DIST = settings.ROOT_DIR / "frontend" / "dist"
 
+
+def _process_is_alive(pid: int) -> bool:
+    """Checks a PID without depending on psutil, treating zombies as dead."""
+    if pid <= 0:
+        return False
+
+    if sys.platform == "win32":
+        try:
+            import ctypes
+
+            PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+            STILL_ACTIVE = 259
+            kernel32 = ctypes.windll.kernel32
+            handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+            if not handle:
+                return False
+            exit_code = ctypes.c_ulong()
+            ok = kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code))
+            kernel32.CloseHandle(handle)
+            return bool(ok) and exit_code.value == STILL_ACTIVE
+        except Exception:
+            return False
+
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+
+    # On Linux a process can remain as a zombie after its parent dies. It is
+    # no longer a usable owner for this backend, so treat it as gone.
+    try:
+        with open(f"/proc/{pid}/stat", "r", encoding="utf-8") as stat_file:
+            fields = stat_file.read().split()
+            if len(fields) > 2 and fields[2] == "Z":
+                return False
+    except OSError:
+        pass
+    return True
+
+
+async def parent_watchdog_loop():
+    """
+    Exits the backend when the desktop app that launched it is gone.
+
+    The bundled PyInstaller sidecar has a launcher process and a real server
+    child. Tauri can kill the launcher, but the server child would otherwise
+    keep listening on port 8000 forever. VAYOM_PARENT_PID is set by the Tauri
+    shell and lets the server shut itself down even after an app crash/SIGKILL.
+    """
+    raw_parent = (os.getenv("VAYOM_PARENT_PID") or "").strip()
+    try:
+        parent_pid = int(raw_parent)
+    except (TypeError, ValueError):
+        return
+
+    if parent_pid <= 0 or parent_pid == os.getpid():
+        return
+
+    logger.info("Parent app watchdog enabled; backend will stop when the app exits.")
+    while True:
+        await asyncio.sleep(1.0)
+        if not _process_is_alive(parent_pid):
+            logger.info("Parent app exited; shutting down the backend server.")
+            try:
+                os.kill(os.getpid(), signal.SIGTERM)
+            except Exception:
+                os._exit(0)
+            # If graceful shutdown does not complete promptly, do not leave an
+            # orphan listening on the port.
+            await asyncio.sleep(5.0)
+            os._exit(0)
+
 async def heartbeat_loop():
     """Periodic keep-alive heartbeat loop to prevent Hugging Face Spaces from idling."""
     try:
@@ -46,6 +126,7 @@ async def heartbeat_loop():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup:
+    parent_watchdog_task = asyncio.create_task(parent_watchdog_loop())
     logger.info("Initializing Vayom Drive Node...")
     await init_db()
     logger.info("Database initialized with WAL mode.")
@@ -92,6 +173,11 @@ async def lifespan(app: FastAPI):
 
     # Shutdown:
     logger.info("Shutting down Vayom Drive...")
+    parent_watchdog_task.cancel()
+    try:
+        await parent_watchdog_task
+    except asyncio.CancelledError:
+        pass
     await transcoding_manager.stop()
     await workstation_watcher.stop()
     if heartbeat_task:
@@ -130,7 +216,12 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
-    expose_headers=["*"],
+    # H-5: the upload queue reads "Retry-After" to honour Telegram's FloodWait
+    # window. The desktop app and the Vite dev server are cross-origin, so an
+    # unexposed header is invisible to XHR and the client would resume
+    # uploading inside an active flood wait. Expose only what is actually
+    # consumed instead of the previous blanket "*".
+    expose_headers=["Retry-After", "Content-Range"],
 )
 
 @app.middleware("http")
@@ -165,11 +256,19 @@ async def enforce_api_security(request: Request, call_next):
 
         # Host header validation: when bound to loopback, block external host spoofing
         if getattr(settings, "HOST", "127.0.0.1") in ("127.0.0.1", "localhost"):
-            raw_host = request.headers.get("host", "").split(":")[0].strip().lower()
+            host_header = request.headers.get("host", "").strip().lower()
+            # Bracket-aware port strip: "[::1]:8000" -> "::1" (B16)
+            raw_host = host_header.split("]")[0].lstrip("[") if host_header.startswith("[") else host_header.split(":")[0]
             if raw_host:
+                # Loopback check by IP parse, not prefix match: "127.evil.com"
+                # starts with "127." but is a DNS-rebinding hostname (Finding A).
+                try:
+                    is_loopback_ip = ipaddress.ip_address(raw_host).is_loopback
+                except ValueError:
+                    is_loopback_ip = False
                 is_valid_host = (
-                    raw_host in ("127.0.0.1", "localhost", "::1", "testserver")
-                    or raw_host.startswith("127.")
+                    raw_host in ("localhost", "testserver", "::1")
+                    or is_loopback_ip
                     or any(raw_host == o.split("://")[-1].split(":")[0].lower() for o in trusted_origins)
                 )
                 if not is_valid_host:
@@ -181,24 +280,32 @@ async def enforce_api_security(request: Request, call_next):
 
         # Optional strict per-install API token enforcement
         if getattr(settings, "REQUIRE_API_AUTH", False):
-            auth_header = request.headers.get("authorization", "")
-            api_key = request.headers.get("x-api-key", "")
-            token = auth_header[7:].strip() if auth_header.lower().startswith("bearer ") else auth_header.strip()
-            if not token and api_key:
-                token = api_key.strip()
+            # Loopback virtual-stream requests using valid STREAM_LOOPBACK_TOKEN are authenticated
+            loopback_token = getattr(settings, "STREAM_LOOPBACK_TOKEN", "")
+            query_token = request.query_params.get("token", "").strip()
+            if loopback_token and query_token == loopback_token and request.url.path.startswith("/api/v1/virtual-stream/"):
+                pass
+            else:
+                auth_header = request.headers.get("authorization", "")
+                api_key = request.headers.get("x-api-key", "")
+                token = auth_header[7:].strip() if auth_header.lower().startswith("bearer ") else auth_header.strip()
+                if not token and api_key:
+                    token = api_key.strip()
+                if not token and query_token:
+                    token = query_token
 
-            valid_tokens = {
-                getattr(settings, "LOCAL_API_TOKEN", ""),
-                getattr(settings, "SESSION_SECRET", ""),
-                getattr(settings, "ADMIN_PASSWORD", "")
-            }
-            valid_tokens = {t for t in valid_tokens if t}
+                valid_tokens = {
+                    getattr(settings, "LOCAL_API_TOKEN", ""),
+                    getattr(settings, "SESSION_SECRET", ""),
+                    getattr(settings, "ADMIN_PASSWORD", "")
+                }
+                valid_tokens = {t for t in valid_tokens if t}
 
-            if not token or token not in valid_tokens:
-                return JSONResponse(
-                    status_code=status.HTTP_401_UNAUTHORIZED,
-                    content={"detail": "Unauthorized: Valid API authentication token required."}
-                )
+                if not token or token not in valid_tokens:
+                    return JSONResponse(
+                        status_code=status.HTTP_401_UNAUTHORIZED,
+                        content={"detail": "Unauthorized: Valid API authentication token required."}
+                    )
 
     return await call_next(request)
 

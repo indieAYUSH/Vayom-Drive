@@ -251,7 +251,7 @@ export const LoginView: React.FC = () => {
                           <RefreshCw size={11} /> Retry Connection
                         </Button>
                       </div>
-                    ) : qrStatus === 'expired' || (qrStatus === 'waiting' && qrExpiresAt != null && timeLeft === 0) ? (
+                    ) : qrStatus === 'expired' || (qrStatus === 'waiting' && qrExpiresAt != null && Math.floor(Date.now() / 1000) >= qrExpiresAt) ? (
                       <div className="w-full h-full bg-[#0d0d0d] p-3 flex flex-col items-center justify-center text-center space-y-2.5">
                         <div className="w-7 h-7 rounded-full bg-[#1f0a0a] border border-[#ef4444] flex items-center justify-center text-[#ef4444]">
                           <AlertTriangle size={14} />

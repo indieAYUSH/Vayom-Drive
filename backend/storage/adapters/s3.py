@@ -11,7 +11,7 @@ import uuid
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional, Dict, Any, AsyncIterator, List, Union
+from typing import Optional, Dict, Any, AsyncIterator, List, Union, ClassVar, Tuple
 
 import httpx
 
@@ -152,6 +152,8 @@ class S3StorageAdapter(BaseStorageAdapter):
     - Full secret key redaction (Constraint 6)
     """
     backend_name: str = "s3"
+    _active_upload_keys: ClassVar[Dict[str, Tuple[str, float]]] = {}
+    _keys_lock: ClassVar[asyncio.Lock] = asyncio.Lock()
 
     def __init__(
         self,
@@ -237,43 +239,64 @@ class S3StorageAdapter(BaseStorageAdapter):
         safe_filename = Path(filename.replace("\\", "/")).name
         if not safe_filename or safe_filename in (".", ".."):
             safe_filename = f"{file_id}.bin"
-        if is_proxy:
-            raw_key = f"{self.vault_prefix}/.vayom/proxies/{file_id}/{safe_filename}"
-        elif folder_name:
-            clean_folder = folder_name.strip("/").replace("\\", "/")
-            raw_key = f"{self.vault_prefix}/{clean_folder}/{safe_filename}"
-        else:
-            raw_key = f"{self.vault_prefix}/{safe_filename}"
-        # B-10: keep the logical key canonical; `_build_url` percent-encodes it.
-        object_key = normalize_object_path(raw_key)
 
-        # B-11: S3 duplicate filename collision guard
-        try:
-            from ...db.connection import get_db
-            async with get_db() as db:
-                cur = await db.execute(
-                    "SELECT 1 FROM file_parts WHERE storage_backend = ? AND storage_uri = ? AND file_id != ? LIMIT 1",
-                    (self.backend_name, object_key, file_id)
-                )
-                if await cur.fetchone():
+        # B-11 / H-6: S3 duplicate filename collision guard (DB check + concurrent in-flight guard)
+        now = time.time()
+        async with self._keys_lock:
+            # Prune stale in-flight keys older than 300 seconds
+            for k, (_, ts) in list(self._active_upload_keys.items()):
+                if now - ts > 300:
+                    self._active_upload_keys.pop(k, None)
+
+            while True:
+                if is_proxy:
+                    raw_key = f"{self.vault_prefix}/.vayom/proxies/{file_id}/{safe_filename}"
+                elif folder_name:
+                    clean_folder = folder_name.strip("/").replace("\\", "/")
+                    raw_key = f"{self.vault_prefix}/{clean_folder}/{safe_filename}"
+                else:
+                    raw_key = f"{self.vault_prefix}/{safe_filename}"
+                # B-10: keep the logical key canonical; `_build_url` percent-encodes it.
+                object_key = normalize_object_path(raw_key)
+
+                active_entry = self._active_upload_keys.get(object_key)
+                in_flight_conflict = active_entry is not None and active_entry[0] != file_id
+
+                in_db_conflict = False
+                try:
+                    from ...db.connection import get_db
+                    async with get_db() as db:
+                        cur = await db.execute(
+                            "SELECT 1 FROM file_parts WHERE storage_backend = ? AND storage_uri = ? AND file_id != ? LIMIT 1",
+                            (self.backend_name, object_key, file_id)
+                        )
+                        if await cur.fetchone():
+                            in_db_conflict = True
+                except Exception as e:
+                    logger.debug(f"S3 collision guard check: {e}")
+
+                if in_flight_conflict or in_db_conflict:
                     stem = Path(safe_filename).stem
                     ext = Path(safe_filename).suffix
-                    safe_filename = f"{stem}_{file_id[:8]}{ext}"
-                    if is_proxy:
-                        raw_key = f"{self.vault_prefix}/.vayom/proxies/{file_id}/{safe_filename}"
-                    elif folder_name:
-                        clean_folder = folder_name.strip("/").replace("\\", "/")
-                        raw_key = f"{self.vault_prefix}/{clean_folder}/{safe_filename}"
+                    suffix = f"_{file_id[:8]}"
+                    if not stem.endswith(suffix):
+                        safe_filename = f"{stem}{suffix}{ext}"
                     else:
-                        raw_key = f"{self.vault_prefix}/{safe_filename}"
-                    object_key = normalize_object_path(raw_key)
-        except Exception as e:
-            logger.debug(f"S3 collision guard check: {e}")
+                        import uuid
+                        safe_filename = f"{stem}_{uuid.uuid4().hex[:4]}{ext}"
+                    continue
 
-        if file_size > MULTIPART_THRESHOLD:
-            await self._upload_multipart(local_p, object_key, file_size, mime_type, progress_callback)
-        else:
-            await self._upload_single(local_p, object_key, file_size, mime_type, progress_callback)
+                self._active_upload_keys[object_key] = (file_id, time.time())
+                break
+
+        try:
+            if file_size > MULTIPART_THRESHOLD:
+                await self._upload_multipart(local_p, object_key, file_size, mime_type, progress_callback)
+            else:
+                await self._upload_single(local_p, object_key, file_size, mime_type, progress_callback)
+        finally:
+            async with self._keys_lock:
+                self._active_upload_keys.pop(object_key, None)
 
         return {
             "storage_backend": self.backend_name,
@@ -297,25 +320,69 @@ class S3StorageAdapter(BaseStorageAdapter):
         """Uploads file in a single PUT request with streaming body."""
         url = self._build_url(object_key)
 
-        def _read_payload() -> tuple[str, bytes]:
-            with open(local_path, "rb") as f:
-                payload = f.read()
-            return hashlib.sha256(payload).hexdigest(), payload
+        # For small payloads (<= 16 MB), read once into memory for fast hashing and PUT
+        if file_size <= 16 * 1024 * 1024:
+            def _read_payload() -> tuple[str, bytes]:
+                with open(local_path, "rb") as f:
+                    payload = f.read()
+                return hashlib.sha256(payload).hexdigest(), payload
 
-        # B-12: hash and upload the single in-memory copy of the payload.
-        payload_hash, content = await asyncio.to_thread(_read_payload)
+            # B-12: hash and upload the single in-memory copy of the payload.
+            payload_hash, content = await asyncio.to_thread(_read_payload)
+        else:
+            # For files > 16 MB up to MULTIPART_THRESHOLD, stream-hash in chunks
+            # to avoid loading entire multi-megabyte files into memory at once
+            def _hash_file() -> str:
+                hasher = hashlib.sha256()
+                with open(local_path, "rb") as f:
+                    while True:
+                        buf = f.read(1024 * 1024)
+                        if not buf:
+                            break
+                        hasher.update(buf)
+                return hasher.hexdigest()
+
+            payload_hash = await asyncio.to_thread(_hash_file)
+
+            async def _chunk_generator():
+                bytes_sent = 0
+                chunk_sz = 1024 * 1024
+                def _open_file():
+                    return open(local_path, "rb")
+                f = await asyncio.to_thread(_open_file)
+                try:
+                    while True:
+                        chunk = await asyncio.to_thread(f.read, chunk_sz)
+                        if not chunk:
+                            break
+                        bytes_sent += len(chunk)
+                        if progress_callback:
+                            try:
+                                progress_callback(bytes_sent, file_size)
+                            except Exception:
+                                pass
+                        yield chunk
+                finally:
+                    await asyncio.to_thread(f.close)
+
+            content = _chunk_generator()
+
         headers = {
             "Content-Type": mime_type or "application/octet-stream",
             "Content-Length": str(file_size),
         }
         signed = self._get_signed_headers("PUT", url, headers, payload_hash=payload_hash)
 
-        async with httpx.AsyncClient(timeout=300.0) as client:
-            resp = await client.put(url, content=content, headers=signed)
-            if resp.status_code not in (200, 201):
-                raise RuntimeError(f"S3 PUT upload failed ({resp.status_code}): {resp.text}")
+        try:
+            async with httpx.AsyncClient(timeout=300.0) as client:
+                resp = await client.put(url, content=content, headers=signed)
+                if resp.status_code not in (200, 201):
+                    raise RuntimeError(f"S3 PUT upload failed ({resp.status_code}): {resp.text}")
+        finally:
+            if hasattr(content, "aclose"):
+                await content.aclose()
 
-        if progress_callback:
+        if progress_callback and file_size <= 16 * 1024 * 1024:
             try:
                 progress_callback(file_size, file_size)
             except Exception:
@@ -395,10 +462,15 @@ class S3StorageAdapter(BaseStorageAdapter):
                 if complete_resp.status_code not in (200, 201):
                     raise RuntimeError(f"S3 complete multipart upload failed: {complete_resp.text}")
             except Exception as e:
-                # Abort Multipart Upload on failure
-                abort_url = self._build_url(object_key, query=f"uploadId={upload_id}")
-                abort_headers = self._get_signed_headers("DELETE", abort_url)
-                await client.delete(abort_url, headers=abort_headers)
+                # Abort Multipart Upload on failure; preserve original exception if abort fails
+                try:
+                    abort_url = self._build_url(object_key, query=f"uploadId={upload_id}")
+                    abort_headers = self._get_signed_headers("DELETE", abort_url)
+                    await client.delete(abort_url, headers=abort_headers)
+                except Exception as abort_err:
+                    logger.warning(
+                        f"Failed to abort multipart upload {upload_id} for {object_key}: {abort_err}"
+                    )
                 raise e
 
     async def stream_bytes(
@@ -410,6 +482,11 @@ class S3StorageAdapter(BaseStorageAdapter):
         **kwargs
     ) -> AsyncIterator[bytes]:
         """Streams byte range directly from S3 using Range HTTP header."""
+        if offset < 0:
+            raise ValueError(f"Offset cannot be negative: {offset}")
+        if limit is not None and limit <= 0:
+            return
+
         url = self._build_url(storage_uri)
         headers = {}
         if limit is not None:
@@ -425,7 +502,9 @@ class S3StorageAdapter(BaseStorageAdapter):
             async with client.stream("GET", url, headers=signed) as response:
                 if response.status_code not in (200, 206):
                     logger.warning(f"S3 stream failed for {storage_uri}: status {response.status_code}")
-                    return
+                    raise RuntimeError(
+                        f"S3 stream failed for {storage_uri} (HTTP {response.status_code})"
+                    )
                 if range_requested and response.status_code != 206:
                     # B-14: a 200 here is the whole object from offset 0, not
                     # the requested range — fail instead of serving wrong bytes.

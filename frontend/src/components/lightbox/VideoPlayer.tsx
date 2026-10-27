@@ -11,6 +11,8 @@ interface VideoPlayerProps {
   filename: string
 }
 
+const PROXY_PROFILE = 'stream_v2_480p'
+
 export const VideoPlayer: React.FC<VideoPlayerProps> = ({ item, src, poster, filename }) => {
   const videoRef = useRef<HTMLVideoElement>(null)
   const progressRef = useRef<HTMLDivElement>(null)
@@ -18,18 +20,24 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({ item, src, poster, fil
   // Live proxy state tracking for background encoding/upload completion
   const [dynamicProxyUrl, setDynamicProxyUrl] = useState<string | null>(item?.proxy_url || null)
   const [dynamicProxyStatus, setDynamicProxyStatus] = useState<string | undefined>(item?.proxy_status)
+  const [dynamicProxyProfile, setDynamicProxyProfile] = useState<string | null | undefined>(item?.proxy_profile)
+  const [upgradeRequested, setUpgradeRequested] = useState(false)
+  const upgradeRequestedRef = useRef(false)
 
   // Stream mode: 'original' vs 'proxy'
   const hasProxy = (dynamicProxyStatus === 'ready' || item?.proxy_status === 'ready') && !!(dynamicProxyUrl || item?.proxy_url)
+  const hasCurrentProxy = hasProxy && dynamicProxyProfile === PROXY_PROFILE
   const originalUrl = resolveMediaUrl(item?.preview_url || src)
   const proxyUrl = resolveMediaUrl(dynamicProxyUrl || item?.proxy_url || '')
-  const isOptimizing = !hasProxy && (
+  const isOptimizing = !hasCurrentProxy && (
+    upgradeRequested ||
     dynamicProxyStatus === 'uploading' ||
     dynamicProxyStatus === 'encoding' ||
     dynamicProxyStatus === 'queued' ||
     item?.proxy_status === 'uploading' ||
     item?.proxy_status === 'encoding' ||
-    item?.proxy_status === 'queued'
+    item?.proxy_status === 'queued' ||
+    (hasProxy && dynamicProxyProfile !== PROXY_PROFILE)
   )
 
   const [activeStream, setActiveStream] = useState<'original' | 'proxy'>(hasProxy ? 'proxy' : 'original')
@@ -47,6 +55,37 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({ item, src, poster, fil
       setToastMessage(null)
     }, 3500)
   }, [])
+
+  const request480p = useCallback(async (forceDownload: boolean = true) => {
+    if (!item?.id || hasCurrentProxy) return
+    if (upgradeRequestedRef.current && !forceDownload) return
+    upgradeRequestedRef.current = true
+    setUpgradeRequested(true)
+    try {
+      const result = await api.generateProxy(item.id, { forceDownload })
+      if (result.status === 'in_progress') {
+        showToast('480p preview is already being prepared.')
+      } else if (result.status === 'ready') {
+        showToast('480p preview is ready.')
+      } else {
+        showToast('Preparing 480p preview in the background...')
+      }
+    } catch {
+      upgradeRequestedRef.current = false
+      setUpgradeRequested(false)
+      showToast('Could not prepare the 480p preview. You can retry from the player menu.')
+    }
+  }, [item?.id, hasCurrentProxy, showToast])
+
+  // Automatically replace an existing large proxy with the 480p profile.
+  // Videos with no proxy at all are left alone until the user taps the
+  // "480p preview" button, avoiding an unexpected multi-hundred-MB download
+  // just from opening an item.
+  useEffect(() => {
+    if (!item?.id || !hasProxy || hasCurrentProxy || upgradeRequestedRef.current) return
+    if (dynamicProxyProfile === PROXY_PROFILE) return
+    void request480p(true)
+  }, [item?.id, hasProxy, hasCurrentProxy, dynamicProxyProfile, request480p])
 
   const [isPlaying, setIsPlaying] = useState(false)
   const [currentTime, setCurrentTime] = useState(0)
@@ -69,10 +108,14 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({ item, src, poster, fil
   const healthyBufferSecondsRef = useRef(0)
   const stallCountRef = useRef(0)
   const lastSwitchTimeRef = useRef(0)
+  // B15: latched when the original stream fails with a decode/codec error, so
+  // the adaptive upgrader stops ping-ponging back to an undecodable source.
+  const codecFailedRef = useRef(false)
   const dragHandlersRef = useRef<{ move: (e: MouseEvent) => void; up: (e: MouseEvent) => void } | null>(null)
 
   // Initial stream selection: default to stream-optimized proxy (zero buffering) when available
   useEffect(() => {
+    codecFailedRef.current = false
     if (!hasProxy) {
       setActiveStream('original')
       setCurrentSrc(originalUrl)
@@ -94,18 +137,21 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({ item, src, poster, fil
     }
   }, [hasProxy, originalUrl, proxyUrl, forceOriginal])
 
-  // Dynamic poll for background proxy completion when video is opened while encoding/uploading
+  // Poll for the background 480p proxy while the old proxy/original is playing.
   useEffect(() => {
-    if (!item?.id || hasProxy || !isOptimizing) return
+    if (!item?.id || hasCurrentProxy || !isOptimizing) return
 
     const pollInterval = setInterval(async () => {
       try {
         const files = await api.listFiles({ q: item.filename, limit: 10 })
         const found = files.find(f => f.id === item.id)
-        if (found?.proxy_status === 'ready' && found.proxy_url) {
+        const foundIsCurrent = found?.proxy_profile === PROXY_PROFILE
+        if (found?.proxy_status === 'ready' && found.proxy_url && foundIsCurrent) {
           clearInterval(pollInterval)
           setDynamicProxyStatus('ready')
+          setDynamicProxyProfile(found.proxy_profile)
           setDynamicProxyUrl(found.proxy_url)
+          setUpgradeRequested(false)
           if (!forceOriginal) {
             const video = videoRef.current
             const prevTime = video ? video.currentTime : 0
@@ -113,14 +159,14 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({ item, src, poster, fil
             wasPlayingBeforeSwitchRef.current = isPlaying
             setActiveStream('proxy')
             setCurrentSrc(resolveMediaUrl(found.proxy_url))
-            showToast('Instant FastStart preview is ready! Switched stream.')
+            showToast('480p preview is ready. Switched to the faster stream.')
           }
         }
       } catch {}
     }, 4000)
 
     return () => clearInterval(pollInterval)
-  }, [item?.id, item?.filename, hasProxy, isOptimizing, forceOriginal, isPlaying, showToast])
+  }, [item?.id, item?.filename, hasCurrentProxy, isOptimizing, forceOriginal, isPlaying, showToast])
 
   // Stream switcher with seamless timestamp preservation and anti-flapping guard
   const switchStream = useCallback((target: 'original' | 'proxy', reason: string) => {
@@ -160,6 +206,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({ item, src, poster, fil
   const toggleForceOriginal = () => {
     if (!forceOriginal) {
       setForceOriginal(true)
+      codecFailedRef.current = false
       if (activeStream !== 'original') {
         switchStream('original', 'forced by user')
       } else {
@@ -198,7 +245,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({ item, src, poster, fil
 
         // Adaptive upgrade check: upgrade on pause, seek, or sustained healthy buffer (>20s for >30s)
         const live = mediaLiveRef.current
-        if (live.activeStream === 'proxy' && !live.forceOriginal && live.hasProxy) {
+        if (live.activeStream === 'proxy' && !live.forceOriginal && live.hasProxy && !codecFailedRef.current) {
           const bufferAhead = finalBufferedEnd - video.currentTime
           const isEligibleMoment = video.paused || isScrubbingRef.current || bufferAhead > 25.0
           if (bufferAhead > 15.0 && isEligibleMoment) {
@@ -267,9 +314,10 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({ item, src, poster, fil
       setIsLoading(false)
       setIsPlaying(false)
 
-      // Fallback: If original failed to play (e.g. 4K HEVC unsupported in browser), auto-fallback to stream_v1 proxy!
+      // Fallback: If original failed to play (e.g. 4K HEVC unsupported in browser), auto-fallback to the compact proxy.
       const live = mediaLiveRef.current
       if (live.activeStream === 'original' && live.hasProxy && !live.forceOriginal) {
+        if (err && (err.code === 3 || err.code === 4)) codecFailedRef.current = true
         live.switchStream('proxy', 'browser codec fallback')
         return
       }
@@ -303,7 +351,8 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({ item, src, poster, fil
       video.removeEventListener('pause', handlePause)
       video.removeEventListener('error', handleVideoError)
       if (seekThrottleTimeout.current) clearTimeout(seekThrottleTimeout.current)
-      if (toastTimeoutRef.current) clearTimeout(toastTimeoutRef.current)
+      // B19: the toast timer is owned by showToast; clearing it here kills a
+      // toast that a stream switch scheduled microseconds earlier.
     }
   }, [currentSrc])
 
@@ -446,7 +495,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({ item, src, poster, fil
           src={currentSrc}
           poster={poster}
           onClick={togglePlay}
-          preload="auto"
+          preload="metadata"
           playsInline
           className="max-h-[60vh] sm:max-h-[80vh] max-w-full object-contain cursor-pointer"
         />
@@ -456,12 +505,12 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({ item, src, poster, fil
           {activeStream === 'original' ? (
             <span className="px-2 py-0.5 bg-[#000000]/80 backdrop-blur-md border border-[#22c55e]/50 text-[#4ade80] text-[10px] font-mono tracking-wider uppercase shadow-md flex items-center gap-1">
               <span className={`w-1.5 h-1.5 rounded-full bg-[#22c55e] ${isOptimizing ? 'animate-ping' : ''}`} />
-              {isOptimizing ? 'Original • Optimizing Preview...' : 'Original'}
+              {isOptimizing ? 'Original • Optimizing 480p...' : 'Original'}
             </span>
           ) : (
             <span className="px-2 py-0.5 bg-[#000000]/80 backdrop-blur-md border border-[#f59e0b]/50 text-[#fbbf24] text-[10px] font-mono tracking-wider uppercase shadow-md flex items-center gap-1">
               <span className="w-1.5 h-1.5 rounded-full bg-[#f59e0b]" />
-              Compressed preview (720p)
+              {hasCurrentProxy ? 'Compressed preview (480p)' : 'Compressed preview • upgrading to 480p...'}
             </span>
           )}
           {forceOriginal && (
@@ -599,6 +648,17 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({ item, src, poster, fil
           </div>
 
           <div className="flex items-center gap-2">
+            {!hasCurrentProxy && (
+              <button
+                onClick={() => request480p(true)}
+                className="px-2 py-0.5 border border-[#282828] text-xs font-mono flex items-center gap-1 text-[#888888] hover:text-[#cccccc] hover:border-[#444444]"
+                title="Build a smaller 480p preview for faster loading"
+              >
+                <SlidersHorizontal size={11} />
+                <span>480p preview</span>
+              </button>
+            )}
+
             {/* Discreet Player-Menu Item: "Force original" Escape Hatch (Session Only) */}
             {hasProxy && (
               <button

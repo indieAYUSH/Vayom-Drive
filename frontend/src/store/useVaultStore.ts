@@ -227,11 +227,11 @@ export const useVaultStore = create<VaultState>((set, get) => ({
 
       if (epoch !== currentFetchEpoch || signal.aborted) return
 
-      const isGeneralAll = activeTab === 'all' && !selectedAlbumId && !selectedTag
-
       set((state) => ({
         files,
-        catalogFiles: isGeneralAll ? files : state.catalogFiles.length === 0 ? files : state.catalogFiles,
+        // catalogFiles is the vault-wide pool for sidebar counts and search;
+        // never overwrite it with a single PAGE_SIZE page (B13)
+        catalogFiles: state.catalogFiles.length === 0 ? files : state.catalogFiles,
         hasMore: files.length === PAGE_SIZE,
         isLoadingMore: false,
         error: null,
@@ -546,7 +546,36 @@ useAuthStore.subscribe((state, prev) => {
   if (!sessionChanged) return
 
   if (!state.isAuthenticated) {
-    useVaultStore.setState({ starredIds: [] })
+    // R-04: logout/expiry must not leave the previous account's catalog,
+    // selection or player state visible to the next login. Also invalidate any
+    // in-flight fetch so it cannot repopulate the grid after logout.
+    currentFetchEpoch++
+    if (fetchFilesController) {
+      fetchFilesController.abort()
+      fetchFilesController = null
+    }
+    useVaultStore.setState({
+      files: [],
+      catalogFiles: [],
+      trashCount: 0,
+      albums: [],
+      metrics: {
+        total_bytes: 0,
+        total_files: 0,
+        total_parts: 0,
+        channel_id: 'Loading...',
+        telegram_messages: 0,
+        online_status: 'online',
+      },
+      starredIds: [],
+      selectedIds: [],
+      lightboxItem: null,
+      lightboxItems: null,
+      activeAudioItem: null,
+      hasMore: false,
+      isLoading: false,
+      isLoadingMore: false,
+    })
     return
   }
 

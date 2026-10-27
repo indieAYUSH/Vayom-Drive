@@ -7,7 +7,7 @@ from typing import Optional, List, Dict, Any
 from pydantic import BaseModel
 from fastapi import APIRouter, HTTPException
 from telethon import TelegramClient
-from telethon.errors import SessionPasswordNeededError
+from telethon.errors import ApiIdInvalidError, SessionPasswordNeededError
 from telethon.tl.functions.channels import CreateChannelRequest
 from ..config import settings
 from ..storage.client import storage_client
@@ -18,6 +18,39 @@ router = APIRouter(prefix="/api/v1/auth")
 
 # In-memory tracking for active QR login state
 _active_qr_sessions: Dict[str, Dict[str, Any]] = {}
+
+# Upper bound for connect + token export; kept as a module constant so tests can
+# exercise the timeout path without waiting 45 seconds.
+QR_HANDSHAKE_TIMEOUT_SECONDS = 45.0
+
+
+def _require_telegram_app_credentials() -> None:
+    """Returns an actionable error instead of a generic HTTP 500 when the
+    application-level Telegram credentials are missing (common in packaged
+    builds that shipped without a configuration file)."""
+    if not settings.TELEGRAM_API_ID or not settings.TELEGRAM_API_HASH:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Telegram API credentials are not configured. Set TELEGRAM_API_ID and "
+                "TELEGRAM_API_HASH in .env (or telegram_app.env in the app config "
+                "directory) and restart Vayom Drive."
+            ),
+        )
+
+
+def _delete_session_files(session_name: str) -> list[str]:
+    """Removes a Telethon SQLite session and its WAL/journal sidecars."""
+    removed = []
+    for suffix in ("", "-wal", "-shm", "-journal"):
+        path = settings.DATA_DIR / f"{session_name}.session{suffix}"
+        try:
+            if path.exists():
+                path.unlink()
+                removed.append(path.name)
+        except OSError as exc:
+            logger.warning(f"Could not remove session file {path}: {exc}")
+    return removed
 
 
 class QRStartResponse(BaseModel):
@@ -213,6 +246,10 @@ async def _monitor_qr(session_id: str, qr_login, client: TelegramClient, session
 @router.post("/qr/start", response_model=QRStartResponse)
 async def start_qr_login():
     """Initializes Telethon user MTProto client and returns dynamic tg://login?token= URI with extended session."""
+    # Validate before touching the storage client: a missing .env must not leave
+    # the already-authenticated storage session disconnected.
+    _require_telegram_app_credentials()
+
     # Ensure storage client is disconnected so it doesn't hold locks on vayom_user.session
     await storage_client.disconnect()
 
@@ -254,15 +291,76 @@ async def start_qr_login():
     except Exception as e:
         logger.warning(f"Could not configure WAL mode on {session_path}: {e}")
 
-    robust_session = RobustSQLiteSession(session_file)
-    client = TelegramClient(
-        robust_session,
-        settings.TELEGRAM_API_ID,
-        settings.TELEGRAM_API_HASH
-    )
-    await client.connect()
+    client: Optional[TelegramClient] = None
+    try:
+        robust_session = RobustSQLiteSession(session_file)
+        client = TelegramClient(
+            robust_session,
+            settings.TELEGRAM_API_ID,
+            settings.TELEGRAM_API_HASH
+        )
 
-    qr_login = await client.qr_login()
+        async def _handshake():
+            await client.connect()
+            return await client.qr_login()
+
+        # One deadline for the whole handshake: connect + token export. Telethon
+        # retries internally, so without a cap the login UI can wait for minutes.
+        qr_login = await asyncio.wait_for(_handshake(), timeout=QR_HANDSHAKE_TIMEOUT_SECONDS)
+    except asyncio.TimeoutError:
+        if client is not None:
+            try:
+                await client.disconnect()
+            except Exception:
+                pass
+        # B5: restore service with the previous (still saved) credentials.
+        try:
+            await storage_client.reconnect()
+        except Exception as reconnect_err:
+            logger.warning(f"Could not restore the previous session after a failed QR start: {reconnect_err}")
+        raise HTTPException(
+            status_code=504,
+            detail="Timed out connecting to Telegram. Check your internet connection and try again.",
+        )
+    except HTTPException:
+        raise
+    except (ApiIdInvalidError, ValueError) as exc:
+        if client is not None:
+            try:
+                await client.disconnect()
+            except Exception:
+                pass
+        # B5: restore service with the previous (still saved) credentials.
+        try:
+            await storage_client.reconnect()
+        except Exception as reconnect_err:
+            logger.warning(f"Could not restore the previous session after a failed QR start: {reconnect_err}")
+        logger.warning("QR login rejected the configured Telegram API credentials: %s", exc)
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Telegram rejected the configured API credentials. Verify TELEGRAM_API_ID "
+                "and TELEGRAM_API_HASH and restart Vayom Drive."
+            ),
+        )
+    except Exception:
+        if client is not None:
+            try:
+                await client.disconnect()
+            except Exception:
+                pass
+        # B5: restore service with the previous (still saved) credentials.
+        try:
+            await storage_client.reconnect()
+        except Exception as reconnect_err:
+            logger.warning(f"Could not restore the previous session after a failed QR start: {reconnect_err}")
+        # Keep the traceback in the local log, not in the API response (it can
+        # contain filesystem paths or session details).
+        logger.exception("QR login initialization failed")
+        raise HTTPException(
+            status_code=503,
+            detail="Could not reach Telegram. Check your internet connection and try again.",
+        )
 
     session_expires_at = int(time.time()) + settings.QR_SESSION_TTL_SECONDS
 
@@ -469,11 +567,28 @@ async def finalize_qr_login(body: QRFinalizeRequest):
             "channel_id": channel_id,
             "user": config_payload["user_profile"]
         }
+
+        # H-8: reconnect BEFORE the session is marked finalised and popped.
+        # Previously the session was destroyed first, so a transient reconnect
+        # failure returned a 500 with no way to retry — the client retried
+        # onboarding from scratch and the double-create guard (which lived only
+        # in the discarded session) was gone, producing a second vault channel.
+        try:
+            await storage_client.reconnect()
+        except Exception as reconnect_err:
+            logger.error(f"Storage client reconnect failed during QR finalisation: {reconnect_err}")
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "Could not connect to Telegram after setup. Your vault channel is preserved — "
+                    "retry to finish onboarding."
+                ),
+            )
+
         session["is_finalized"] = True
         session["finalized_result"] = result
         _active_qr_sessions.pop(body.session_id, None)
 
-        await storage_client.reconnect()
         return result
 
 
@@ -513,20 +628,35 @@ async def login_with_bot(body: BotLoginRequest):
     Connects to Telegram using a dedicated Bot Token and Channel ID.
     Validates credentials and verifies that the storage channel is reachable and postable.
     """
-    temp_client = TelegramClient(
-        str(settings.DATA_DIR / "vayom_bot"),
-        settings.TELEGRAM_API_ID,
-        settings.TELEGRAM_API_HASH
-    )
+    _require_telegram_app_credentials()
+
+    # Telethon's start() silently reuses an already-authorized SQLite session,
+    # so switching bot tokens against the old session would keep uploading as
+    # the previous bot. Release the old client and start from a clean session.
+    await storage_client.disconnect()
+    _delete_session_files("vayom_bot")
+
+    temp_client = None
     try:
+        temp_client = TelegramClient(
+            str(settings.DATA_DIR / "vayom_bot"),
+            settings.TELEGRAM_API_ID,
+            settings.TELEGRAM_API_HASH
+        )
         await temp_client.start(bot_token=body.bot_token)
         verified_channel_id = await _validate_channel_for_bot(temp_client, body.channel_id)
         await temp_client.disconnect()
     except Exception as e:
+        if temp_client is not None:
+            try:
+                await temp_client.disconnect()
+            except Exception:
+                pass
+        # Restore service with the previous (still saved) credentials.
         try:
-            await temp_client.disconnect()
-        except Exception:
-            pass
+            await storage_client.reconnect()
+        except Exception as reconnect_err:
+            logger.warning(f"Could not restore the previous session after a failed bot login: {reconnect_err}")
         raise HTTPException(status_code=400, detail=f"Bot login failed: {e}")
 
     config_payload = {
@@ -551,20 +681,48 @@ async def login_with_developer(body: DeveloperLoginRequest):
     Sovereign Developer Mode: Configures custom API_ID, API_HASH, Bot Token, and Channel ID.
     Validates credentials and verifies that the storage channel is reachable and postable.
     """
-    temp_client = TelegramClient(
-        str(settings.DATA_DIR / "vayom_bot"),
-        body.api_id,
-        body.api_hash
-    )
+    if not body.api_id or not body.api_hash.strip():
+        raise HTTPException(
+            status_code=400,
+            detail="API ID and API Hash are required for developer mode.",
+        )
+
+    # Same session-reuse hazard as /bot: a new bot token must not inherit the
+    # previous bot's authorized Telethon session.
+    await storage_client.disconnect()
+    _delete_session_files("vayom_bot")
+
+    temp_client: Optional[TelegramClient] = None
     try:
+        temp_client = TelegramClient(
+            str(settings.DATA_DIR / "vayom_bot"),
+            body.api_id,
+            body.api_hash.strip()
+        )
         await temp_client.start(bot_token=body.bot_token)
         verified_channel_id = await _validate_channel_for_bot(temp_client, body.channel_id)
         await temp_client.disconnect()
-    except Exception as e:
+    except HTTPException:
+        if temp_client is not None:
+            try:
+                await temp_client.disconnect()
+            except Exception:
+                pass
         try:
-            await temp_client.disconnect()
-        except Exception:
-            pass
+            await storage_client.reconnect()
+        except Exception as reconnect_err:
+            logger.warning(f"Could not restore the previous session after a failed developer login: {reconnect_err}")
+        raise
+    except Exception as e:
+        if temp_client is not None:
+            try:
+                await temp_client.disconnect()
+            except Exception:
+                pass
+        try:
+            await storage_client.reconnect()
+        except Exception as reconnect_err:
+            logger.warning(f"Could not restore the previous session after a failed developer login: {reconnect_err}")
         raise HTTPException(status_code=400, detail=f"Developer login failed: {e}")
 
     config_payload = {
@@ -582,12 +740,41 @@ async def login_with_developer(body: DeveloperLoginRequest):
     }
     settings.save_auth_config(config_payload)
     await storage_client.reconnect()
-    return {"success": True, "channel_id": body.channel_id}
+    return {"success": True, "channel_id": verified_channel_id}
 
 
 @router.post("/logout")
 async def logout():
-    """Logs out of the active node, disconnects MTProto, and clears stored auth config."""
+    """Logs out of the active node, revokes the Telegram session when possible,
+    and removes all local authorization material (R-04)."""
+    # Best-effort server-side invalidation: deleting the local SQLite session
+    # alone leaves the auth key usable on Telegram's side.
+    active_client = getattr(storage_client, "client", None)
+    if active_client is not None:
+        try:
+            if hasattr(active_client, "is_connected") and active_client.is_connected():
+                await active_client.log_out()
+        except Exception as exc:
+            logger.warning(f"Telegram server-side logout failed; continuing with local cleanup: {exc}")
+
+    # Stop any in-flight QR login so its client releases the session file.
+    for old_id, old_sess in list(_active_qr_sessions.items()):
+        try:
+            mon_task = old_sess.get("monitor_task")
+            if mon_task and not mon_task.done():
+                mon_task.cancel()
+            old_client = old_sess.get("client")
+            if old_client and old_client.is_connected():
+                await old_client.disconnect()
+        except Exception:
+            pass
+        _active_qr_sessions.pop(old_id, None)
+
     settings.clear_auth_config()
     await storage_client.disconnect()
-    return {"success": True}
+
+    removed = []
+    for name in ("vayom_user", "vayom_bot"):
+        removed.extend(_delete_session_files(name))
+
+    return {"success": True, "sessions_removed": removed}

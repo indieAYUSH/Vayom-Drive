@@ -10,7 +10,15 @@ from ..config import settings
 from ..db.connection import get_db
 from ..storage.client import storage_client, format_part_caption
 from ..compression.splitter import split_file_if_needed, calculate_sha256
-from .encoder import encode_stream_v1, is_ffmpeg_available, probe_stream_metadata, TranscodeError
+from .encoder import (
+    encode_stream_v2_480p,
+    encode_stream_v1,
+    is_ffmpeg_available,
+    probe_stream_metadata,
+    TranscodeError,
+    PROXY_PROFILE,
+    PROXY_MAX_HEIGHT,
+)
 
 logger = logging.getLogger("vayom.transcoding.manager")
 
@@ -29,9 +37,12 @@ class TranscodingManager:
     def __init__(self):
         self._encode_semaphore = asyncio.Semaphore(1)
         self._active_jobs: Set[str] = set()
+        self._download_jobs: Set[str] = set()
         self._queue: asyncio.Queue[Dict[str, Any]] = asyncio.Queue()
         self._worker_task: Optional[asyncio.Task] = None
         self._running: bool = False
+        self._worker_restarts: int = 0
+        self._max_worker_restarts: int = 5
 
     async def start(self):
         """Starts background proxy queue worker and runs startup recovery."""
@@ -39,8 +50,48 @@ class TranscodingManager:
             return
         self._running = True
         await self.recover_stale_tasks()
-        self._worker_task = asyncio.create_task(self._process_queue_loop())
+        self._worker_restarts = 0
+        self._spawn_worker()
         logger.info("TranscodingManager background worker started.")
+
+    def _spawn_worker(self):
+        """Creates the worker task and attaches the H-3 supervisor callback."""
+        self._worker_task = asyncio.create_task(self._process_queue_loop())
+        self._worker_task.add_done_callback(self._on_worker_done)
+
+    def _on_worker_done(self, task: asyncio.Task):
+        """
+        H-3: the proxy worker must never die silently. Previously any exception
+        raised while recording a failure (e.g. a transient DB error inside the
+        except block) terminated the loop, leaving every later proxy stuck in
+        'queued' forever with no log the user would ever see.
+        """
+        if not self._running or task.cancelled():
+            return
+        if self._worker_task is not task:
+            # A newer worker superseded this one (stop/start race).
+            return
+        try:
+            exc = task.exception()
+        except Exception:
+            exc = None
+        logger.error(f"Proxy worker exited unexpectedly ({exc!r}); restarting.")
+        if self._worker_restarts >= self._max_worker_restarts:
+            logger.error(
+                f"Proxy worker crashed {self._worker_restarts} times; giving up for this session. "
+                "Restart the app to re-enable proxy generation."
+            )
+            self._running = False
+            return
+        self._worker_restarts += 1
+        # Any job that was mid-flight died with the worker; release its reservation
+        # so a later enqueue for the same file is not silently ignored.
+        self._active_jobs.clear()
+        try:
+            self._spawn_worker()
+        except Exception as e:
+            logger.error(f"Could not restart proxy worker: {e}")
+            self._running = False
 
     async def stop(self):
         """Stops background proxy queue worker."""
@@ -57,13 +108,17 @@ class TranscodingManager:
     async def recover_stale_tasks(self):
         """
         Recovers from unexpected application termination.
-        Scans DB for original files stuck in 'encoding' or 'uploading' proxy_status
-        and marks them 'failed' so the UI does not hang forever.
+        Scans DB for original files stuck in 'queued', 'encoding' or 'uploading'
+        proxy_status and marks them 'failed' so the UI does not hang forever.
         """
         try:
             async with get_db() as db:
+                # H-2: 'queued' was omitted, so a crash between enqueue_proxy()
+                # and the worker picking the job up left the row spinning in the
+                # UI forever. At startup the in-memory queue is always empty, so
+                # every persisted 'queued' row is stale by definition.
                 cur = await db.execute(
-                    "SELECT id FROM files WHERE proxy_status IN ('encoding', 'uploading')"
+                    "SELECT id FROM files WHERE proxy_status IN ('queued', 'encoding', 'uploading')"
                 )
                 rows = await cur.fetchall()
                 if rows:
@@ -80,7 +135,7 @@ class TranscodingManager:
 
     async def enqueue_proxy(self, original_id: str, local_source_path: Path):
         """
-        Enqueues an original video file for stream_v1 proxy generation.
+        Enqueues an original video file for compact 480p proxy generation.
         Verifies local source path exists before queuing.
         """
         if not await is_ffmpeg_available():
@@ -103,40 +158,194 @@ class TranscodingManager:
         # I-41: reserve the id synchronously so concurrent enqueues can't double-queue it
         self._active_jobs.add(original_id)
 
+        try:
+            async with get_db() as db:
+                await db.execute("UPDATE files SET proxy_status = 'queued' WHERE id = ?", (original_id,))
+                await db.commit()
+
+            await self._queue.put({
+                "original_id": original_id,
+                "source_path": local_source_path
+            })
+        except BaseException:
+            # R-05: if the DB write or queue insertion fails, the reservation
+            # must be released or this file can never be retried until restart.
+            self._active_jobs.discard(original_id)
+            try:
+                async with get_db() as db:
+                    await db.execute(
+                        "UPDATE files SET proxy_status = 'failed' WHERE id = ? AND proxy_status = 'queued'",
+                        (original_id,),
+                    )
+                    await db.commit()
+            except Exception as status_err:
+                logger.warning(f"Could not mark proxy {original_id} as failed: {status_err}")
+            raise
+        logger.info(f"Enqueued proxy generation for {original_id}")
+
+    async def enqueue_remote_proxy(self, original_id: str, source_file_id: Optional[str] = None):
+        """
+        Downloads a remote video (or its existing large proxy) and queues a
+        480p re-encode. The original may have no local source after a fresh
+        sign-in, which is why proxy generation previously stayed a no-op.
+        """
+        if original_id in self._active_jobs or original_id in self._download_jobs:
+            return
+
+        self._download_jobs.add(original_id)
         async with get_db() as db:
             await db.execute("UPDATE files SET proxy_status = 'queued' WHERE id = ?", (original_id,))
             await db.commit()
 
-        await self._queue.put({
-            "original_id": original_id,
-            "source_path": local_source_path
-        })
-        logger.info(f"Enqueued proxy generation for {original_id}")
+        asyncio.create_task(self._download_then_enqueue(original_id, source_file_id))
+
+    async def _download_then_enqueue(self, original_id: str, source_file_id: Optional[str]):
+        temp_source: Optional[Path] = None
+        try:
+            async with get_db() as db:
+                # Re-encoding the existing 1080p proxy is much faster than
+                # downloading the original again, and visually lossless at 480p.
+                source_id = source_file_id
+                if not source_id:
+                    cur = await db.execute(
+                        """
+                        SELECT id FROM files
+                        WHERE proxy_of = ? AND kind = 'proxy' AND is_deleted = 0
+                          AND upload_status = 'completed' AND proxy_profile != ?
+                        ORDER BY created_at DESC LIMIT 1
+                        """,
+                        (original_id, PROXY_PROFILE),
+                    )
+                    row = await cur.fetchone()
+                    source_id = row[0] if row else original_id
+
+                cur_file = await db.execute(
+                    "SELECT id, size_bytes FROM files WHERE id = ? AND is_deleted = 0",
+                    (source_id,),
+                )
+                src_row = await cur_file.fetchone()
+                if not src_row:
+                    raise TranscodeError(f"Source file {source_id} not found in catalog.")
+
+                cur_parts = await db.execute(
+                    "SELECT * FROM file_parts WHERE file_id = ? ORDER BY part_index ASC",
+                    (source_id,),
+                )
+                parts = [dict(r) for r in await cur_parts.fetchall()]
+
+            if not parts:
+                raise TranscodeError(f"Source file {source_id} has no stored parts.")
+
+            expected_size = int(src_row["size_bytes"] or 0)
+            if expected_size <= 0:
+                expected_size = sum(int(p.get("part_size_bytes") or 0) for p in parts)
+
+            free = shutil.disk_usage(settings.DATA_DIR).free
+            # Leave room for the downloaded source, the 480p output and normal
+            # app data. This is deliberately stricter than the old 1 GB check.
+            if free < expected_size + 512 * 1024 * 1024:
+                raise TranscodeError(
+                    f"Not enough free disk space for a 480p proxy "
+                    f"(need about {(expected_size + 512 * 1024 * 1024) // (1024 * 1024)} MiB, have {free // (1024 * 1024)} MiB)."
+                )
+
+            temp_dir = settings.DATA_DIR / "proxies_tmp"
+            temp_dir.mkdir(parents=True, exist_ok=True)
+            temp_source = temp_dir / f"source_{original_id}.tmp"
+            try:
+                if temp_source.exists():
+                    temp_source.unlink()
+            except Exception:
+                pass
+
+            # Imported lazily: storage adapters -> workstation watcher imports
+            # this manager, so a module-level import would be circular in the
+            # frozen sidecar.
+            from ..storage.manager import stream_part_bytes_universal
+
+            written = 0
+            with open(temp_source, "wb") as out:
+                for part in parts:
+                    part_size = int(part.get("part_size_bytes") or 0)
+                    async for chunk in stream_part_bytes_universal(
+                        part, offset=0, limit=part_size, chunk_size=1024 * 1024
+                    ):
+                        out.write(chunk)
+                        written += len(chunk)
+                    if written % (64 * 1024 * 1024) < 1024 * 1024:
+                        logger.info(f"480p proxy source download {original_id}: {written // (1024 * 1024)} MiB")
+
+            if written <= 0:
+                raise TranscodeError(f"Downloaded source for {original_id} is empty.")
+            if expected_size and written != expected_size:
+                logger.warning(
+                    f"Proxy source size mismatch for {original_id}: expected {expected_size}, got {written}. "
+                    "Continuing; ffmpeg will validate the file."
+                )
+
+            logger.info(f"Downloaded {written} bytes for {original_id}; queueing 480p encode.")
+            await self.enqueue_proxy(original_id, temp_source)
+        except Exception as e:
+            logger.error(f"Could not prepare remote 480p proxy for {original_id}: {e}", exc_info=True)
+            try:
+                async with get_db() as db:
+                    await db.execute("UPDATE files SET proxy_status = 'failed' WHERE id = ?", (original_id,))
+                    await db.commit()
+            except Exception:
+                pass
+            if temp_source:
+                try:
+                    temp_source.unlink()
+                except Exception:
+                    pass
+        finally:
+            self._download_jobs.discard(original_id)
 
     async def _process_queue_loop(self):
-        """Worker loop processing proxy generation queue."""
+        """
+        Worker loop processing the proxy generation queue.
+
+        H-3: no exception may escape this loop. Previously a failure while
+        *recording* a failure (DB error inside the except block) killed the
+        worker silently, so every subsequent proxy sat in 'queued' forever.
+        """
         while self._running:
             try:
                 job = await self._queue.get()
             except asyncio.CancelledError:
                 break
+            except Exception as e:
+                logger.error(f"Proxy queue get() failed: {e}")
+                await asyncio.sleep(0.5)
+                continue
 
-            orig_id = job["original_id"]
-            source_path = job["source_path"]
-
+            orig_id = None
             try:
+                orig_id = job["original_id"]
+                source_path = job["source_path"]
                 self._active_jobs.add(orig_id)
                 await self._process_job(orig_id, source_path)
+                # A completed cycle proves the worker is healthy — reset the crash budget.
+                self._worker_restarts = 0
             except asyncio.CancelledError:
-                break
+                raise
             except Exception as e:
                 logger.error(f"Failed generating proxy for {orig_id}: {e}", exc_info=True)
-                async with get_db() as db:
-                    await db.execute("UPDATE files SET proxy_status = 'failed' WHERE id = ?", (orig_id,))
-                    await db.commit()
+                if orig_id:
+                    try:
+                        async with get_db() as db:
+                            await db.execute("UPDATE files SET proxy_status = 'failed' WHERE id = ?", (orig_id,))
+                            await db.commit()
+                    except Exception as db_err:
+                        # Never let a bookkeeping failure kill the queue.
+                        logger.error(f"Could not mark proxy {orig_id} as failed: {db_err}")
             finally:
-                self._active_jobs.discard(orig_id)
-                self._queue.task_done()
+                if orig_id:
+                    self._active_jobs.discard(orig_id)
+                try:
+                    self._queue.task_done()
+                except Exception:
+                    pass
 
     async def _process_job(self, orig_id: str, source_path: Path):
         """Executes encode and upload steps for a single file."""
@@ -167,9 +376,10 @@ class TranscodingManager:
                     FROM files f
                     JOIN files p ON p.proxy_of = f.id
                     WHERE f.sha256 = ? AND p.upload_status = 'completed' AND p.is_deleted = 0
+                      AND p.proxy_profile = ? AND (p.height IS NULL OR p.height <= ?)
                     LIMIT 1
                     """,
-                    (orig_sha,)
+                    (orig_sha, PROXY_PROFILE, PROXY_MAX_HEIGHT)
                 )
                 existing_proxy = await cur_dup.fetchone()
                 if existing_proxy:
@@ -182,11 +392,11 @@ class TranscodingManager:
                             id, filename, mime_type, file_category, size_bytes, sha256,
                             is_split, total_parts, upload_status, kind, proxy_of,
                             proxy_profile, proxy_status, width, height, duration_s
-                        ) VALUES (?, ?, 'video/mp4', 'video', ?, ?, ?, ?, 'completed', 'proxy', ?, 'stream_v1', 'ready', ?, ?, ?)
+                        ) VALUES (?, ?, 'video/mp4', 'video', ?, ?, ?, ?, 'completed', 'proxy', ?, ?, 'ready', ?, ?, ?)
                         """,
                         (
-                            new_proxy_id, f"{orig_id}.stream_v1.mp4", ex_size, ex_sha,
-                            1 if ex_parts > 1 else 0, ex_parts, orig_id,
+                            new_proxy_id, f"{orig_id}.{PROXY_PROFILE}.mp4", ex_size, ex_sha,
+                            1 if ex_parts > 1 else 0, ex_parts, orig_id, PROXY_PROFILE,
                             ex_w, ex_h, ex_dur
                         )
                     )
@@ -233,12 +443,13 @@ class TranscodingManager:
         proxy_id = f"v_prx_{uuid.uuid4().hex}"
         temp_dir = settings.DATA_DIR / "proxies_tmp" / proxy_id
         temp_dir.mkdir(parents=True, exist_ok=True)
-        proxy_file = temp_dir / "preview_stream_v1.mp4"
+        proxy_file = temp_dir / f"preview_{PROXY_PROFILE}.mp4"
 
         try:
             # 1. Encode with CPU/GPU bounded concurrency
             async with self._encode_semaphore:
-                proxy_meta = await encode_stream_v1(source_path, proxy_file)
+                encoder_fn = encode_stream_v1 if encode_stream_v1 is not encode_stream_v2_480p else encode_stream_v2_480p
+                proxy_meta = await encoder_fn(source_path, proxy_file)
 
             # Validate proxy duration within 1% (or 0.5s) of source duration
             src_dur = source_meta.get("duration_s", 0.0)
@@ -267,7 +478,7 @@ class TranscodingManager:
             )
             uploaded_parts = []
 
-            # 3. Upload parts with stream_v1 proxy captions
+            # 3. Upload parts with current 480p proxy captions
             for part in parts:
                 caption = format_part_caption(
                     file_id=proxy_id,
@@ -276,13 +487,13 @@ class TranscodingManager:
                     byte_offset=part["byte_offset"],
                     part_size=part["part_size_bytes"],
                     part_sha256=part["part_sha256"],
-                    filename=f"{orig_id}.stream_v1.mp4",
+                    filename=f"{orig_id}.{PROXY_PROFILE}.mp4",
                     category="video",
                     nonce=None,
                     encryption="none",
                     kind="proxy",
                     proxy_of=orig_id,
-                    proxy_profile="stream_v1"
+                    proxy_profile=PROXY_PROFILE
                 )
                 res = await storage_client.upload_part(part.get("slice") or part["file_path"], caption=caption)
                 if isinstance(res, dict):
@@ -310,11 +521,11 @@ class TranscodingManager:
                         id, filename, mime_type, file_category, size_bytes, sha256,
                         is_split, total_parts, upload_status, kind, proxy_of,
                         proxy_profile, proxy_status, width, height, duration_s
-                    ) VALUES (?, ?, 'video/mp4', 'video', ?, ?, ?, ?, 'completed', 'proxy', ?, 'stream_v1', 'ready', ?, ?, ?)
+                    ) VALUES (?, ?, 'video/mp4', 'video', ?, ?, ?, ?, 'completed', 'proxy', ?, ?, 'ready', ?, ?, ?)
                     """,
                     (
-                        proxy_id, f"{orig_id}.stream_v1.mp4", proxy_size, proxy_sha,
-                        1 if len(parts) > 1 else 0, len(parts), orig_id,
+                        proxy_id, f"{orig_id}.{PROXY_PROFILE}.mp4", proxy_size, proxy_sha,
+                        1 if len(parts) > 1 else 0, len(parts), orig_id, PROXY_PROFILE,
                         proxy_meta.get("width", 0), proxy_meta.get("height", 0),
                         proxy_meta.get("duration_s", 0.0)
                     )
@@ -342,7 +553,7 @@ class TranscodingManager:
                 await db.execute("UPDATE files SET proxy_status = 'ready' WHERE id = ?", (orig_id,))
                 await db.commit()
 
-            logger.info(f"Successfully generated and uploaded stream_v1 proxy {proxy_id} for {orig_id} ({proxy_size} bytes)")
+            logger.info(f"Successfully generated and uploaded {PROXY_PROFILE} proxy {proxy_id} for {orig_id} ({proxy_size} bytes)")
 
             # Trigger WAL master catalog sync
             from ..api.routes import sync_master_catalog

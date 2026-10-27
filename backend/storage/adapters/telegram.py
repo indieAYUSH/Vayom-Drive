@@ -59,10 +59,12 @@ class TelegramStorageAdapter(BaseStorageAdapter):
             channel_id = str(res.get("channel_id") or channel_id)
             tg_file_id = res.get("file_id")
             tg_access_hash = res.get("access_hash")
+            is_mock = bool(res.get("mock", False))
         else:
             msg_id = int(res)
             tg_file_id = None
             tg_access_hash = None
+            is_mock = False
 
         storage_uri = f"tg://{channel_id}/{msg_id}" if msg_id else ""
 
@@ -73,6 +75,7 @@ class TelegramStorageAdapter(BaseStorageAdapter):
             "telegram_channel_id": channel_id,
             "telegram_file_id": tg_file_id,
             "telegram_access_hash": tg_access_hash,
+            "mock": is_mock,
         }
 
     async def stream_bytes(
@@ -83,6 +86,11 @@ class TelegramStorageAdapter(BaseStorageAdapter):
         chunk_size: int = 512 * 1024,
         **kwargs
     ) -> AsyncIterator[bytes]:
+        if offset < 0:
+            raise ValueError(f"Offset cannot be negative: {offset}")
+        if limit is not None and limit <= 0:
+            return
+
         msg_id = kwargs.get("telegram_message_id") or kwargs.get("message_id")
         channel_id = kwargs.get("telegram_channel_id") or kwargs.get("channel_id")
         file_id = kwargs.get("telegram_file_id") or kwargs.get("file_id")

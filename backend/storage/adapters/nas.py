@@ -7,7 +7,7 @@ import time
 import uuid
 import mimetypes
 from pathlib import Path
-from typing import Optional, Dict, Any, AsyncIterator, List, Union
+from typing import Optional, Dict, Any, AsyncIterator, List, Union, ClassVar, Tuple
 
 from .base import BaseStorageAdapter
 from ...config import settings
@@ -39,6 +39,10 @@ class NASStorageAdapter(BaseStorageAdapter):
     - Safe deletion verifying DB reference count before physical unlinking
     """
     backend_name: str = "nas"
+    _active_upload_uris: ClassVar[Dict[str, Tuple[str, float]]] = {}
+    _uris_lock: ClassVar[asyncio.Lock] = asyncio.Lock()
+    _active_upload_keys = _active_upload_uris
+    _keys_lock = _uris_lock
 
     def __init__(self, nas_root: Optional[Union[str, Path]] = None):
         root_path = nas_root or getattr(settings, "NAS_VAULT_ROOT", None) or (settings.DATA_DIR / "nas_vault")
@@ -121,40 +125,76 @@ class NASStorageAdapter(BaseStorageAdapter):
                 "telegram_channel_id": "",
             }
 
-        # 3. Collision Guard
-        if await asyncio.to_thread(dest_path.exists):
-            stem = Path(safe_filename).stem
-            ext = Path(safe_filename).suffix
-            safe_filename = f"{stem}_{file_id[:8]}{ext}"
+        # 3. Collision Guard & In-Flight Reservation
+        now = time.time()
+        async with self._uris_lock:
+            # Prune stale in-flight uris older than 300 seconds
+            for k, (_, ts) in list(self._active_upload_uris.items()):
+                if now - ts > 300:
+                    self._active_upload_uris.pop(k, None)
+
+            def _is_busy(p: Path, uri: str) -> bool:
+                if uri in self._active_upload_uris:
+                    return True
+                return p.exists()
+
             candidate_rel = os.path.join(rel_dir, safe_filename).replace("\\", "/")
             dest_path = self._resolve_and_verify(candidate_rel)
+            storage_uri = os.path.relpath(str(dest_path), str(self.nas_root)).replace("\\", "/")
+
+            if await asyncio.to_thread(_is_busy, dest_path, storage_uri):
+                stem = Path(safe_filename).stem
+                ext = Path(safe_filename).suffix
+                safe_filename = f"{stem}_{file_id[:8]}{ext}"
+                candidate_rel = os.path.join(rel_dir, safe_filename).replace("\\", "/")
+                dest_path = self._resolve_and_verify(candidate_rel)
+                storage_uri = os.path.relpath(str(dest_path), str(self.nas_root)).replace("\\", "/")
+
+                counter = 1
+                while await asyncio.to_thread(_is_busy, dest_path, storage_uri):
+                    safe_filename = f"{stem}_{file_id[:8]}_{counter}{ext}"
+                    candidate_rel = os.path.join(rel_dir, safe_filename).replace("\\", "/")
+                    dest_path = self._resolve_and_verify(candidate_rel)
+                    storage_uri = os.path.relpath(str(dest_path), str(self.nas_root)).replace("\\", "/")
+                    counter += 1
+
+            self._active_upload_uris[storage_uri] = (file_id, time.time())
 
         # 4. Atomic Non-Blocking Write
-        def _write_file() -> int:
-            dest_path.parent.mkdir(parents=True, exist_ok=True)
-            tmp_path = dest_path.parent / f".tmp_{file_id[:8]}_{dest_path.name}"
-            with open(local_path, "rb") as src, open(tmp_path, "wb") as dst:
-                while True:
-                    chunk = src.read(512 * 1024)
-                    if not chunk:
-                        break
-                    dst.write(chunk)
-            os.replace(tmp_path, dest_path)
-            return dest_path.stat().st_size
+        try:
+            def _write_file() -> int:
+                dest_path.parent.mkdir(parents=True, exist_ok=True)
+                tmp_path = dest_path.parent / f".tmp_{file_id[:8]}_{uuid.uuid4().hex[:6]}_{dest_path.name}"
+                try:
+                    with open(local_path, "rb") as src, open(tmp_path, "wb") as dst:
+                        while True:
+                            chunk = src.read(512 * 1024)
+                            if not chunk:
+                                break
+                            dst.write(chunk)
+                    os.replace(tmp_path, dest_path)
+                    return dest_path.stat().st_size
+                finally:
+                    if tmp_path.exists():
+                        try:
+                            tmp_path.unlink()
+                        except OSError:
+                            pass
 
-        actual_size = await asyncio.to_thread(_write_file)
-        storage_uri = os.path.relpath(str(dest_path), str(self.nas_root)).replace("\\", "/")
-
-        return {
-            "storage_backend": self.backend_name,
-            "storage_uri": storage_uri,
-            "part_index": 0,
-            "total_parts": 1,
-            "byte_offset": 0,
-            "part_size_bytes": actual_size,
-            "telegram_message_id": 0,
-            "telegram_channel_id": "",
-        }
+            actual_size = await asyncio.to_thread(_write_file)
+            return {
+                "storage_backend": self.backend_name,
+                "storage_uri": storage_uri,
+                "part_index": 0,
+                "total_parts": 1,
+                "byte_offset": 0,
+                "part_size_bytes": actual_size,
+                "telegram_message_id": 0,
+                "telegram_channel_id": "",
+            }
+        finally:
+            async with self._uris_lock:
+                self._active_upload_uris.pop(storage_uri, None)
 
     async def stream_bytes(
         self,
@@ -166,35 +206,48 @@ class NASStorageAdapter(BaseStorageAdapter):
     ) -> AsyncIterator[bytes]:
         """
         Streams contiguous byte slices from the local/NAS filesystem
-        using non-blocking asyncio.to_thread chunks.
+        using non-blocking asyncio.to_thread chunks without per-chunk file reopening.
         """
+        if offset < 0:
+            raise ValueError(f"Offset cannot be negative: {offset}")
+        # Degenerate limits short-circuit before any filesystem access so all
+        # adapters share the same boundary behavior (limit<=0 -> no chunks).
+        if limit is not None and limit <= 0:
+            return
+
         target_path = self._resolve_and_verify(storage_uri)
 
         def _get_size():
-            return target_path.stat().st_size if target_path.exists() else 0
+            # A missing file must raise, not stream as an empty body: silent
+            # empty 200s present NAS-side data loss as 0-byte files (B6).
+            if not target_path.is_file():
+                raise FileNotFoundError(f"NAS object no longer exists: {storage_uri}")
+            return target_path.stat().st_size
 
         total_size = await asyncio.to_thread(_get_size)
         if total_size <= 0 or offset >= total_size:
             return
 
         bytes_to_read = total_size - offset if limit is None else min(limit, total_size - offset)
-        curr_offset = offset
         bytes_remaining = bytes_to_read
 
-        while bytes_remaining > 0:
-            read_len = min(chunk_size, bytes_remaining)
+        def _open_and_seek():
+            f = open(target_path, "rb")
+            if offset > 0:
+                f.seek(offset)
+            return f
 
-            def _read_chunk(off: int, count: int) -> bytes:
-                with open(target_path, "rb") as f:
-                    f.seek(off)
-                    return f.read(count)
-
-            data = await asyncio.to_thread(_read_chunk, curr_offset, read_len)
-            if not data:
-                break
-            yield data
-            curr_offset += len(data)
-            bytes_remaining -= len(data)
+        f = await asyncio.to_thread(_open_and_seek)
+        try:
+            while bytes_remaining > 0:
+                read_len = min(chunk_size, bytes_remaining)
+                data = await asyncio.to_thread(f.read, read_len)
+                if not data:
+                    break
+                yield data
+                bytes_remaining -= len(data)
+        finally:
+            await asyncio.to_thread(f.close)
 
     async def delete_parts(self, parts: List[Dict[str, Any]]) -> int:
         """
@@ -419,9 +472,16 @@ class NASStorageAdapter(BaseStorageAdapter):
                 vayom_dir.mkdir(parents=True, exist_ok=True)
                 snapshot_file = vayom_dir / "index.json"
                 tmp_file = vayom_dir / f"index.json.tmp.{uuid.uuid4().hex[:8]}"
-                with open(tmp_file, "w", encoding="utf-8") as f:
-                    json.dump(snapshot, f, indent=2)
-                os.replace(tmp_file, snapshot_file)
+                try:
+                    with open(tmp_file, "w", encoding="utf-8") as f:
+                        json.dump(snapshot, f, indent=2)
+                    os.replace(tmp_file, snapshot_file)
+                finally:
+                    if tmp_file.exists():
+                        try:
+                            tmp_file.unlink()
+                        except OSError:
+                            pass
 
             await asyncio.to_thread(_atomic_write)
 

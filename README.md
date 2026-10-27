@@ -158,7 +158,7 @@ EOF
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
-pip install -r requirements.txt
+pip install -r backend/requirements.txt
 
 # Run FastAPI engine
 uvicorn backend.main:app --host 127.0.0.1 --port 8000
@@ -173,6 +173,47 @@ npm run dev
 ```
 
 Open **`http://localhost:5173`** in your browser to start using Vayom Drive.
+
+#### Native Desktop Builds (Tauri)
+
+The desktop app spawns a packaged Python sidecar. Telegram **application**
+credentials (`TELEGRAM_API_ID` / `TELEGRAM_API_HASH`, the values from
+my.telegram.org — not your account password or session) must be available to
+that sidecar, otherwise the app starts in offline/mock mode and login is
+disabled.
+
+`scripts/build_sidecar.sh` reads those two values from `.env` (or the process
+environment) and embeds **only those keys** into the sidecar. The rest of
+`.env` (admin password, session secret, vault keys) is never bundled. Rebuild
+the sidecar after changing the credentials:
+
+```bash
+./scripts/build_sidecar.sh
+npm --prefix frontend run build
+cd src-tauri && cargo tauri build
+```
+
+For CI releases, configure `TELEGRAM_API_ID` and `TELEGRAM_API_HASH` as
+repository secrets; the release workflow refuses to build without them.
+
+At runtime the backend loads configuration in this order (first value wins;
+real process environment variables always take precedence over files):
+
+1. `VAYOM_ENV_FILE` (explicit path; also the opt-in for portable installs)
+2. `.env` next to the executable / repo root
+3. macOS `Contents/Resources/.env` and the per-user config directory
+   (`~/.config/vayom-drive/` on Linux,
+   `~/Library/Application Support/Vayom Drive/` on macOS,
+   `%APPDATA%\Vayom Drive\` on Windows)
+4. the embedded `telegram_app.env` (only `TELEGRAM_API_ID`/`TELEGRAM_API_HASH`)
+
+The launch directory is intentionally **not** searched in packaged builds, so a
+stray `.env` cannot override the embedded credentials or server settings.
+
+A relative `DATA_DIR` (e.g. `./data`) is resolved against the project root in
+dev. In packaged builds it is ignored in favour of the per-user data directory,
+unless an existing legacy database is found in the relative location (that
+existing data directory is then reused so a portable install keeps its vault).
 
 ---
 

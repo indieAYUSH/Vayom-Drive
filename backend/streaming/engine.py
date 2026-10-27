@@ -164,17 +164,19 @@ class LRUChunkCache:
     """
     def __init__(self, max_chunks: int = MAX_CACHE_CHUNKS):
         self.max_chunks = max_chunks
-        self._cache: OrderedDict[Tuple[Any, int], bytes] = OrderedDict()
-        self._in_flight: Dict[Tuple[Any, int], asyncio.Future[bytes]] = {}
+        self._cache: OrderedDict[Tuple[Any, ...], bytes] = OrderedDict()
+        self._in_flight: Dict[Tuple[Any, ...], asyncio.Future[bytes]] = {}
+        self._in_flight_tasks: Dict[Tuple[Any, ...], asyncio.Task] = {}
+        self._waiters: Dict[Tuple[Any, ...], int] = {}
         self._lock = asyncio.Lock()
 
-    def contains(self, key: Tuple[Any, int]) -> bool:
+    def contains(self, key: Tuple[Any, ...]) -> bool:
         """Returns True if the chunk is cached or actively in-flight."""
         return key in self._cache or key in self._in_flight
 
     async def get_or_fetch(
         self,
-        key: Tuple[Any, int],
+        key: Tuple[Any, ...],
         fetcher_coro_fn
     ) -> bytes:
         """
@@ -193,14 +195,39 @@ class LRUChunkCache:
             else:
                 loop = asyncio.get_running_loop()
                 fut = loop.create_future()
+                # Attach done callback to drain exceptions and suppress
+                # "Future exception was never retrieved" warnings on cancelled stream waiters
+                fut.add_done_callback(lambda f: f.exception() if not f.cancelled() else None)
                 self._in_flight[key] = fut
                 # We are the designated fetcher
-                asyncio.create_task(self._execute_fetch(key, fetcher_coro_fn, fut))
-        # C-10: Shield the shared future so one client disconnecting/seeking does not cancel
-        # the chunk future for other concurrent stream waiters.
-        return await asyncio.shield(fut)
+                self._in_flight_tasks[key] = asyncio.create_task(
+                    self._execute_fetch(key, fetcher_coro_fn, fut)
+                )
+            self._waiters[key] = self._waiters.get(key, 0) + 1
+        try:
+            # C-10: Shield the shared future so one client disconnecting/seeking does not cancel
+            # the chunk future for other concurrent stream waiters.
+            return await asyncio.shield(fut)
+        finally:
+            async with self._lock:
+                remaining = self._waiters.get(key, 0) - 1
+                if remaining <= 0:
+                    self._waiters.pop(key, None)
+                else:
+                    self._waiters[key] = remaining
 
-    async def _execute_fetch(self, key: Tuple[Any, int], fetcher_coro_fn, fut: asyncio.Future[bytes]):
+    async def cancel_fetch_if_unwatched(self, key: Tuple[Any, ...]) -> bool:
+        """B8: stop an in-flight upstream fetch that no waiter remains attached
+        to (e.g. a seek cancelled its prefetch). Fetches with live waiters are
+        left running."""
+        async with self._lock:
+            task = self._in_flight_tasks.get(key)
+            if task is not None and not task.done() and self._waiters.get(key, 0) <= 0:
+                task.cancel()
+                return True
+        return False
+
+    async def _execute_fetch(self, key: Tuple[Any, ...], fetcher_coro_fn, fut: asyncio.Future[bytes]):
         try:
             chunk_data = await fetcher_coro_fn()
             async with self._lock:
@@ -222,6 +249,8 @@ class LRUChunkCache:
             # C-6: always deregister the in-flight key, on every exit path
             async with self._lock:
                 self._in_flight.pop(key, None)
+                self._in_flight_tasks.pop(key, None)
+                self._waiters.pop(key, None)
 
     async def clear(self):
         async with self._lock:
@@ -230,7 +259,14 @@ class LRUChunkCache:
             for fut in self._in_flight.values():
                 if not fut.done():
                     fut.cancel()
+            # B8: also cancel the fetch tasks, or they keep downloading and
+            # re-populate the cache after clear()
+            for task in self._in_flight_tasks.values():
+                if not task.done():
+                    task.cancel()
             self._in_flight.clear()
+            self._in_flight_tasks.clear()
+            self._waiters.clear()
 
     def size(self) -> int:
         return len(self._cache)
@@ -335,11 +371,15 @@ class MP4MoovResolver:
         cls,
         parts: List[dict],
         total_size: int,
-        storage_client
+        storage_client,
+        encryption: str = "none",
+        nonce: Optional[str] = None,
+        key: Optional[bytes] = None
     ) -> Dict[str, Any]:
         """
         Scans initial bytes for 'moov' atom. If absent, probes the tail of the file
         (up to 2 MB from EOF) to locate and parse the trailing 'moov' atom.
+        Probes are decrypted with their absolute file offsets before parsing (B9).
         """
         # C-7: files with no recorded parts must not crash on parts[0]
         if not parts or total_size < 16:
@@ -361,10 +401,19 @@ class MP4MoovResolver:
             head_bytes.extend(chunk)
 
         head_bytes = bytes(head_bytes)
+        # B9: parse plaintext — the head probe starts at absolute offset 0
+        if encryption == "ctr" and nonce and key and aes_ctr_decrypt:
+            head_bytes = aes_ctr_decrypt(head_bytes, key, nonce, aligned_byte_offset=0)
         atoms = cls.parse_atoms(head_bytes)
 
         has_ftyp = any(a.atom_type == "ftyp" for a in atoms)
-        moov_atom = next((a for a in atoms if a.atom_type == "moov"), None)
+        moov_atom = next(
+            (a for a in atoms
+             if a.atom_type == "moov"
+             and a.size >= 8
+             and a.offset + a.size <= total_size),
+            None,
+        )
 
         if moov_atom:
             return {
@@ -403,25 +452,39 @@ class MP4MoovResolver:
                 tail_bytes.extend(chunk)
 
         tail_bytes = bytes(tail_bytes)
+        # B9: tail probe lives at absolute offset tail_start
+        if encryption == "ctr" and nonce and key and aes_ctr_decrypt:
+            tail_bytes = aes_ctr_decrypt(tail_bytes, key, nonce, aligned_byte_offset=tail_start)
 
-        # Search for b'moov' signature in tail bytes
-        moov_idx = tail_bytes.find(b"moov")
-        if moov_idx >= 4:
-            # 4 bytes before 'moov' is the 32-bit size
+        # Search for b'moov' atom backwards from tail to avoid false positives in mdat payloads
+        search_end = len(tail_bytes)
+        while search_end >= 8:
+            moov_idx = tail_bytes.rfind(b"moov", 4, search_end)
+            if moov_idx < 4:
+                break
+
             box_offset_in_tail = moov_idx - 4
             global_moov_offset = tail_start + box_offset_in_tail
             moov_box = cls.parse_box_header(tail_bytes, box_offset_in_tail)
-            moov_size = moov_box.size if moov_box else (total_size - global_moov_offset)
 
-            return {
-                "is_mp4": True,
-                "has_moov": True,
-                "faststart": False,
-                "trailing_moov": True,
-                "moov_offset": global_moov_offset,
-                "moov_size": moov_size,
-                "tail_probe_bytes": len(tail_bytes)
-            }
+            if (
+                moov_box is not None
+                and moov_box.atom_type == "moov"
+                and moov_box.size >= 8
+                and global_moov_offset + moov_box.size <= total_size
+            ):
+                moov_size = moov_box.size
+                return {
+                    "is_mp4": True,
+                    "has_moov": True,
+                    "faststart": False,
+                    "trailing_moov": True,
+                    "moov_offset": global_moov_offset,
+                    "moov_size": moov_size,
+                    "tail_probe_bytes": len(tail_bytes)
+                }
+
+            search_end = moov_idx
 
         return {
             "is_mp4": has_ftyp,
@@ -445,6 +508,9 @@ class StreamingEngine:
         self.chunk_size = chunk_size
         self.cache = LRUChunkCache(max_chunks=cache_size)
         self.moov_resolver = MP4MoovResolver()
+        self.max_prefetch_tasks: int = 4
+        self._active_prefetch_tasks: set[asyncio.Task] = set()
+        self._active_prefetch_by_file: dict[str, set[asyncio.Task]] = {}
 
     async def stream_range(
         self,
@@ -466,6 +532,21 @@ class StreamingEngine:
         target_start = range_spec.start
         target_end = range_spec.end
         bytes_yielded = 0
+
+        # File-level namespace identifier for cache key and prefetch tracking
+        file_key = ""
+        if parts:
+            file_key = str(parts[0].get("file_id") or parts[0].get("storage_uri") or "")
+
+        # Seek detection: cancel prior in-flight prefetch tasks for this file to avoid floodwait
+        if file_key and file_key in self._active_prefetch_by_file:
+            for stale_t in list(self._active_prefetch_by_file[file_key]):
+                if not stale_t.done():
+                    stale_t.cancel()
+                self._active_prefetch_tasks.discard(stale_t)
+            self._active_prefetch_by_file[file_key].clear()
+
+        stream_prefetch_tasks: set[asyncio.Task] = set()
 
         try:
             sorted_parts = sorted(parts, key=lambda p: p.get("byte_offset", 0))
@@ -493,9 +574,10 @@ class StreamingEngine:
                     offset_within_chunk = curr_offset - chunk_aligned_offset
                     chunk_limit = min(self.chunk_size, part["part_size_bytes"] - chunk_aligned_offset)
 
-                    msg_id = part["telegram_message_id"]
-                    part_key = part.get("id") or str(msg_id)
-                    cache_key = (part_key, chunk_aligned_offset)
+                    part_file_id = str(part.get("file_id") or part.get("storage_uri") or file_key)
+                    msg_id = part.get("telegram_message_id")
+                    part_key = part.get("id") or (str(msg_id) if msg_id else None) or str(part.get("part_index", part_idx))
+                    cache_key = (part_file_id, part_key, chunk_aligned_offset)
 
                     # Fetch chunk via LRU cache (with single-flight coalescing)
                     async def _fetch_upstream() -> bytes:
@@ -529,28 +611,71 @@ class StreamingEngine:
                             return bytes(p_buf)
                         return _prefetch_coro
 
+                    async def _run_prefetch(ahead_k, fetcher_fn):
+                        try:
+                            await self.cache.get_or_fetch(ahead_k, fetcher_fn)
+                        except asyncio.CancelledError:
+                            # B8: our await was cancelled (seek/disconnect); if no
+                            # other waiter watches this fetch, stop the upstream
+                            # transfer instead of letting it run to completion.
+                            try:
+                                await self.cache.cancel_fetch_if_unwatched(ahead_k)
+                            except Exception:
+                                pass
+                        except Exception as exc:
+                            logger.debug("Prefetch task error for %s: %s", ahead_k, exc)
+
+                    # Prune finished tasks
+                    self._active_prefetch_tasks = {t for t in self._active_prefetch_tasks if not t.done()}
+                    if file_key:
+                        self._active_prefetch_by_file[file_key] = {
+                            t for t in self._active_prefetch_by_file.get(file_key, set()) if not t.done()
+                        }
+
                     for lookahead_step in (1, 2, 3, 4):
+                        if len(self._active_prefetch_tasks) >= self.max_prefetch_tasks:
+                            break
+
                         ahead_offset = chunk_aligned_offset + lookahead_step * self.chunk_size
                         if ahead_offset < part["part_size_bytes"]:
-                            ahead_cache_key = (part_key, ahead_offset)
+                            ahead_cache_key = (part_file_id, part_key, ahead_offset)
                             if not self.cache.contains(ahead_cache_key):
                                 ahead_limit = min(self.chunk_size, part["part_size_bytes"] - ahead_offset)
-                                asyncio.create_task(self.cache.get_or_fetch(
-                                    ahead_cache_key,
-                                    _make_prefetch(part, ahead_offset, ahead_limit)
-                                ))
+                                p_task = asyncio.create_task(
+                                    _run_prefetch(ahead_cache_key, _make_prefetch(part, ahead_offset, ahead_limit))
+                                )
+                                self._active_prefetch_tasks.add(p_task)
+                                stream_prefetch_tasks.add(p_task)
+                                if file_key:
+                                    self._active_prefetch_by_file.setdefault(file_key, set()).add(p_task)
+                                p_task.add_done_callback(self._active_prefetch_tasks.discard)
+                                p_task.add_done_callback(stream_prefetch_tasks.discard)
+                                if file_key:
+                                    p_task.add_done_callback(
+                                        lambda t, fk=file_key: self._active_prefetch_by_file.get(fk, set()).discard(t)
+                                    )
                         elif part_idx + 1 < len(sorted_parts):
                             # Cross-part lookahead: prefetch the start of the next slice
                             next_p = sorted_parts[part_idx + 1]
-                            next_msg_id = next_p.get("telegram_message_id", 0)
-                            next_part_key = next_p.get("id") or str(next_msg_id) or str(part_idx + 1)
-                            next_cache_key = (next_part_key, 0)
+                            next_file_id = str(next_p.get("file_id") or next_p.get("storage_uri") or file_key)
+                            next_msg_id = next_p.get("telegram_message_id")
+                            next_part_key = next_p.get("id") or (str(next_msg_id) if next_msg_id else None) or str(next_p.get("part_index", part_idx + 1))
+                            next_cache_key = (next_file_id, next_part_key, 0)
                             if not self.cache.contains(next_cache_key):
                                 next_lim = min(self.chunk_size, next_p["part_size_bytes"])
-                                asyncio.create_task(self.cache.get_or_fetch(
-                                    next_cache_key,
-                                    _make_prefetch(next_p, 0, next_lim)
-                                ))
+                                p_task = asyncio.create_task(
+                                    _run_prefetch(next_cache_key, _make_prefetch(next_p, 0, next_lim))
+                                )
+                                self._active_prefetch_tasks.add(p_task)
+                                stream_prefetch_tasks.add(p_task)
+                                if file_key:
+                                    self._active_prefetch_by_file.setdefault(file_key, set()).add(p_task)
+                                p_task.add_done_callback(self._active_prefetch_tasks.discard)
+                                p_task.add_done_callback(stream_prefetch_tasks.discard)
+                                if file_key:
+                                    p_task.add_done_callback(
+                                        lambda t, fk=file_key: self._active_prefetch_by_file.get(fk, set()).discard(t)
+                                    )
 
                     # Invariant 1: Decrypt chunk if encrypted with AES-256-CTR (C-8: absolute file offset)
                     if encryption == "ctr" and nonce and key and aes_ctr_decrypt:
@@ -584,6 +709,20 @@ class StreamingEngine:
         except asyncio.CancelledError:
             logger.info("Client disconnected during video stream. Terminating upstream pull cleanly.")
             raise
+        finally:
+            # Clean up all prefetch tasks spawned by this stream on completion, disconnect, or error
+            for t in list(stream_prefetch_tasks):
+                if not t.done():
+                    t.cancel()
+                self._active_prefetch_tasks.discard(t)
+                if file_key and file_key in self._active_prefetch_by_file:
+                    self._active_prefetch_by_file[file_key].discard(t)
+            stream_prefetch_tasks.clear()
+            self._active_prefetch_tasks = {t for t in self._active_prefetch_tasks if not t.done()}
+            if file_key and file_key in self._active_prefetch_by_file:
+                self._active_prefetch_by_file[file_key] = {
+                    t for t in self._active_prefetch_by_file[file_key] if not t.done()
+                }
 
 
 # Global singleton streaming engine instance

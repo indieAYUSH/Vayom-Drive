@@ -1,10 +1,22 @@
 import aiosqlite
 import asyncio
+import os
 from pathlib import Path
 from contextlib import asynccontextmanager
 from ..config import settings
 
 SCHEMA_PATH = Path(__file__).resolve().parent / "schema.sql"
+
+
+def _harden_db_permissions():
+    """Best-effort owner-only permissions for the SQLite DB and its WAL files."""
+    for suffix in ("", "-wal", "-shm"):
+        candidate = Path(str(settings.DB_PATH) + suffix)
+        if candidate.exists():
+            try:
+                os.chmod(candidate, 0o600)
+            except OSError:
+                pass
 
 @asynccontextmanager
 async def get_db():
@@ -16,6 +28,7 @@ async def get_db():
         await conn.execute("PRAGMA synchronous=NORMAL;")
         await conn.execute("PRAGMA foreign_keys=ON;")
         await conn.execute("PRAGMA busy_timeout=5000;")
+        _harden_db_permissions()
         yield conn
     finally:
         await conn.close()

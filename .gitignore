@@ -63,6 +63,7 @@ Thumbs.db
 .vscode/
 *.swp
 *.swo
+.agents/
 
 # Premium subscription model & licensing
 backend/license/
@@ -78,7 +79,6 @@ ts-backend/
 backend-ts/
 src-tauri/target/
 src-tauri/binaries/
-scripts/build_sidecar.sh
 dist_sidecar/
 build_sidecar/
 

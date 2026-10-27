@@ -52,6 +52,11 @@ async def stream_part_bytes_universal(
     Universal part byte streamer: inspects part metadata (storage_backend, storage_uri)
     and dispatches to the appropriate storage adapter transparently.
     """
+    if offset < 0:
+        raise ValueError(f"Offset cannot be negative: {offset}")
+    if limit is not None and limit <= 0:
+        return
+
     backend = part.get("storage_backend") or "telegram"
     adapter = get_storage_adapter(backend)
     storage_uri = part.get("storage_uri") or ""

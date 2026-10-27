@@ -81,7 +81,7 @@ def generate_webp_thumbnail(
 
 
 async def generate_video_thumbnail(
-    video_path: Path,
+    video_path: Any,
     output_path: Path,
     size: Tuple[int, int] = (480, 480),
     quality: int = 85
@@ -92,6 +92,9 @@ async def generate_video_thumbnail(
     """
     try:
         output_path.parent.mkdir(parents=True, exist_ok=True)
+        is_url = str(video_path).startswith("http://") or str(video_path).startswith("https://")
+        timeout = 60.0 if is_url else 20.0
+
         # Try at 1.0s first
         cmd = [
             "ffmpeg", "-y",
@@ -108,7 +111,7 @@ async def generate_video_thumbnail(
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE
         )
-        await _communicate_with_timeout(proc, 20.0)
+        await _communicate_with_timeout(proc, timeout)
         if proc.returncode == 0 and output_path.exists() and output_path.stat().st_size > 0:
             return True
 
@@ -128,7 +131,7 @@ async def generate_video_thumbnail(
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE
         )
-        await _communicate_with_timeout(proc, 20.0)
+        await _communicate_with_timeout(proc, timeout)
         return proc.returncode == 0 and output_path.exists() and output_path.stat().st_size > 0
     except Exception as e:
         logger.warning(f"Thumbnail generation failed for {video_path}: {e}")
@@ -143,9 +146,21 @@ async def apply_mp4_faststart(input_path: Path, output_path: Path) -> bool:
     Does NOT re-encode video or audio streams (-c copy).
     """
     try:
+        # Map every playable stream explicitly. ffmpeg's default stream
+        # selection keeps only one audio track and silently drops alternate
+        # audio/subtitle tracks, which truncated multi-language videos and
+        # broke the part-size/size_bytes invariant. The optional `?` keeps
+        # audio-only or subtitle-less files working; if an unsupported
+        # subtitle codec makes the MP4 remux fail, callers fall back to the
+        # original file rather than losing streams.
         cmd = [
             "ffmpeg", "-y",
             "-i", str(input_path),
+            "-map", "0:v?",
+            "-map", "0:a?",
+            "-map", "0:s?",
+            "-map_metadata", "0",
+            "-map_chapters", "0",
             "-c", "copy",
             "-movflags", "+faststart",
             str(output_path)
@@ -278,13 +293,16 @@ def extract_image_exif(image_path: Path) -> Dict[str, Any]:
     return metadata
 
 
-async def extract_video_metadata(video_path: Path) -> Dict[str, Any]:
+async def extract_video_metadata(video_path: Any) -> Dict[str, Any]:
     """
     Extracts video codec (HEVC, H.264, ProRes, AV1), resolution tier,
     frame rate, duration, and device model using native ffprobe.
     """
     metadata: Dict[str, Any] = {}
     try:
+        is_url = str(video_path).startswith("http://") or str(video_path).startswith("https://")
+        timeout = 45.0 if is_url else 10.0
+
         cmd = [
             "ffprobe",
             "-v", "quiet",
@@ -302,7 +320,7 @@ async def extract_video_metadata(video_path: Path) -> Dict[str, Any]:
             stderr=asyncio.subprocess.PIPE
         )
         try:
-            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=10.0)
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
         except asyncio.TimeoutError:
             # I-10: communicate() cancellation alone does not reap the child;
             # kill + await so a hung ffprobe cannot leak as a zombie process.

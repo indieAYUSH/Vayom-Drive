@@ -53,6 +53,21 @@ interface AuthState {
 let pollInterval: any = null
 let currentQrRequestId = 0
 let qrAbortController: AbortController | null = null
+let qrPollFailures = 0
+
+// A dead backend must not leave the login screen waiting forever.
+const QR_START_TIMEOUT_MS = 60_000
+const QR_POLL_FAILURE_LIMIT = 12 // 12 x 2.5s = 30s of consecutive failures
+
+// C-3: the packaged desktop app creates the webview before the PyInstaller
+// sidecar has finished extracting and binding 127.0.0.1:8000, so the very
+// first /auth/status request can fail with a connection error. Probe with a
+// bounded retry so a slow cold start shows the "Verifying node gateway..."
+// splash instead of a misleading "Connection Failed" login screen.
+const AUTH_PROBE_MAX_ATTEMPTS = 24
+const AUTH_PROBE_DELAY_MS = 500
+
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
 
 export function stopQrPolling() {
   if (qrAbortController) {
@@ -84,22 +99,38 @@ export const useAuthStore = create<AuthState>((set, get) => ({
   sessionExpired: false,
 
   checkAuth: async () => {
-    try {
-      const res = await fetch(`${API_BASE}/auth/status`)
-      if (!res.ok) throw new Error('Failed to verify authentication status')
-      const data = await res.json()
-      set({
-        isAuthenticated: data.is_authenticated,
-        authMode: data.auth_mode || '',
-        user: data.user,
-        channelId: data.channel_id,
-        isInitializing: false,
-      })
-      return data.is_authenticated
-    } catch (err: any) {
-      set({ isAuthenticated: false, isInitializing: false, error: null })
-      return false
+    for (let attempt = 1; attempt <= AUTH_PROBE_MAX_ATTEMPTS; attempt++) {
+      try {
+        const res = await fetch(`${API_BASE}/auth/status`)
+
+        // The backend answered, so it is up. A non-OK status is a real answer
+        // (e.g. a foreign service on port 8000) and must not be retried.
+        if (!res.ok) {
+          set({ isAuthenticated: false, isInitializing: false, error: null })
+          return false
+        }
+
+        const data = await res.json()
+        set({
+          isAuthenticated: data.is_authenticated,
+          authMode: data.auth_mode || '',
+          user: data.user,
+          channelId: data.channel_id,
+          isInitializing: false,
+        })
+        return data.is_authenticated
+      } catch (err: any) {
+        // Network-level failure: the backend is not listening yet (or died).
+        // Keep waiting while the splash stays up, then give up cleanly.
+        if (attempt >= AUTH_PROBE_MAX_ATTEMPTS) {
+          set({ isAuthenticated: false, isInitializing: false, error: null })
+          return false
+        }
+        await sleep(AUTH_PROBE_DELAY_MS)
+      }
     }
+    set({ isAuthenticated: false, isInitializing: false, error: null })
+    return false
   },
 
   startQrSession: async () => {
@@ -107,16 +138,42 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     stopQrPolling()
 
     const requestId = ++currentQrRequestId
-    qrAbortController = new AbortController()
+    const controller = new AbortController()
+    qrAbortController = controller
+    qrPollFailures = 0
 
-    set({ qrStatus: 'waiting', error: null, scannedUser: null, availableChannels: [] })
+    // Clear the previous session's identifiers/expiry: keeping them while the
+    // new start is in flight made LoginView render a false "Session Expired".
+    set({
+      qrStatus: 'waiting',
+      error: null,
+      scannedUser: null,
+      availableChannels: [],
+      qrSessionId: null,
+      qrUrl: null,
+      qrExpiresAt: null,
+    })
+    const timeoutId = setTimeout(() => controller.abort(), QR_START_TIMEOUT_MS)
     try {
       const res = await fetch(`${API_BASE}/auth/qr/start`, {
         method: 'POST',
-        signal: qrAbortController.signal,
+        signal: controller.signal,
       })
       if (requestId !== currentQrRequestId) return
-      if (!res.ok) throw new Error('Could not initialize Telegram QR session')
+      if (!res.ok) {
+        // Surface actionable backend errors (missing app credentials, Telegram
+        // unreachable, etc.) instead of a single generic message.
+        let message = 'Could not initialize Telegram QR session'
+        try {
+          const body = await res.json()
+          if (typeof body?.detail === 'string' && body.detail.trim()) {
+            message = body.detail
+          }
+        } catch {
+          // Non-JSON error body: keep the generic fallback.
+        }
+        throw new Error(message)
+      }
       const data = await res.json()
 
       if (requestId !== currentQrRequestId) return
@@ -137,10 +194,18 @@ export const useAuthStore = create<AuthState>((set, get) => ({
         get().pollQrSession()
       }, 2500)
     } catch (err: any) {
-      if (err.name === 'AbortError') return
+      // A newer start (or a manual cancel) superseded this request.
       if (requestId !== currentQrRequestId) return
+      if (err.name === 'AbortError') {
+        set({
+          qrStatus: 'failed',
+          error: 'Starting the QR session timed out. Check that the local backend is running and try again.',
+        })
+        return
+      }
       set({ qrStatus: 'failed', error: err.message || 'Failed to start QR login' })
     } finally {
+      clearTimeout(timeoutId)
       if (requestId === currentQrRequestId) {
         qrAbortController = null
       }
@@ -148,23 +213,38 @@ export const useAuthStore = create<AuthState>((set, get) => ({
   },
 
   pollQrSession: async () => {
-    const { qrSessionId, qrStatus } = get()
-    if (!qrSessionId || qrStatus === 'confirmed' || qrStatus === 'expired' || qrStatus === 'failed') {
+    const sessionId = get().qrSessionId
+    const qrStatus = get().qrStatus
+    if (!sessionId || qrStatus === 'confirmed' || qrStatus === 'expired' || qrStatus === 'failed') {
       stopQrPolling()
       return
     }
 
     try {
-      const res = await fetch(`${API_BASE}/auth/qr/poll?session_id=${qrSessionId}`)
+      const res = await fetch(`${API_BASE}/auth/qr/poll?session_id=${sessionId}`)
+      // A newer session replaced this one while the request was in flight.
+      if (get().qrSessionId !== sessionId) return
+
       if (!res.ok) {
         if (res.status === 404) {
           set({ qrStatus: 'expired' })
           stopQrPolling()
+        } else {
+          qrPollFailures += 1
+          if (qrPollFailures >= QR_POLL_FAILURE_LIMIT) {
+            stopQrPolling()
+            set({
+              qrStatus: 'failed',
+              error: 'Lost connection to the local backend while waiting for Telegram. Try again.',
+            })
+          }
         }
         return
       }
 
       const data = await res.json()
+      if (get().qrSessionId !== sessionId) return
+      qrPollFailures = 0
       if (data.status === 'confirmed') {
         stopQrPolling()
         set({
@@ -193,7 +273,16 @@ export const useAuthStore = create<AuthState>((set, get) => ({
         }
       }
     } catch (err) {
-      // transient network error, keep polling
+      if (get().qrSessionId !== sessionId) return
+      qrPollFailures += 1
+      // Transient hiccups are fine; a permanently dead backend is not.
+      if (qrPollFailures >= QR_POLL_FAILURE_LIMIT && get().qrStatus === 'waiting') {
+        stopQrPolling()
+        set({
+          qrStatus: 'failed',
+          error: 'Lost connection to the local backend while waiting for Telegram. Try again.',
+        })
+      }
     }
   },
 

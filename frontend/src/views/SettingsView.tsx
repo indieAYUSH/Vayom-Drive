@@ -186,8 +186,10 @@ export const SettingsView: React.FC = () => {
     setS3StatusMsg('Testing S3 connection...')
     try {
       const res = await api.getS3Health()
-      if (res.healthy) {
-        setS3StatusMsg(`✓ S3 Bucket Connected! (Latency: ${res.latency_ms}ms)`)
+      // Backend health_check returns {status, status_code, error} — never
+      // healthy/latency_ms (B12); branching on those made success unreachable.
+      if (res.status === 'online') {
+        setS3StatusMsg(`✓ S3 Bucket Connected! (HTTP ${res.status_code ?? 200})`)
       } else {
         setS3StatusMsg(`✗ ${translateErrorMessage(res.error || 'Connection failed')}`)
       }
@@ -214,8 +216,8 @@ export const SettingsView: React.FC = () => {
         region_name: s3Region.trim(),
         vault_prefix: s3Prefix.trim()
       })
-      if (res.health?.healthy) {
-        setS3StatusMsg(`✓ S3 Connected Successfully! Latency: ${res.health.latency_ms}ms`)
+      if (res.health?.status === 'online') {
+        setS3StatusMsg(`✓ S3 Connected Successfully! (HTTP ${res.health?.status_code ?? 200})`)
       } else {
         setS3StatusMsg(`Saved, but S3 test returned: ${translateErrorMessage(res.health?.error || 'Unhealthy')}`)
       }
@@ -233,8 +235,8 @@ export const SettingsView: React.FC = () => {
     setNcStatusMsg('Testing Nextcloud WebDAV connection...')
     try {
       const res = await api.getNextcloudHealth()
-      if (res.healthy) {
-        setNcStatusMsg(`✓ Nextcloud WebDAV Connected! (Latency: ${res.latency_ms}ms)`)
+      if (res.status === 'online') {
+        setNcStatusMsg(`✓ Nextcloud WebDAV Connected! (HTTP ${res.status_code ?? 200})`)
       } else {
         setNcStatusMsg(`✗ ${translateErrorMessage(res.error || 'Check URL / credentials')}`)
       }
@@ -259,8 +261,8 @@ export const SettingsView: React.FC = () => {
         app_password: ncPassword.trim() || undefined,
         vault_prefix: ncPrefix.trim()
       })
-      if (res.health?.healthy) {
-        setNcStatusMsg(`✓ Nextcloud Connected Successfully! Latency: ${res.health.latency_ms}ms`)
+      if (res.health?.status === 'online') {
+        setNcStatusMsg(`✓ Nextcloud Connected Successfully! (HTTP ${res.health?.status_code ?? 200})`)
       } else {
         setNcStatusMsg(`Saved, but Nextcloud test returned: ${translateErrorMessage(res.health?.error || 'Unhealthy')}`)
       }

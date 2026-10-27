@@ -13,6 +13,31 @@ from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.backends import default_backend
 
+
+def _write_private_text(path: Path, text: str):
+    """Atomically writes a UTF-8 file with owner-only (0600) permissions."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    fd = os.open(str(tmp_path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        with open(fd, "w", encoding="utf-8") as handle:
+            handle.write(text)
+        os.replace(tmp_path, path)
+    except Exception:
+        try:
+            os.close(fd)
+        except Exception:
+            pass
+        try:
+            tmp_path.unlink()
+        except Exception:
+            pass
+        raise
+    try:
+        os.chmod(path, 0o600)
+    except Exception:
+        pass
+
 def generate_file_nonce() -> str:
     """Generates a fresh random 8-byte hex nonce (16 hex chars) per file."""
     return secrets.token_hex(8)
@@ -329,6 +354,10 @@ class VaultKeyManager:
         try:
             kp = self._key_path()
             if kp.exists():
+                try:
+                    os.chmod(kp, 0o600)
+                except Exception:
+                    pass
                 raw = kp.read_text(encoding="utf-8").strip()
                 if len(raw) == 64:
                     self._active_key = bytes.fromhex(raw)
@@ -352,7 +381,7 @@ class VaultKeyManager:
             "verify_hash": verify_hash,
             "created_at": int(time.time())
         }
-        self._config_path().write_text(json.dumps(config_data, indent=2), encoding="utf-8")
+        _write_private_text(self._config_path(), json.dumps(config_data, indent=2))
 
         self._active_key = key
         if remember_device:
@@ -365,12 +394,7 @@ class VaultKeyManager:
         }
 
     def _save_key_file(self, hex_key: str):
-        kp = self._key_path()
-        kp.write_text(hex_key, encoding="utf-8")
-        try:
-            os.chmod(kp, 0o600)
-        except Exception:
-            pass
+        _write_private_text(self._key_path(), hex_key)
 
     def unlock(
         self,

@@ -19,7 +19,6 @@ export const WorkstationFilterBar: React.FC = () => {
 
   // Only show workstation filter bar in tabs that deal with media (all, images, videos)
   const isMediaTab = ['all', 'images', 'videos', 'folders', 'starred'].includes(activeTab)
-  if (!isMediaTab) return null
 
   // Extract available filter options dynamically from current non-deleted files
   const { cameras, codecs, resolutions, lenses } = React.useMemo(() => {
@@ -58,6 +57,10 @@ export const WorkstationFilterBar: React.FC = () => {
       lenses: Array.from(lensSet).sort(),
     }
   }, [files])
+
+  // Every hook above must run on every render: an early return before the
+  // useMemo changes the hook count on tab switches and crashes the app.
+  if (!isMediaTab) return null
 
   const hasAnyFiltersAvailable =
     cameras.length > 0 || codecs.length > 0 || resolutions.length > 0 || lenses.length > 0

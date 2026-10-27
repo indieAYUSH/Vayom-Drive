@@ -168,6 +168,11 @@ class TelegramStorageClient:
             return "flood_wait"
         return "online" if self._is_connected else "reconnecting"
 
+    @property
+    def is_connected(self) -> bool:
+        """Returns True if the MTProto client is initialized and connected."""
+        return bool(self._is_connected and self.client)
+
     async def _wait_if_flooded(self, op_type: str = "write"):
         """
         Pauses execution if a FloodWait cooldown is active for op_type ('write' or 'read').
@@ -347,7 +352,11 @@ class TelegramStorageClient:
                 "message_id": msg_id,
                 "channel_id": str(settings.TELEGRAM_CHANNEL_ID or "mock"),
                 "file_id": f"mock-{msg_id}",
-                "access_hash": "0"
+                "access_hash": "0",
+                # H-1: the bytes never left this machine. Callers that destroy
+                # the local source (the watch-folder auto-delete) must check
+                # this flag before treating the upload as a real success.
+                "mock": True
             }
 
         channel = int(settings.TELEGRAM_CHANNEL_ID)
@@ -395,7 +404,9 @@ class TelegramStorageClient:
                         "message_id": message.id,
                         "channel_id": str(channel),
                         "file_id": str(doc.id) if doc else None,
-                        "access_hash": str(doc.access_hash) if doc else None
+                        "access_hash": str(doc.access_hash) if doc else None,
+                        # H-1: explicit "this really reached Telegram" marker.
+                        "mock": False
                     }
             except FloodWaitError as e:
                 # Anti-Ban Invariant 5: Catch FLOOD_WAIT_X globally and pause for X + 2 seconds.
@@ -525,6 +536,11 @@ class TelegramStorageClient:
                                 await queue.put(p_chunk)
                                 p_sent += len(p_chunk)
                                 p_off += len(p_chunk)
+                                # Stop once satisfied: one more iteration would
+                                # fetch (and queue a 0-byte slice of) an extra
+                                # chunk past the limit (B18).
+                                if limit is not None and p_sent >= limit:
+                                    break
                         except asyncio.CancelledError:
                             raise
                         except Exception as ex:
@@ -571,6 +587,10 @@ class TelegramStorageClient:
                         yield chunk
                         bytes_sent += len(chunk)
                         curr_offset += len(chunk)
+                        # Boundary-aligned limit: stop instead of fetching one
+                        # more chunk and yielding an empty b"" (B18).
+                        if limit is not None and bytes_sent >= limit:
+                            return
                     return
 
             except FloodWaitError as e:
@@ -758,6 +778,10 @@ class TelegramStorageClient:
                 backup_tmp = settings.DATA_DIR / f"vault_catalog_backup_{uuid.uuid4().hex}.tmp"
                 backup_tmp.write_text(json.dumps(catalog_data, indent=2), encoding="utf-8")
                 os.replace(backup_tmp, backup_snapshot)
+                try:
+                    os.chmod(backup_snapshot, 0o600)
+                except OSError:
+                    pass
             except Exception as e:
                 logger.warning(f"Could not write local catalog snapshot: {e}")
                 if backup_tmp and backup_tmp.exists():

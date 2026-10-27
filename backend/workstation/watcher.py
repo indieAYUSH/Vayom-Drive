@@ -395,34 +395,42 @@ class LocalFolderWatcher:
 
     async def _wait_for_file_stability(self, file_path: Path) -> Optional[int]:
         """
-        I-21: Returns the stable size of file_path once BOTH its size and mtime have
-        stopped changing across consecutive 3 s intervals, or None if the file is
-        missing, empty, or never stabilizes within the 30 s window (warning logged).
+        I-21 / H-9: Returns the stable size of file_path once BOTH its size and mtime have
+        stopped changing across consecutive intervals and the file is readable to EOF,
+        or None if the file is missing, empty, or never stabilizes within the 30 s window.
         """
         try:
             st = file_path.stat()
         except OSError:
             return None
 
-        if st.st_size > 0 and (time.time() - st.st_mtime) >= 3.0:
-            return st.st_size
+        if st.st_size <= 0:
+            return None
 
-        prev_size = -1
-        prev_mtime: Optional[float] = None
-        for _ in range(10):  # Maximum 30s stabilization window
+        prev_size = st.st_size
+        prev_mtime = st.st_mtime
+
+        for _ in range(15):  # Maximum 30s stabilization window (15 x 2.0s)
+            await asyncio.sleep(2.0)
             if not file_path.exists() or not file_path.is_file():
                 return None
             try:
                 curr = file_path.stat()
-            except Exception:
+            except OSError:
                 return None
 
             if curr.st_size > 0 and curr.st_size == prev_size and curr.st_mtime == prev_mtime:
-                return curr.st_size
+                # Test read access to ensure file isn't exclusively locked by another process
+                try:
+                    with open(file_path, "rb") as f:
+                        f.seek(0, os.SEEK_END)
+                        if f.tell() == curr.st_size:
+                            return curr.st_size
+                except (OSError, PermissionError):
+                    pass
 
             prev_size = curr.st_size
             prev_mtime = curr.st_mtime
-            await asyncio.sleep(3.0)
 
         if prev_size > 0:
             logger.warning(f"File did not stabilize within 30s window; deferring ingest until the next change event: {file_path}")
@@ -494,7 +502,21 @@ class LocalFolderWatcher:
                     await db.commit()
 
                     if auto_delete_local:
-                        if str_path in self._dirty_items:
+                        # H-1: never delete a local source whose catalog row only
+                        # points at offline mock blobs — those bytes never reached
+                        # Telegram and would be unrecoverable.
+                        mock_cur = await db.execute(
+                            "SELECT COUNT(*) FROM file_parts WHERE file_id = ? AND (telegram_file_id LIKE 'mock-%' OR telegram_channel_id = 'mock')",
+                            (existing_id,)
+                        )
+                        mock_row = await mock_cur.fetchone()
+                        is_mock_backed = bool(mock_row and mock_row[0])
+                        if is_mock_backed:
+                            logger.warning(
+                                f"Existing catalog entry {existing_id} was created from an offline mock upload; "
+                                f"keeping local copy of {file_path} (its bytes are not in Telegram)."
+                            )
+                        elif str_path in self._dirty_items:
                             # I-34: the file changed while it was being processed —
                             # keep it so the deferred re-ingest uploads the newest bytes.
                             logger.warning(f"File changed during sync; keeping local copy for re-ingest: {file_path}")
@@ -570,6 +592,7 @@ class LocalFolderWatcher:
 
             # 5. Upload each part via storage_client (respects 3-worker concurrency & FloodWait)
             uploaded_parts = []
+            uploaded_to_telegram = True
             for part in parts:
                 if encryption_mode == "ctr" and vault_key:
                     enc_slice = EncryptedFileSlice(
@@ -579,7 +602,8 @@ class LocalFolderWatcher:
                         byte_offset=part["byte_offset"],
                         slice_size=part["part_size_bytes"]
                     )
-                    part_sha = compute_slice_sha256(enc_slice)
+                    # Hashing CTR-encrypts the whole part; keep it off the loop (B10)
+                    part_sha = await asyncio.to_thread(compute_slice_sha256, enc_slice)
                     upload_target = enc_slice
                     part_record = {**part, "part_sha256": part_sha}
                 else:
@@ -601,6 +625,16 @@ class LocalFolderWatcher:
                     kind="original"
                 )
                 res = await storage_client.upload_part(upload_target, caption=caption)
+                if isinstance(res, dict) and res.get("mock"):
+                    # H-1: the storage client is offline and only wrote a local
+                    # mock blob. Offline mode must stay usable (the catalog row
+                    # and mock blob are still readable), but the local source is
+                    # now the only real copy and must never be auto-deleted.
+                    uploaded_to_telegram = False
+                    logger.warning(
+                        f"Storage backend is offline: {file_path.name} was stored in local mock "
+                        "storage instead of Telegram. The local source will be kept."
+                    )
                 if isinstance(res, dict):
                     uploaded_parts.append({
                         **part_record,
@@ -722,7 +756,9 @@ class LocalFolderWatcher:
                         try:
                             os.link(file_path, proxy_source_path)
                         except Exception:
-                            shutil.copy2(file_path, proxy_source_path)
+                            # Cross-device link (external watch drive) falls back
+                            # to a full copy; must not block the loop (B11)
+                            await asyncio.to_thread(shutil.copy2, file_path, proxy_source_path)
                         asyncio.create_task(transcoding_manager.enqueue_proxy(file_id, proxy_source_path))
                     except Exception as e:
                         logger.warning(f"Could not stage proxy source for {file_id}: {e}")
@@ -730,7 +766,13 @@ class LocalFolderWatcher:
                     asyncio.create_task(transcoding_manager.enqueue_proxy(file_id, file_path))
 
             if auto_delete_local:
-                if str_path in self._dirty_items:
+                if not uploaded_to_telegram:
+                    # H-1: mock-mode upload — the bytes only exist locally.
+                    logger.warning(
+                        f"Keeping local file {file_path}: it was not uploaded to Telegram "
+                        "(offline mock storage), so deleting it would lose the only real copy."
+                    )
+                elif str_path in self._dirty_items:
                     # I-34: never delete a file that changed while it was syncing —
                     # the deferred re-ingest must still find the newer bytes on disk.
                     logger.warning(f"File changed during sync; keeping local copy for re-ingest: {file_path}")

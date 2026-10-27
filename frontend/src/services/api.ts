@@ -156,6 +156,19 @@ export const api = {
     return res.json()
   },
 
+  async generateProxy(
+    fileId: string,
+    options?: { forceDownload?: boolean; force?: boolean }
+  ): Promise<{ status: string; profile?: string; message?: string }> {
+    const query = new URLSearchParams()
+    if (options?.forceDownload) query.set('force_download', 'true')
+    if (options?.force) query.set('force', 'true')
+    const suffix = query.toString() ? `?${query.toString()}` : ''
+    const res = await authFetch(`${API_BASE}/files/${fileId}/generate-proxy${suffix}`, { method: 'POST' })
+    if (!res.ok) throw await parseError(res, 'Failed to prepare 480p preview')
+    return res.json()
+  },
+
   async initUpload(params: {
     filename: string
     total_size: number

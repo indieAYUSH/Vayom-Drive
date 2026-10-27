@@ -1,12 +1,13 @@
 import logging
 import os
+import sys
 import tempfile
 from pathlib import Path
 from typing import List, Optional
 from dotenv import load_dotenv
 
-import sys
-# Load .env file from project root
+logger = logging.getLogger("vayom.config")
+
 IS_FROZEN = getattr(sys, "frozen", False)
 if IS_FROZEN:
     ROOT_DIR = Path(sys.executable).resolve().parent
@@ -20,32 +21,150 @@ else:
     ROOT_DIR = Path(__file__).resolve().parent.parent
     DEFAULT_DATA_DIR = ROOT_DIR / "data"
 
-load_dotenv(ROOT_DIR / ".env")
-if IS_FROZEN:
-    # Packaged installs (AppImage/deb) are read-only; allow an owner config file
-    # in the per-user config directory without requiring a writable app bundle.
-    if sys.platform == "win32":
-        _user_config = Path(os.getenv("APPDATA", str(Path.home()))) / "Vayom Drive" / ".env"
-    elif sys.platform == "darwin":
-        _user_config = Path.home() / "Library" / "Application Support" / "Vayom Drive" / ".env"
-    else:
-        _user_config = Path.home() / ".config" / "vayom-drive" / ".env"
-    load_dotenv(_user_config, override=False)
 
-logger = logging.getLogger("vayom.config")
+def _platform_config_dirs() -> List[Path]:
+    """Per-user configuration directories used by packaged installs."""
+    home = Path.home()
+    if sys.platform == "win32":
+        return [Path(os.getenv("APPDATA", str(home))) / "Vayom Drive"]
+    if sys.platform == "darwin":
+        return [home / "Library" / "Application Support" / "Vayom Drive"]
+    return [home / ".config" / "vayom-drive"]
+
+
+def _configuration_files() -> List[Path]:
+    """Returns config files in load order (first file wins, no overrides).
+
+    Packaged (PyInstaller) builds previously only looked next to the executable,
+    which is a read-only install directory that ships no ``.env``. That made
+    ``TELEGRAM_API_ID`` fall back to 0 and broke QR/bot login in the desktop
+    app. The search order below covers every supported launch layout:
+
+    1. ``VAYOM_ENV_FILE`` - explicit path passed by a launcher.
+    2. ``.env`` next to the executable / repo root.
+    3. macOS ``Contents/Resources`` and per-user config dirs.
+    4. Bundled ``telegram_app.env`` last, so a user ``.env`` always wins.
+
+    The launch directory is deliberately NOT searched: a packaged app started
+    from ``$HOME`` or a download folder would otherwise let an ambient ``.env``
+    override the embedded app credentials, ``DATA_DIR`` or ``HOST``. Portable
+    installs must opt in explicitly with ``VAYOM_ENV_FILE``.
+    """
+    meipass = getattr(sys, "_MEIPASS", None)
+    user_dirs = _platform_config_dirs() if IS_FROZEN else []
+
+    env_files: List[Path] = []
+    app_files: List[Path] = []
+
+    explicit = (os.getenv("VAYOM_ENV_FILE") or "").strip()
+    if explicit:
+        env_files.append(Path(explicit).expanduser())
+
+    env_files.append(ROOT_DIR / ".env")
+    if IS_FROZEN:
+        env_files.append(ROOT_DIR.parent / ".env")
+        env_files.append(ROOT_DIR.parent / "Resources" / ".env")
+        env_files.extend(d / ".env" for d in user_dirs)
+
+        if meipass:
+            app_files.append(Path(meipass) / "telegram_app.env")
+        app_files.append(ROOT_DIR / "telegram_app.env")
+        app_files.extend(d / "telegram_app.env" for d in user_dirs)
+
+    return env_files + app_files
+
+
+def _load_configuration_files() -> None:
+    seen = set()
+    for path in _configuration_files():
+        try:
+            key = path.resolve()
+        except OSError:
+            key = path
+        if key in seen:
+            continue
+        seen.add(key)
+        if not path.is_file():
+            continue
+        try:
+            load_dotenv(path, override=False)
+            logger.debug("Loaded configuration from %s", path)
+        except Exception as exc:  # pragma: no cover - malformed optional file
+            logger.warning("Could not load configuration file %s: %s", path, exc)
+
+
+def _int_env(name: str, default: int = 0) -> int:
+    """Reads an integer env var without letting a typo crash startup."""
+    raw = os.getenv(name, "")
+    text = str(raw).strip()
+    if not text:
+        return default
+    try:
+        return int(text)
+    except (TypeError, ValueError):
+        logger.warning("Ignoring non-numeric %s=%r (using %s)", name, raw, default)
+        return default
+
+
+def _resolve_data_dir(raw: Optional[str]) -> Path:
+    """Resolves DATA_DIR, keeping relative paths inside the project/bundle.
+
+    A packaged app is commonly launched from ``/`` or ``$HOME`` (desktop
+    entries), so a relative ``DATA_DIR=./data`` would otherwise try to create
+    ``/data``. Packaged installs ignore relative values and use the per-user
+    default instead.
+    """
+    candidate = Path((raw or "").strip() or str(DEFAULT_DATA_DIR)).expanduser()
+    if candidate.is_absolute():
+        return candidate
+    if IS_FROZEN:
+        # Preserve the data directory of an existing portable install (the old
+        # behavior resolved relative paths against the launch directory) but
+        # never create directories in a read-only CWD such as "/".
+        try:
+            legacy = Path.cwd() / candidate
+            if (legacy / "vayom.db").is_file():
+                logger.warning("Using legacy relative DATA_DIR at %s", legacy)
+                return legacy
+        except OSError:
+            pass
+        logger.warning(
+            "Ignoring relative DATA_DIR=%r in a packaged build; using %s",
+            raw,
+            DEFAULT_DATA_DIR,
+        )
+        return DEFAULT_DATA_DIR
+    return (ROOT_DIR / candidate).resolve()
+
+
+def _resolve_local_path(raw: Optional[str], default: Path) -> Path:
+    """Resolves a configurable filesystem path with the same safety policy as
+    ``DATA_DIR``: a relative value in a packaged build must never be created
+    relative to an arbitrary (possibly read-only) launch directory."""
+    text = (raw or "").strip()
+    candidate = Path(text).expanduser() if text else default
+    if candidate.is_absolute():
+        return candidate
+    if IS_FROZEN:
+        logger.warning("Ignoring relative path %r in a packaged build; using %s", raw, default)
+        return default
+    return (ROOT_DIR / candidate).resolve()
+
+
+_load_configuration_files()
 
 class Settings:
     ROOT_DIR: Path = ROOT_DIR
 
     # Telegram Base Application Credentials (for MTProto handshake)
-    TELEGRAM_API_ID: int = int(os.getenv("TELEGRAM_API_ID", "0") or 0)
-    TELEGRAM_API_HASH: str = os.getenv("TELEGRAM_API_HASH", "")
+    TELEGRAM_API_ID: int = _int_env("TELEGRAM_API_ID", 0)
+    TELEGRAM_API_HASH: str = (os.getenv("TELEGRAM_API_HASH") or "").strip()
     TELEGRAM_BOT_TOKEN: str = ""
     TELEGRAM_CHANNEL_ID: str = ""
     TELEGRAM_BACKUP_CHANNEL_ID: str = os.getenv("TELEGRAM_BACKUP_CHANNEL_ID", "")
     AUTO_MIRROR_SAVED_MESSAGES: bool = True
-    MAX_CONCURRENT_UPLOADS: int = int(os.getenv("MAX_CONCURRENT_UPLOADS", "3"))
-    CHUNK_PACING_MS: int = int(os.getenv("CHUNK_PACING_MS", "25"))
+    MAX_CONCURRENT_UPLOADS: int = max(1, _int_env("MAX_CONCURRENT_UPLOADS", 3))
+    CHUNK_PACING_MS: int = max(0, _int_env("CHUNK_PACING_MS", 25))
 
     # Security & Admin (F-4: No hardcoded default credentials; empty unless explicitly set)
     ADMIN_PASSWORD: str = os.getenv("ADMIN_PASSWORD", "")
@@ -60,19 +179,27 @@ class Settings:
         else []
     )
     ENCRYPTION_ENABLED: bool = os.getenv("ENCRYPTION_ENABLED", "false").lower() == "true"
+    # Test/dev escape hatch for the storage client's local mock backend. It is
+    # disabled in production so a disconnected Telegram session can never
+    # produce a "completed" catalog row whose bytes exist only in data/mock_blobs.
+    ALLOW_OFFLINE_MOCK_UPLOADS: bool = (
+        os.getenv("ALLOW_OFFLINE_MOCK_UPLOADS", "false").lower() == "true"
+    )
     VAULT_PASSPHRASE: str = os.getenv("VAULT_PASSPHRASE", "")
     VAULT_SALT: bytes = os.getenv("VAULT_SALT", "vayom_vault_salt_default").encode("utf-8")
 
     # Server Binding (A-1: Default bind to loopback 127.0.0.1 instead of 0.0.0.0)
-    HOST: str = os.getenv("HOST", "127.0.0.1")
-    PORT: int = int(os.getenv("PORT", "8000"))
+    HOST: str = (os.getenv("HOST") or "127.0.0.1").strip()
+    PORT: int = _int_env("PORT", 8000)
 
     # Storage Paths
-    DATA_DIR: Path = Path(os.getenv("DATA_DIR", str(DEFAULT_DATA_DIR)))
+    DATA_DIR: Path = _resolve_data_dir(os.getenv("DATA_DIR"))
     DB_PATH: Path = DATA_DIR / "vayom.db"
     UPLOAD_TEMP_DIR: Path = DATA_DIR / "uploads"
     THUMBNAIL_DIR: Path = DATA_DIR / "thumbnails"
-    NAS_VAULT_ROOT: Path = Path(os.getenv("NAS_VAULT_ROOT", str(DATA_DIR / "nas_vault")))
+    NAS_VAULT_ROOT: Path = _resolve_local_path(
+        os.getenv("NAS_VAULT_ROOT"), DATA_DIR / "nas_vault"
+    )
     DEFAULT_STORAGE_BACKEND: str = os.getenv("DEFAULT_STORAGE_BACKEND", "telegram")
 
     # S3 / MinIO / Cloudflare R2 Storage Settings
@@ -110,7 +237,7 @@ class Settings:
     # File Slicing Limits (2-MiB aligned boundaries: exact multiples of 2 MiB, 512 KiB, and 4096 bytes)
     STANDARD_PART_BYTES: int = 1887436800  # 900 * 2 MiB (~1.887 GB, stays safely under Telegram 2000 MB limit)
     PREMIUM_PART_BYTES: int = 3879731200   # 1850 * 2 MiB (~3.880 GB, stays safely under Telegram 4000 MB limit)
-    MAX_PART_BYTES: int = int(os.getenv("MAX_PART_BYTES", str(STANDARD_PART_BYTES)))
+    MAX_PART_BYTES: int = _int_env("MAX_PART_BYTES", STANDARD_PART_BYTES)
 
     # Cloud & Heartbeat Settings
     HEARTBEAT_INTERVAL_SECONDS: int = 600  # 10 minutes
@@ -120,13 +247,37 @@ class Settings:
     AUTH_MODE: str = ""                         # 'qr', 'bot', 'developer'
     USER_PROFILE: dict = {}                     # {'first_name', 'username', 'id', 'is_premium'}
     SESSION_NAME: str = "vayom_bot"
-    QR_SESSION_TTL_SECONDS: int = int(os.getenv("QR_SESSION_TTL_SECONDS", "300"))  # 5 minutes expiry
+    QR_SESSION_TTL_SECONDS: int = max(30, _int_env("QR_SESSION_TTL_SECONDS", 300))  # 5 minutes expiry
 
     def ensure_directories(self):
         self.DATA_DIR.mkdir(parents=True, exist_ok=True)
         self.UPLOAD_TEMP_DIR.mkdir(parents=True, exist_ok=True)
         self.THUMBNAIL_DIR.mkdir(parents=True, exist_ok=True)
         self.NAS_VAULT_ROOT.mkdir(parents=True, exist_ok=True)
+        self.harden_permissions()
+
+    def harden_permissions(self):
+        """M-11: best-effort owner-only permissions for local secret-bearing files."""
+        candidates = [
+            self.ROOT_DIR / ".env",
+            self.DATA_DIR / ".vault_key",
+            self.DATA_DIR / "vault_config.json",
+            self.DATA_DIR / "vault_catalog_backup.json",
+            self.DATA_DIR / "auth_config.json",
+        ]
+        if IS_FROZEN:
+            if sys.platform == "win32":
+                candidates.append(Path(os.getenv("APPDATA", str(Path.home()))) / "Vayom Drive" / ".env")
+            elif sys.platform == "darwin":
+                candidates.append(Path.home() / "Library" / "Application Support" / "Vayom Drive" / ".env")
+            else:
+                candidates.append(Path.home() / ".config" / "vayom-drive" / ".env")
+        for candidate in candidates:
+            if candidate.exists():
+                try:
+                    os.chmod(candidate, 0o600)
+                except OSError:
+                    pass
 
     _custom_auth_config_file: Optional[Path] = None
 
@@ -169,7 +320,7 @@ class Settings:
                 if self.USER_PROFILE.get("is_premium"):
                     self.MAX_PART_BYTES = self.PREMIUM_PART_BYTES  # Aligned 3,879,731,200 bytes for Telegram Premium users!
                 else:
-                    self.MAX_PART_BYTES = int(os.getenv("MAX_PART_BYTES", str(self.STANDARD_PART_BYTES)))
+                    self.MAX_PART_BYTES = _int_env("MAX_PART_BYTES", self.STANDARD_PART_BYTES)
                 return
             except Exception as e:
                 # F-3: never silently swallow a corrupt/unreadable config — move it aside
@@ -229,7 +380,7 @@ class Settings:
         self.SESSION_NAME = "vayom_bot"
         self.LOCAL_API_TOKEN = ""
         # F-2: logout must not leave a premium-inflated slice limit behind
-        self.MAX_PART_BYTES = int(os.getenv("MAX_PART_BYTES", str(self.STANDARD_PART_BYTES)))
+        self.MAX_PART_BYTES = _int_env("MAX_PART_BYTES", self.STANDARD_PART_BYTES)
 
 settings = Settings()
 settings.ensure_directories()
