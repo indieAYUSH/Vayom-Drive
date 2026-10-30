@@ -68,17 +68,20 @@ Thumbs.db
 # Premium subscription model & licensing
 backend/license/
 scripts/issue_license.py
-tests/test_multi_storage_phase4_license.py
 *.lic
 *.license
 *license_key*
 *subscription*
 
+# Local-only desktop shell, tests, and private outreach data (not published)
+src-tauri/
+tests/
+docs/creator-outreach-list.csv
+docs/creator-outreach-list.pdf
+
 # TypeScript backend & desktop sidecar
 ts-backend/
 backend-ts/
-src-tauri/target/
-src-tauri/binaries/
 dist_sidecar/
 build_sidecar/
 
