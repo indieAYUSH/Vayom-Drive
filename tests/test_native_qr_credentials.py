@@ -149,6 +149,133 @@ async def test_qr_start_invalid_credentials_returns_config_error(monkeypatch):
     assert "Your API ID" not in detail
 
 
+@pytest.mark.asyncio
+async def test_byok_qr_start_and_finalize_with_custom_credentials(monkeypatch, tmp_path):
+    # Global environment settings have NO credentials (0 and "")
+    monkeypatch.setattr(settings, "TELEGRAM_API_ID", 0)
+    monkeypatch.setattr(settings, "TELEGRAM_API_HASH", "")
+    cfg_file = tmp_path / "auth_config.json"
+    monkeypatch.setattr(settings, "_custom_auth_config_file", cfg_file)
+
+    captured_init = {}
+
+    class _MockQRLogin:
+        url = "tg://login?token=mock_sovereign_token"
+
+    class _MockChat:
+        id = 99887766
+        title = "Sovereign's Vayom Vault"
+
+    class _MockCreateRes:
+        chats = [_MockChat()]
+
+    class _MockClient:
+        def __init__(self, session, api_id, api_hash):
+            captured_init["api_id"] = api_id
+            captured_init["api_hash"] = api_hash
+            self._connected = False
+
+        async def connect(self):
+            self._connected = True
+
+        async def qr_login(self):
+            return _MockQRLogin()
+
+        async def disconnect(self):
+            self._connected = False
+
+        def is_connected(self):
+            return self._connected
+
+        async def __call__(self, req):
+            return _MockCreateRes()
+
+        async def get_entity(self, entity):
+            class _Entity:
+                username = None
+                usernames = None
+            return _Entity()
+
+    monkeypatch.setattr(auth_module, "TelegramClient", _MockClient)
+    async def _noop():
+        pass
+    monkeypatch.setattr(auth_module.storage_client, "disconnect", _noop)
+    monkeypatch.setattr(auth_module.storage_client, "reconnect", _noop)
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://127.0.0.1:8000") as client:
+        # Start BYOK QR with custom credentials
+        byok_payload = {"api_id": 884422, "api_hash": "a1b2c3d4e5f60718293a4b5c6d7e8f90"}
+        resp = await client.post("/api/v1/auth/qr/start", json=byok_payload)
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "session_id" in data
+        assert data["url"] == "tg://login?token=mock_sovereign_token"
+
+        # Verify client was initialized with the BYOK keys
+        assert captured_init["api_id"] == 884422
+        assert captured_init["api_hash"] == "a1b2c3d4e5f60718293a4b5c6d7e8f90"
+
+        # Mock the session transition to confirmed
+        sess = auth_module._active_qr_sessions[data["session_id"]]
+        sess["status"] = "confirmed"
+        sess["confirmed_at"] = 0  # Bypass anti-ban idle wait
+        sess["user"] = {
+            "id": 987654321,
+            "first_name": "Sovereign",
+            "last_name": "Architect",
+            "username": "sovereign_dev",
+            "is_premium": True
+        }
+
+        # Finalize QR login
+        fin_resp = await client.post(
+            "/api/v1/auth/qr/finalize",
+            json={"session_id": data["session_id"], "action": "auto_create"}
+        )
+        assert fin_resp.status_code == 200
+        fin_data = fin_resp.json()
+        assert fin_data["success"] is True
+
+        # Check saved configuration
+        import json
+        saved_cfg = json.loads(cfg_file.read_text(encoding="utf-8"))
+        assert saved_cfg["auth_mode"] == "byok_qr"
+        assert saved_cfg["api_id"] == 884422
+        assert saved_cfg["api_hash"] == "a1b2c3d4e5f60718293a4b5c6d7e8f90"
+        assert saved_cfg["channel_id"] == "-10099887766"
+
+
+@pytest.mark.asyncio
+async def test_byok_qr_start_rejected_credentials_returns_byok_error(monkeypatch):
+    class _FailingClient:
+        def __init__(self, session, api_id, api_hash):
+            pass
+
+        async def connect(self):
+            raise auth_module.ApiIdInvalidError(request=None)
+
+        async def disconnect(self):
+            pass
+
+    monkeypatch.setattr(auth_module, "TelegramClient", _FailingClient)
+    async def _noop():
+        pass
+    monkeypatch.setattr(auth_module.storage_client, "disconnect", _noop)
+    monkeypatch.setattr(auth_module.storage_client, "reconnect", _noop)
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://127.0.0.1:8000") as client:
+        resp = await client.post(
+            "/api/v1/auth/qr/start",
+            json={"api_id": 11111, "api_hash": "invalidhash"}
+        )
+
+    assert resp.status_code == 503
+    assert "rejected the provided API credentials" in resp.json()["detail"]
+    assert "my.telegram.org" in resp.json()["detail"]
+
+
 def test_int_env_ignores_invalid_values(monkeypatch):
     monkeypatch.setenv("VAYOM_TEST_INT", "not-a-number")
     assert _int_env("VAYOM_TEST_INT", 7) == 7

@@ -24,11 +24,12 @@ _active_qr_sessions: Dict[str, Dict[str, Any]] = {}
 QR_HANDSHAKE_TIMEOUT_SECONDS = 45.0
 
 
-def _require_telegram_app_credentials() -> None:
-    """Returns an actionable error instead of a generic HTTP 500 when the
-    application-level Telegram credentials are missing (common in packaged
-    builds that shipped without a configuration file)."""
-    if not settings.TELEGRAM_API_ID or not settings.TELEGRAM_API_HASH:
+def _require_telegram_app_credentials(api_id: Optional[int] = None, api_hash: Optional[str] = None) -> tuple[int, str]:
+    """Returns the effective Telegram API credentials (from BYOK request or environment settings),
+    raising an actionable HTTP 503 if credentials are missing."""
+    target_id = api_id or settings.TELEGRAM_API_ID
+    target_hash = (api_hash or "").strip() or (settings.TELEGRAM_API_HASH or "").strip()
+    if not target_id or not target_hash:
         raise HTTPException(
             status_code=503,
             detail=(
@@ -37,6 +38,7 @@ def _require_telegram_app_credentials() -> None:
                 "directory) and restart Vayom Drive."
             ),
         )
+    return int(target_id), str(target_hash)
 
 
 def _delete_session_files(session_name: str) -> list[str]:
@@ -51,6 +53,11 @@ def _delete_session_files(session_name: str) -> list[str]:
         except OSError as exc:
             logger.warning(f"Could not remove session file {path}: {exc}")
     return removed
+
+
+class QRStartRequest(BaseModel):
+    api_id: Optional[int] = None
+    api_hash: Optional[str] = None
 
 
 class QRStartResponse(BaseModel):
@@ -244,11 +251,15 @@ async def _monitor_qr(session_id: str, qr_login, client: TelegramClient, session
 
 
 @router.post("/qr/start", response_model=QRStartResponse)
-async def start_qr_login():
+async def start_qr_login(body: Optional[QRStartRequest] = None):
     """Initializes Telethon user MTProto client and returns dynamic tg://login?token= URI with extended session."""
     # Validate before touching the storage client: a missing .env must not leave
     # the already-authenticated storage session disconnected.
-    _require_telegram_app_credentials()
+    is_byok = bool(body and body.api_id and body.api_hash)
+    target_id, target_hash = _require_telegram_app_credentials(
+        api_id=body.api_id if body else None,
+        api_hash=body.api_hash if body else None,
+    )
 
     # Ensure storage client is disconnected so it doesn't hold locks on vayom_user.session
     await storage_client.disconnect()
@@ -296,8 +307,8 @@ async def start_qr_login():
         robust_session = RobustSQLiteSession(session_file)
         client = TelegramClient(
             robust_session,
-            settings.TELEGRAM_API_ID,
-            settings.TELEGRAM_API_HASH
+            target_id,
+            target_hash
         )
 
         async def _handshake():
@@ -335,13 +346,15 @@ async def start_qr_login():
             await storage_client.reconnect()
         except Exception as reconnect_err:
             logger.warning(f"Could not restore the previous session after a failed QR start: {reconnect_err}")
-        logger.warning("QR login rejected the configured Telegram API credentials: %s", exc)
+        logger.warning("QR login rejected the Telegram API credentials: %s", exc)
+        err_msg = (
+            "Telegram rejected the provided API credentials. Verify your API ID and API Hash from my.telegram.org and try again."
+            if is_byok else
+            "Telegram rejected the configured API credentials. Verify TELEGRAM_API_ID and TELEGRAM_API_HASH and restart Vayom Drive."
+        )
         raise HTTPException(
             status_code=503,
-            detail=(
-                "Telegram rejected the configured API credentials. Verify TELEGRAM_API_ID "
-                "and TELEGRAM_API_HASH and restart Vayom Drive."
-            ),
+            detail=err_msg,
         )
     except Exception:
         if client is not None:
@@ -370,6 +383,9 @@ async def start_qr_login():
         "url": qr_login.url,
         "session_expires_at": session_expires_at,
         "status": "waiting",
+        "api_id": target_id,
+        "api_hash": target_hash,
+        "is_byok": is_byok,
         "user": None,
         "channels": None,
         "default_channel_id": None
@@ -541,11 +557,14 @@ async def finalize_qr_login(body: QRFinalizeRequest):
             logger.warning(f"Non-mutating privacy check encountered: {priv_err}")
 
         # Persist runtime configuration
+        target_api_id = session.get("api_id") or settings.TELEGRAM_API_ID
+        target_api_hash = session.get("api_hash") or settings.TELEGRAM_API_HASH
+        is_byok = bool(session.get("is_byok"))
         config_payload = {
-            "auth_mode": "qr",
+            "auth_mode": "byok_qr" if is_byok else "qr",
             "session_name": "vayom_user",
-            "api_id": settings.TELEGRAM_API_ID,
-            "api_hash": settings.TELEGRAM_API_HASH,
+            "api_id": target_api_id,
+            "api_hash": target_api_hash,
             "channel_id": str(channel_id),
             "user_profile": {
                 "display_name": display_name,

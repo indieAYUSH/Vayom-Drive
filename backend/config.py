@@ -314,7 +314,7 @@ class Settings:
                     import secrets
                     self.LOCAL_API_TOKEN = secrets.token_hex(24)
                 self.USER_PROFILE = data.get("user_profile") or {}
-                self.SESSION_NAME = data.get("session_name") or ("vayom_user" if self.AUTH_MODE == "qr" else "vayom_bot")
+                self.SESSION_NAME = data.get("session_name") or ("vayom_user" if self.AUTH_MODE in ("qr", "byok_qr") else "vayom_bot")
                 # F-2: premium upgrades slicing to 4 GB, but the limit must fall back
                 # to the standard 1.9 GB whenever premium is absent or has expired.
                 if self.USER_PROFILE.get("is_premium"):

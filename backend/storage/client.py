@@ -248,7 +248,7 @@ class TelegramStorageClient:
                 settings.TELEGRAM_API_HASH
             )
 
-            if settings.AUTH_MODE == "qr":
+            if settings.AUTH_MODE in ("qr", "byok_qr"):
                 # User MTProto Session
                 await self.client.connect()
                 if not await self.client.is_user_authorized():
@@ -753,7 +753,7 @@ class TelegramStorageClient:
                 return cat
 
         # Tier 3: Saved Messages ('me') Mirror in QR mode
-        if settings.AUTH_MODE == "qr" and settings.AUTO_MIRROR_SAVED_MESSAGES:
+        if settings.AUTH_MODE in ("qr", "byok_qr") and settings.AUTO_MIRROR_SAVED_MESSAGES:
             logger.info("Attempting disaster recovery from Telegram 'Saved Messages' ('me')...")
             cat = await fetch_catalog_from_target("me")
             if cat:
@@ -929,7 +929,7 @@ class TelegramStorageClient:
                         logger.warning(f"Failed to mirror catalog to backup channel: {b_err}")
 
                 # 3. Mirror to Saved Messages ('me') in QR user mode
-                if settings.AUTH_MODE == "qr" and settings.AUTO_MIRROR_SAVED_MESSAGES:
+                if settings.AUTH_MODE in ("qr", "byok_qr") and settings.AUTO_MIRROR_SAVED_MESSAGES:
                     try:
                         target_old_s_id = self.last_saved_catalog_msg_id
                         s_msg = await self.client.send_file(
@@ -983,7 +983,7 @@ class TelegramStorageClient:
                 "healthy": False,
                 "error": None
             },
-            "saved_messages_mirror": settings.AUTH_MODE == "qr",
+            "saved_messages_mirror": settings.AUTH_MODE in ("qr", "byok_qr"),
             "local_backup": {
                 "exists": (settings.DATA_DIR / "vault_catalog_backup.json").exists(),
                 "path": str(settings.DATA_DIR / "vault_catalog_backup.json")

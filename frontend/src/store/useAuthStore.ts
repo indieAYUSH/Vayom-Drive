@@ -20,7 +20,7 @@ interface AuthState {
   isAuthenticated: boolean
   isInitializing: boolean
   isLoading: boolean
-  authMode: 'qr' | 'bot' | 'developer' | ''
+  authMode: 'qr' | 'byok_qr' | 'bot' | 'developer' | ''
   user: UserProfile | null
   channelId: string | null
 
@@ -29,6 +29,7 @@ interface AuthState {
   qrUrl: string | null
   qrExpiresAt: number | null
   qrStatus: 'idle' | 'waiting' | 'confirmed' | '2fa_required' | 'expired' | 'failed'
+  byokCreds: { apiId?: number; apiHash?: string } | null
   scannedUser: UserProfile | null
   availableChannels: ChannelOption[]
   defaultChannelId: string | null
@@ -40,7 +41,7 @@ interface AuthState {
 
   // Actions
   checkAuth: () => Promise<boolean>
-  startQrSession: () => Promise<void>
+  startQrSession: (creds?: { apiId?: number; apiHash?: string }) => Promise<void>
   pollQrSession: () => Promise<void>
   submit2FA: (password: string) => Promise<void>
   finalizeQr: (displayName: string, action: 'auto_create' | 'select_existing', channelId?: string) => Promise<void>
@@ -92,6 +93,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
   qrUrl: null,
   qrExpiresAt: null,
   qrStatus: 'idle',
+  byokCreds: null,
   scannedUser: null,
   availableChannels: [],
   defaultChannelId: null,
@@ -133,7 +135,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     return false
   },
 
-  startQrSession: async () => {
+  startQrSession: async (creds?: { apiId?: number; apiHash?: string }) => {
     // H-4: Abort any in-flight start request and clear active intervals
     stopQrPolling()
 
@@ -141,6 +143,11 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     const controller = new AbortController()
     qrAbortController = controller
     qrPollFailures = 0
+
+    if (creds !== undefined) {
+      set({ byokCreds: creds })
+    }
+    const activeCreds = creds !== undefined ? creds : get().byokCreds
 
     // Clear the previous session's identifiers/expiry: keeping them while the
     // new start is in flight made LoginView render a false "Session Expired".
@@ -155,8 +162,11 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     })
     const timeoutId = setTimeout(() => controller.abort(), QR_START_TIMEOUT_MS)
     try {
+      const hasCreds = Boolean(activeCreds?.apiId && activeCreds?.apiHash)
       const res = await fetch(`${API_BASE}/auth/qr/start`, {
         method: 'POST',
+        headers: hasCreds ? { 'Content-Type': 'application/json' } : undefined,
+        body: hasCreds ? JSON.stringify({ api_id: activeCreds!.apiId, api_hash: activeCreds!.apiHash }) : undefined,
         signal: controller.signal,
       })
       if (requestId !== currentQrRequestId) return
@@ -332,7 +342,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       stopQrPolling()
       set({
         isAuthenticated: true,
-        authMode: 'qr',
+        authMode: (data.auth_mode as any) || (get().byokCreds?.apiId ? 'byok_qr' : 'qr'),
         channelId: data.channel_id,
         user: data.user,
         isLoading: false,
@@ -436,6 +446,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       qrUrl: null,
       qrExpiresAt: null,
       qrStatus: 'idle',
+      byokCreds: null,
       scannedUser: null,
       availableChannels: [],
       defaultChannelId: null,
@@ -455,6 +466,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       qrUrl: null,
       qrExpiresAt: null,
       qrStatus: 'idle',
+      byokCreds: null,
       scannedUser: null,
       availableChannels: [],
       defaultChannelId: null,
