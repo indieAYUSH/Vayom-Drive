@@ -21,7 +21,15 @@ import {
   Activity, 
   Zap,
   Check,
-  HelpCircle
+  HelpCircle,
+  Eye,
+  EyeOff,
+  Copy,
+  Sparkles,
+  X,
+  FileText,
+  Lock,
+  Unlock
 } from 'lucide-react'
 import { Button } from '../components/common/Button'
 import { Badge } from '../components/common/Badge'
@@ -111,6 +119,32 @@ export const SettingsView: React.FC = () => {
   const [importStatusMsg, setImportStatusMsg] = useState('')
   const fileInputRef = useRef<HTMLInputElement>(null)
   const isMountedRef = useRef(true)
+
+  // Vault Recovery Key & Encryption State
+  const [vaultStatus, setVaultStatus] = useState<{
+    unlocked: boolean
+    encryption_enabled: boolean
+    is_initialized?: boolean
+    remember_device?: boolean
+    recovery_key?: string | null
+  } | null>(null)
+  const [isLoadingVaultStatus, setIsLoadingVaultStatus] = useState(false)
+  const [isRevealingKey, setIsRevealingKey] = useState(false)
+  const [recoveryKeyCopied, setRecoveryKeyCopied] = useState(false)
+  const [recoveryPassphraseInput, setRecoveryPassphraseInput] = useState('')
+  const [isUnlockingVault, setIsUnlockingVault] = useState(false)
+  const [vaultStatusMsg, setVaultStatusMsg] = useState('')
+
+  // Optional Update Notification & Version State
+  const [dismissedUpdateBanner, setDismissedUpdateBanner] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem('vayom_update_banner_dismissed') === 'true'
+    } catch {
+      return false
+    }
+  })
+  const [isCheckingUpdates, setIsCheckingUpdates] = useState(false)
+  const [updateStatusMsg, setUpdateStatusMsg] = useState('')
 
   const handleActivateLicense = async () => {
     if (!licenseKeyInput.trim()) return
@@ -275,10 +309,113 @@ export const SettingsView: React.FC = () => {
     }
   }
 
+  const loadVaultStatus = async () => {
+    setIsLoadingVaultStatus(true)
+    try {
+      const data = await api.getVaultStatus()
+      if (!isMountedRef.current) return
+      setVaultStatus(data)
+    } catch (e: any) {
+      console.error('Failed to load vault encryption status:', e)
+    } finally {
+      setIsLoadingVaultStatus(false)
+    }
+  }
+
+  const handleCopyRecoveryKey = async () => {
+    if (!vaultStatus?.recovery_key) return
+    try {
+      await navigator.clipboard.writeText(vaultStatus.recovery_key)
+      setRecoveryKeyCopied(true)
+      setTimeout(() => setRecoveryKeyCopied(false), 2500)
+    } catch (err) {
+      console.error('Failed to copy to clipboard', err)
+    }
+  }
+
+  const handleExportRecoveryKey = () => {
+    if (!vaultStatus?.recovery_key) return
+    const content = [
+      '================================================================',
+      'VAYOM DRIVE — ZERO-KNOWLEDGE VAULT RECOVERY KEY',
+      '================================================================',
+      '',
+      `Generated: ${new Date().toISOString()}`,
+      `Workstation: ${window.location.hostname || 'localhost'}`,
+      '',
+      'RECOVERY KEY (64 HEX):',
+      vaultStatus.recovery_key,
+      '',
+      'IMPORTANT SECURITY NOTICE:',
+      '- This recovery key is the ONLY way to decrypt and recover your files',
+      '  if you forget your master passphrase or reconstruct your vault.',
+      '- Store this file on an offline encrypted drive or in your secure',
+      '  password manager.',
+      '- Never share this key with anyone. Vayom Drive operators cannot',
+      '  recover your data without this key.',
+      '================================================================'
+    ].join('\n')
+
+    const blob = new Blob([content], { type: 'text/plain;charset=utf-8' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `vayom-vault-recovery-key-${new Date().toISOString().slice(0, 10)}.txt`
+    document.body.appendChild(a)
+    a.click()
+    document.body.removeChild(a)
+    URL.revokeObjectURL(url)
+  }
+
+  const handleUnlockVault = async () => {
+    if (!recoveryPassphraseInput.trim()) return
+    setIsUnlockingVault(true)
+    setVaultStatusMsg('')
+    try {
+      const val = recoveryPassphraseInput.trim()
+      const isHexKey = val.length === 64 && /^[0-9a-fA-F]+$/.test(val)
+      const payload = isHexKey ? { key: val, remember_device: true } : { passphrase: val, remember_device: true }
+      await api.unlockVault(payload)
+      setVaultStatusMsg('✓ Vault successfully unlocked! Recovery key revealed.')
+      setRecoveryPassphraseInput('')
+      await loadVaultStatus()
+    } catch (err: any) {
+      setVaultStatusMsg(`✗ ${translateErrorMessage(err)}`)
+    } finally {
+      setIsUnlockingVault(false)
+    }
+  }
+
+  const handleDismissUpdateBanner = () => {
+    setDismissedUpdateBanner(true)
+    try {
+      localStorage.setItem('vayom_update_banner_dismissed', 'true')
+    } catch {}
+  }
+
+  const handleCheckUpdates = async () => {
+    setIsCheckingUpdates(true)
+    setUpdateStatusMsg('')
+    try {
+      const res = await fetch('/api/v1/system/version')
+      if (res.ok) {
+        const data = await res.json()
+        setUpdateStatusMsg(`✓ ${data.app} v${data.version}. ${data.message}`)
+      } else {
+        setUpdateStatusMsg('✓ You are running Vayom Drive v1.0.0. All updates are strictly optional. Your current version will continue to function indefinitely.')
+      }
+    } catch {
+      setUpdateStatusMsg('✓ You are running Vayom Drive v1.0.0. All updates are strictly optional. Your current version will continue to function indefinitely.')
+    } finally {
+      setIsCheckingUpdates(false)
+    }
+  }
+
   useEffect(() => {
     isMountedRef.current = true
     loadChannelHealth()
     loadStorageConfigs()
+    loadVaultStatus()
     return () => {
       isMountedRef.current = false
     }
@@ -397,6 +534,32 @@ export const SettingsView: React.FC = () => {
           </Button>
         </div>
       </div>
+
+      {/* Optional Update Notification Banner */}
+      {!dismissedUpdateBanner && (
+        <div className="max-w-5xl mx-auto mb-4 p-3.5 bg-[#111111] border border-[#262626] flex items-center justify-between gap-3 text-xs animate-in fade-in duration-150">
+          <div className="flex items-center gap-2.5">
+            <Sparkles size={15} className="text-[#38bdf8] shrink-0" />
+            <div>
+              <span className="font-semibold text-[#f0f0f0]">Update Available (Optional):</span>
+              <span className="text-[#a3a3a3] ml-1.5">
+                Vayom Drive v1.0.1 is available. All updates are strictly optional—your current version will continue to function indefinitely.
+              </span>
+            </div>
+          </div>
+          <div className="flex items-center gap-2 shrink-0">
+            <Badge variant="default">Optional</Badge>
+            <button
+              type="button"
+              onClick={handleDismissUpdateBanner}
+              className="p-1 text-[#888888] hover:text-[#ffffff] transition-colors"
+              title="Dismiss optional notification"
+            >
+              <X size={14} />
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Categorized Settings Navigation Bar */}
       <div className="max-w-5xl mx-auto mb-6">
@@ -621,8 +784,8 @@ export const SettingsView: React.FC = () => {
                     <span className="text-xs font-semibold text-[#f0f0f0]">
                       Additional Storage Connections
                     </span>
-                    <Badge variant={license?.is_pro ? 'success' : 'default'}>
-                      {license?.is_pro ? 'Pro Unlocked' : 'Free Tier'}
+                    <Badge variant="success">
+                      Pro Unlocked (Lifetime / Community Edition)
                     </Badge>
                   </div>
                   <span className="text-[11px] text-[#888888] hidden sm:block">
@@ -647,39 +810,19 @@ export const SettingsView: React.FC = () => {
               Connect external storage to store files natively without splitting. Files are organized into your Vayom Drive library seamlessly.
             </p>
 
-            {/* Pro License Activation if not active */}
-            {!license?.is_pro && (
-              <div className="p-3.5 bg-[#121212] border border-[#2a2a2a] space-y-2.5">
-                <div className="text-xs text-[#f0f0f0] font-semibold flex items-center gap-1.5">
-                  <Key size={13} className="text-[#f59e0b]" /> Unlock Additional Storage Connections
+            {/* Pro License Status - 100% Unlocked */}
+            <div className="p-3.5 bg-[#111111] border border-[#1f1f1f] space-y-2">
+              <div className="flex items-center justify-between">
+                <div className="text-xs text-[#f0f0f0] font-semibold flex items-center gap-2">
+                  <span className="w-2 h-2 rounded-full bg-[#22c55e]" />
+                  <span>Pro Unlocked (Lifetime / Community Edition)</span>
                 </div>
-                <p className="text-xs text-[#888888]">
-                  Enter your Vayom Pro license key to connect your NAS, S3 buckets, and Nextcloud:
-                </p>
-                <div className="flex gap-2">
-                  <input
-                    type="text"
-                    value={licenseKeyInput}
-                    onChange={(e) => setLicenseKeyInput(e.target.value)}
-                    placeholder="VAYOM-PRO.eyJ..."
-                    className="flex-1 bg-[#0a0a0a] border border-[#333333] px-2.5 py-1 text-xs font-mono text-[#ffffff] focus:outline-none focus:border-[#ffffff]"
-                  />
-                  <Button
-                    variant="primary"
-                    size="sm"
-                    onClick={handleActivateLicense}
-                    disabled={isActivatingLicense || !licenseKeyInput.trim()}
-                  >
-                    {isActivatingLicense ? 'Activating...' : 'Activate'}
-                  </Button>
-                </div>
-                {licenseStatusMsg && (
-                  <div className={`text-[11px] font-mono ${licenseStatusMsg.startsWith('✓') ? 'text-[#22c55e]' : 'text-[#ef4444]'}`}>
-                    {licenseStatusMsg}
-                  </div>
-                )}
+                <Badge variant="success">Active</Badge>
               </div>
-            )}
+              <p className="text-xs text-[#888888]">
+                All multi-storage engines (NAS, S3, Nextcloud), zero-knowledge encryption, and automated pipelines are permanently unlocked with zero paywalls.
+              </p>
+            </div>
 
             {/* Storage Provider Cards */}
             <div className="space-y-3">
@@ -1108,6 +1251,124 @@ export const SettingsView: React.FC = () => {
                     </div>
                   )}
                 </div>
+
+                {/* Vault Recovery Key (Zero-Knowledge Client-Side Encryption) */}
+                <div className="pt-3 border-t border-[#1a1a1a] space-y-2.5">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <Key size={14} className="text-[#f59e0b]" />
+                      <span className="text-xs font-semibold text-[#f0f0f0]">
+                        Vault Recovery Key
+                      </span>
+                    </div>
+                    <Badge variant={vaultStatus?.unlocked ? 'success' : 'default'}>
+                      {vaultStatus?.unlocked ? 'Vault Unlocked' : 'Vault Locked'}
+                    </Badge>
+                  </div>
+
+                  <p className="text-xs text-[#888888] leading-relaxed">
+                    Your 64-hex Vault Recovery Key is the <strong className="text-[#cccccc]">only way</strong> to decrypt and recover your files if you forget your master passphrase or reconstruct your vault on a new workstation. Store it in a safe offline location.
+                  </p>
+
+                  {vaultStatus?.unlocked ? (
+                    <div className="p-3 bg-[#0d0d0d] border border-[#222222] space-y-2.5">
+                      <div className="flex items-center justify-between text-[11px] text-[#888888]">
+                        <span className="font-mono text-[#a3a3a3]">Master Cryptographic Key (256-bit AES)</span>
+                        <button
+                          type="button"
+                          onClick={() => setIsRevealingKey(!isRevealingKey)}
+                          className="flex items-center gap-1 text-[#aaaaaa] hover:text-[#ffffff] transition-colors font-sans text-xs"
+                        >
+                          {isRevealingKey ? (
+                            <>
+                              <EyeOff size={12} /> Hide Key
+                            </>
+                          ) : (
+                            <>
+                              <Eye size={12} /> Reveal Key
+                            </>
+                          )}
+                        </button>
+                      </div>
+
+                      <div className="p-2.5 bg-[#050505] border border-[#1f1f1f] font-mono text-xs break-all select-all text-[#e5e5e5] tracking-wider">
+                        {isRevealingKey
+                          ? (vaultStatus.recovery_key || 'Vault unlocked (active in session)')
+                          : '••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••'}
+                      </div>
+
+                      <div className="flex flex-wrap items-center gap-2 pt-1">
+                        <Button
+                          variant="secondary"
+                          size="sm"
+                          onClick={handleCopyRecoveryKey}
+                          icon={recoveryKeyCopied ? <Check size={12} className="text-[#22c55e]" /> : <Copy size={12} />}
+                          disabled={!vaultStatus.recovery_key}
+                        >
+                          {recoveryKeyCopied ? 'Copied to Clipboard!' : 'Copy Recovery Key'}
+                        </Button>
+
+                        <Button
+                          variant="secondary"
+                          size="sm"
+                          onClick={handleExportRecoveryKey}
+                          icon={<FileText size={12} />}
+                          disabled={!vaultStatus.recovery_key}
+                        >
+                          Export Key (.txt)
+                        </Button>
+
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={loadVaultStatus}
+                          disabled={isLoadingVaultStatus}
+                          icon={<RefreshCw size={11} className={isLoadingVaultStatus ? 'animate-spin' : ''} />}
+                        >
+                          Refresh
+                        </Button>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="p-3.5 bg-[#121212] border border-[#2a2a2a] space-y-3">
+                      <div className="flex items-start gap-2 text-xs text-[#a3a3a3]">
+                        <Lock size={14} className="text-[#f59e0b] shrink-0 mt-0.5" />
+                        <div>
+                          <span className="font-semibold text-[#f0f0f0] block">Vault is currently locked or uninitialized on this workstation.</span>
+                          <span>Enter your master passphrase or existing 64-hex recovery key to unlock your vault and view or export your recovery key.</span>
+                        </div>
+                      </div>
+
+                      <div className="flex flex-col sm:flex-row gap-2">
+                        <input
+                          type="password"
+                          placeholder="Master Passphrase or 64-hex Recovery Key"
+                          value={recoveryPassphraseInput}
+                          onChange={(e) => setRecoveryPassphraseInput(e.target.value)}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter') handleUnlockVault()
+                          }}
+                          className="flex-1 px-3 py-1.5 bg-[#0a0a0a] border border-[#2e2e2e] text-[#ffffff] text-xs font-mono focus:outline-none focus:border-[#ffffff]"
+                        />
+                        <Button
+                          variant="primary"
+                          size="sm"
+                          onClick={handleUnlockVault}
+                          disabled={isUnlockingVault || !recoveryPassphraseInput.trim()}
+                          icon={<Unlock size={12} />}
+                        >
+                          {isUnlockingVault ? 'Unlocking...' : 'Unlock & View Key'}
+                        </Button>
+                      </div>
+
+                      {vaultStatusMsg && (
+                        <div className={`text-xs font-mono ${vaultStatusMsg.startsWith('✓') ? 'text-[#22c55e]' : 'text-[#ef4444]'}`}>
+                          {vaultStatusMsg}
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
               </div>
             )}
           </div>
@@ -1246,6 +1507,51 @@ export const SettingsView: React.FC = () => {
                         <CheckCircle size={13} className="text-[#22c55e]" />
                         <span>Ephemeral Disk Auto-Sync: Active</span>
                       </div>
+                    </div>
+                  </div>
+
+                  {/* Version & Updates Status Card */}
+                  <div className="pt-2 border-t border-[#1a1a1a] space-y-2.5">
+                    <div className="flex items-center justify-between">
+                      <span className="text-xs font-semibold text-[#f0f0f0]">Version & Updates</span>
+                      <span className="text-[10px] px-1.5 py-0.5 bg-[#141414] border border-[#262626] text-[#a3a3a3] font-mono">
+                        v1.0.0
+                      </span>
+                    </div>
+
+                    <div className="p-3.5 bg-[#111111] border border-[#1f1f1f] space-y-2.5">
+                      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                        <div className="space-y-1">
+                          <div className="flex items-center gap-2">
+                            <span className="text-xs text-[#888888]">Current Version:</span>
+                            <span className="text-xs font-mono font-semibold text-[#ffffff]">v1.0.0</span>
+                            <span className="text-[10px] px-1.5 py-0.5 bg-emerald-950/80 text-emerald-400 border border-emerald-500/40 font-mono">
+                              Up to date
+                            </span>
+                          </div>
+                          <p className="text-xs text-[#888888] italic">
+                            All updates to Vayom Drive are strictly optional. Your current version will continue to function indefinitely.
+                          </p>
+                        </div>
+
+                        <div className="flex items-center gap-2 shrink-0">
+                          <Button
+                            variant="secondary"
+                            size="sm"
+                            onClick={handleCheckUpdates}
+                            disabled={isCheckingUpdates}
+                            icon={<RefreshCw size={11} className={isCheckingUpdates ? 'animate-spin' : ''} />}
+                          >
+                            {isCheckingUpdates ? 'Checking...' : 'Check for Updates'}
+                          </Button>
+                        </div>
+                      </div>
+
+                      {updateStatusMsg && (
+                        <div className="text-[11px] font-mono text-[#38bdf8] bg-[#0c1e28]/50 border border-[#0284c7]/30 p-2">
+                          {updateStatusMsg}
+                        </div>
+                      )}
                     </div>
                   </div>
                 </div>

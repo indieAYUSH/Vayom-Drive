@@ -469,7 +469,8 @@ async def submit_qr_2fa(body: QR2FARequest):
         })
         return {"success": True}
     except Exception as e:
-        raise HTTPException(status_code=400, detail=f"2FA verification failed: {e}")
+        logger.error(f"2FA verification failed: {e}")
+        raise HTTPException(status_code=400, detail="2FA verification failed: Invalid two-factor password.")
 
 
 @router.post("/qr/finalize")
@@ -520,7 +521,7 @@ async def finalize_qr_login(body: QRFinalizeRequest):
                     logger.info(f"Auto-created private vault channel: {channel_id}")
                 except Exception as e:
                     logger.error(f"Failed to auto-create channel: {e}")
-                    raise HTTPException(status_code=500, detail=f"Could not auto-create channel: {e}")
+                    raise HTTPException(status_code=500, detail="Could not auto-create storage channel. Please verify channel permissions.")
 
         # Non-mutating privacy verification per update.md Invariant 1
         try:
@@ -657,6 +658,7 @@ async def login_with_bot(body: BotLoginRequest):
             await storage_client.reconnect()
         except Exception as reconnect_err:
             logger.warning(f"Could not restore the previous session after a failed bot login: {reconnect_err}")
+        logger.error(f"Bot login failed: {e}")
         raise HTTPException(status_code=400, detail=f"Bot login failed: {e}")
 
     config_payload = {
@@ -723,6 +725,7 @@ async def login_with_developer(body: DeveloperLoginRequest):
             await storage_client.reconnect()
         except Exception as reconnect_err:
             logger.warning(f"Could not restore the previous session after a failed developer login: {reconnect_err}")
+        logger.error(f"Developer login failed: {e}")
         raise HTTPException(status_code=400, detail=f"Developer login failed: {e}")
 
     config_payload = {

@@ -117,28 +117,18 @@ export const UploadTray: React.FC = () => {
             <div className="flex items-center gap-1 font-bold">
               {(['telegram', 'nas', 's3', 'nextcloud'] as const).map((b) => {
                 const isSelected = selectedBackend === b
-                const isLocked = b !== 'telegram' && !license?.is_pro
                 return (
                   <button
                     key={b}
-                    onClick={() => {
-                      if (isLocked) {
-                        setActiveTab('settings')
-                      } else {
-                        setSelectedBackend(b)
-                      }
-                    }}
+                    onClick={() => setSelectedBackend(b)}
                     className={`px-1.5 py-0.5 text-[10px] tracking-wider border ${
                       isSelected
                         ? 'bg-[#ffffff] text-[#000000] border-[#ffffff]'
-                        : isLocked
-                        ? 'bg-[#141414] text-[#555555] border-[#252525]'
                         : 'bg-[#141414] text-[#888888] border-[#252525] hover:text-[#ffffff]'
                     }`}
-                    title={isLocked ? `${b.toUpperCase()} requires Pro license` : `Destination: ${b.toUpperCase()}`}
+                    title={`Destination: ${b.toUpperCase()}`}
                   >
                     <span>{b === 'telegram' ? 'TG' : b.toUpperCase()}</span>
-                    {isLocked && <span className="ml-0.5 text-[8px]">🔒</span>}
                   </button>
                 )
               })}

@@ -146,24 +146,15 @@ export const Header: React.FC = () => {
         <div className="hidden md:flex items-center border border-[#282828] bg-[#111111] font-mono text-[11px] p-0.5">
           {(['telegram', 'nas', 's3', 'nextcloud'] as const).map((b) => {
             const isSelected = selectedBackend === b
-            const isProBackend = b !== 'telegram'
-            const isLocked = isProBackend && !license?.is_pro
+            const isLocked = false
             const label = b === 'telegram' ? 'Telegram' : b === 'nextcloud' ? 'Nextcloud' : b.toUpperCase()
             return (
               <button
                 key={b}
-                onClick={() => {
-                  if (isLocked) {
-                    setActiveTab('settings')
-                  } else {
-                    setSelectedBackend(b)
-                  }
-                }}
+                onClick={() => setSelectedBackend(b)}
                 className={`px-2 py-0.5 text-[10px] font-bold tracking-wider transition-colors flex items-center gap-1 ${
                   isSelected
                     ? 'bg-[#ffffff] text-[#000000]'
-                    : isLocked
-                    ? 'text-[#555555] hover:text-[#888888]'
                     : 'text-[#888888] hover:text-[#ffffff]'
                 }`}
                 title={
@@ -177,7 +168,6 @@ export const Header: React.FC = () => {
                 }
               >
                 <span>{label}</span>
-                {isLocked && <span className="text-[9px] text-[#f59e0b]">🔒</span>}
               </button>
             )
           })}

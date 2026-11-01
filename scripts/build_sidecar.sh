@@ -146,8 +146,8 @@ echo "Running PyInstaller..."
     --hidden-import "cryptography" \
     --hidden-import "cryptg" \
     --hidden-import "PIL" \
-    --hidden-import "fpdf" \
     --hidden-import "dotenv" \
+    --hidden-import "watchfiles" \
     --copy-metadata "uvicorn" \
     --copy-metadata "fastapi" \
     "$ENTRYPOINT"

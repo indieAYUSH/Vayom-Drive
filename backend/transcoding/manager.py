@@ -1,8 +1,11 @@
 import asyncio
+import inspect
 import logging
 import os
 import shutil
+import time
 import uuid
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Optional, Set, Dict, Any
 
@@ -15,12 +18,34 @@ from .encoder import (
     encode_stream_v1,
     is_ffmpeg_available,
     probe_stream_metadata,
+    cancel_active_ffmpeg_processes,
+    ACTIVE_FFMPEG_PROCESSES,
     TranscodeError,
     PROXY_PROFILE,
     PROXY_MAX_HEIGHT,
 )
 
 logger = logging.getLogger("vayom.transcoding.manager")
+
+
+@asynccontextmanager
+async def _safe_db_context():
+    """
+    Safely invokes get_db(), supporting standard async context managers
+    as well as coroutines (e.g. async def broken_get_db() or coroutine mocks),
+    ensuring coroutines are always awaited to prevent 'coroutine was never awaited' warnings.
+    """
+    res = get_db()
+    if asyncio.iscoroutine(res):
+        res = await res
+    elif inspect.isasyncgen(res):
+        res = asynccontextmanager(lambda: res)()
+
+    if hasattr(res, "__aenter__"):
+        async with res as db:
+            yield db
+    else:
+        yield res
 
 
 class TranscodingManager:
@@ -38,8 +63,13 @@ class TranscodingManager:
         self._encode_semaphore = asyncio.Semaphore(1)
         self._active_jobs: Set[str] = set()
         self._download_jobs: Set[str] = set()
+        self._download_tasks: Set[asyncio.Task] = set()
+        self._active_file_paths: Set[Path] = set()
+        self._active_processes: Set[Any] = set()
+        self._current_process: Optional[Any] = None
         self._queue: asyncio.Queue[Dict[str, Any]] = asyncio.Queue()
         self._worker_task: Optional[asyncio.Task] = None
+        self._cleanup_task: Optional[asyncio.Task] = None
         self._running: bool = False
         self._worker_restarts: int = 0
         self._max_worker_restarts: int = 5
@@ -50,9 +80,146 @@ class TranscodingManager:
             return
         self._running = True
         await self.recover_stale_tasks()
+        try:
+            await self.cleanup_stale_temp_files()
+        except Exception as e:
+            logger.error(f"Error during startup cleanup of stale proxy files: {e}")
         self._worker_restarts = 0
         self._spawn_worker()
+        self._cleanup_task = asyncio.create_task(self._periodic_cleanup_loop())
         logger.info("TranscodingManager background worker started.")
+
+    async def _periodic_cleanup_loop(self):
+        """Periodically sweeps orphaned proxy temp files while manager is running."""
+        while self._running:
+            try:
+                await asyncio.sleep(3600)
+                await self.cleanup_stale_temp_files()
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.warning(f"Error in periodic proxy temp cleanup: {e}")
+
+    async def cleanup_stale_temp_files(self, max_age_seconds: float = 3600.0) -> int:
+        """
+        Sweeps orphaned .tmp and .tmp.mp4 files from settings.DATA_DIR / 'proxies_tmp'
+        that are older than max_age_seconds (default 1 hour), without deleting actively
+        processing files.
+        """
+        return await asyncio.to_thread(self._sync_cleanup_stale_temp_files, max_age_seconds)
+
+    # Aliases for compatibility
+    sweep_stale_temp_files = cleanup_stale_temp_files
+    cleanup_stale_proxies = cleanup_stale_temp_files
+
+    def _sync_cleanup_stale_temp_files(self, max_age_seconds: float = 3600.0) -> int:
+        temp_dir = settings.DATA_DIR / "proxies_tmp"
+        if not temp_dir.exists():
+            return 0
+
+        active_ids = set(self._active_jobs) | set(self._download_jobs)
+        active_paths = {p.resolve() for p in self._active_file_paths}
+
+        now = time.time()
+        removed_count = 0
+
+        try:
+            for item in list(temp_dir.rglob("*")):
+                try:
+                    if not item.is_file():
+                        continue
+
+                    name = item.name
+                    # Sweeps orphaned temporary proxy files (.tmp, .tmp.mp4, preview_*.mp4, .mp4)
+                    if not (
+                        name.endswith(".tmp")
+                        or name.endswith(".tmp.mp4")
+                        or name.endswith(".mp4")
+                        or name.startswith("preview_")
+                        or ".tmp." in name
+                    ):
+                        continue
+
+                    try:
+                        stat = item.stat()
+                        age = now - stat.st_mtime
+                        if age < max_age_seconds:
+                            continue
+                    except OSError:
+                        continue
+
+                    try:
+                        resolved = item.resolve()
+                    except OSError:
+                        resolved = item
+
+                    if resolved in active_paths:
+                        continue
+
+                    is_active = False
+                    for active_id in active_ids:
+                        if active_id and (active_id in name or active_id in str(item)):
+                            is_active = True
+                            break
+                    if is_active:
+                        continue
+
+                    try:
+                        item.unlink()
+                        removed_count += 1
+                        logger.info(f"Cleaned up stale proxy temporary file: {item} (age: {age:.1f}s)")
+                    except OSError as e:
+                        logger.warning(f"Could not remove stale proxy file {item}: {e}")
+
+                except Exception as file_err:
+                    logger.debug(f"Error inspecting proxy temp file {item}: {file_err}")
+
+            # Prune empty subdirectories in proxies_tmp
+            for dirpath, dirnames, filenames in os.walk(temp_dir, topdown=False):
+                current_dir = Path(dirpath)
+                if current_dir != temp_dir:
+                    try:
+                        if current_dir.is_dir() and not any(current_dir.iterdir()):
+                            current_dir.rmdir()
+                    except OSError:
+                        pass
+
+        except Exception as e:
+            logger.error(f"Error sweeping stale proxy temporary files: {e}")
+
+        return removed_count
+
+    async def _cancel_active_subprocesses(self):
+        """Terminates and awaits all active transcoding subprocesses so no zombies linger."""
+        procs_to_terminate = set(self._active_processes)
+        if self._current_process:
+            procs_to_terminate.add(self._current_process)
+
+        for proc in procs_to_terminate:
+            try:
+                if getattr(proc, "returncode", None) is None:
+                    try:
+                        proc.kill()
+                    except ProcessLookupError:
+                        pass
+                    wait_fn = getattr(proc, "wait", None)
+                    if callable(wait_fn):
+                        res = wait_fn()
+                        if asyncio.iscoroutine(res):
+                            try:
+                                await asyncio.wait_for(res, timeout=5.0)
+                            except (asyncio.TimeoutError, Exception):
+                                pass
+            except Exception as err:
+                logger.debug(f"Error terminating subprocess: {err}")
+
+        self._active_processes.clear()
+        self._current_process = None
+
+        try:
+            await cancel_active_ffmpeg_processes()
+        except Exception as err:
+            logger.debug(f"Error calling cancel_active_ffmpeg_processes: {err}")
 
     def _spawn_worker(self):
         """Creates the worker task and attaches the H-3 supervisor callback."""
@@ -94,8 +261,27 @@ class TranscodingManager:
             self._running = False
 
     async def stop(self):
-        """Stops background proxy queue worker."""
+        """Stops background proxy queue worker and cancels active transcoding subprocesses cleanly."""
         self._running = False
+        if self._cleanup_task:
+            self._cleanup_task.cancel()
+            try:
+                await self._cleanup_task
+            except asyncio.CancelledError:
+                pass
+            self._cleanup_task = None
+
+        # Cancel any active download tasks
+        for t in list(self._download_tasks):
+            if not t.done():
+                t.cancel()
+                try:
+                    await t
+                except (asyncio.CancelledError, Exception):
+                    pass
+        self._download_tasks.clear()
+
+        # Cancel worker task
         if self._worker_task:
             self._worker_task.cancel()
             try:
@@ -103,6 +289,13 @@ class TranscodingManager:
             except asyncio.CancelledError:
                 pass
             self._worker_task = None
+
+        # Terminate and reap any active ffmpeg subprocesses so no zombies linger
+        await self._cancel_active_subprocesses()
+
+        self._active_jobs.clear()
+        self._download_jobs.clear()
+        self._active_file_paths.clear()
         logger.info("TranscodingManager background worker stopped.")
 
     async def recover_stale_tasks(self):
@@ -112,7 +305,7 @@ class TranscodingManager:
         proxy_status and marks them 'failed' so the UI does not hang forever.
         """
         try:
-            async with get_db() as db:
+            async with _safe_db_context() as db:
                 # H-2: 'queued' was omitted, so a crash between enqueue_proxy()
                 # and the worker picking the job up left the row spinning in the
                 # UI forever. At startup the in-memory queue is always empty, so
@@ -140,14 +333,14 @@ class TranscodingManager:
         """
         if not await is_ffmpeg_available():
             logger.info("ffmpeg is not available. Skipping proxy generation.")
-            async with get_db() as db:
+            async with _safe_db_context() as db:
                 await db.execute("UPDATE files SET proxy_status = 'unavailable_no_source' WHERE id = ?", (original_id,))
                 await db.commit()
             return
 
         if not local_source_path.exists():
             logger.warning(f"Cannot generate proxy for {original_id}: local source {local_source_path} does not exist.")
-            async with get_db() as db:
+            async with _safe_db_context() as db:
                 await db.execute("UPDATE files SET proxy_status = 'unavailable_no_source' WHERE id = ?", (original_id,))
                 await db.commit()
             return
@@ -157,9 +350,10 @@ class TranscodingManager:
 
         # I-41: reserve the id synchronously so concurrent enqueues can't double-queue it
         self._active_jobs.add(original_id)
+        self._active_file_paths.add(local_source_path.resolve())
 
         try:
-            async with get_db() as db:
+            async with _safe_db_context() as db:
                 await db.execute("UPDATE files SET proxy_status = 'queued' WHERE id = ?", (original_id,))
                 await db.commit()
 
@@ -171,8 +365,9 @@ class TranscodingManager:
             # R-05: if the DB write or queue insertion fails, the reservation
             # must be released or this file can never be retried until restart.
             self._active_jobs.discard(original_id)
+            self._active_file_paths.discard(local_source_path.resolve())
             try:
-                async with get_db() as db:
+                async with _safe_db_context() as db:
                     await db.execute(
                         "UPDATE files SET proxy_status = 'failed' WHERE id = ? AND proxy_status = 'queued'",
                         (original_id,),
@@ -193,16 +388,18 @@ class TranscodingManager:
             return
 
         self._download_jobs.add(original_id)
-        async with get_db() as db:
+        async with _safe_db_context() as db:
             await db.execute("UPDATE files SET proxy_status = 'queued' WHERE id = ?", (original_id,))
             await db.commit()
 
-        asyncio.create_task(self._download_then_enqueue(original_id, source_file_id))
+        task = asyncio.create_task(self._download_then_enqueue(original_id, source_file_id))
+        self._download_tasks.add(task)
+        task.add_done_callback(self._download_tasks.discard)
 
     async def _download_then_enqueue(self, original_id: str, source_file_id: Optional[str]):
         temp_source: Optional[Path] = None
         try:
-            async with get_db() as db:
+            async with _safe_db_context() as db:
                 # Re-encoding the existing 1080p proxy is much faster than
                 # downloading the original again, and visually lossless at 480p.
                 source_id = source_file_id
@@ -252,6 +449,7 @@ class TranscodingManager:
             temp_dir = settings.DATA_DIR / "proxies_tmp"
             temp_dir.mkdir(parents=True, exist_ok=True)
             temp_source = temp_dir / f"source_{original_id}.tmp"
+            self._active_file_paths.add(temp_source.resolve())
             try:
                 if temp_source.exists():
                     temp_source.unlink()
@@ -288,7 +486,7 @@ class TranscodingManager:
         except Exception as e:
             logger.error(f"Could not prepare remote 480p proxy for {original_id}: {e}", exc_info=True)
             try:
-                async with get_db() as db:
+                async with _safe_db_context() as db:
                     await db.execute("UPDATE files SET proxy_status = 'failed' WHERE id = ?", (original_id,))
                     await db.commit()
             except Exception:
@@ -300,6 +498,8 @@ class TranscodingManager:
                     pass
         finally:
             self._download_jobs.discard(original_id)
+            if temp_source:
+                self._active_file_paths.discard(temp_source.resolve())
 
     async def _process_queue_loop(self):
         """
@@ -320,10 +520,12 @@ class TranscodingManager:
                 continue
 
             orig_id = None
+            source_path = None
             try:
                 orig_id = job["original_id"]
                 source_path = job["source_path"]
                 self._active_jobs.add(orig_id)
+                self._active_file_paths.add(source_path.resolve())
                 await self._process_job(orig_id, source_path)
                 # A completed cycle proves the worker is healthy — reset the crash budget.
                 self._worker_restarts = 0
@@ -333,7 +535,7 @@ class TranscodingManager:
                 logger.error(f"Failed generating proxy for {orig_id}: {e}", exc_info=True)
                 if orig_id:
                     try:
-                        async with get_db() as db:
+                        async with _safe_db_context() as db:
                             await db.execute("UPDATE files SET proxy_status = 'failed' WHERE id = ?", (orig_id,))
                             await db.commit()
                     except Exception as db_err:
@@ -342,6 +544,8 @@ class TranscodingManager:
             finally:
                 if orig_id:
                     self._active_jobs.discard(orig_id)
+                if source_path:
+                    self._active_file_paths.discard(source_path.resolve())
                 try:
                     self._queue.task_done()
                 except Exception:
@@ -350,7 +554,7 @@ class TranscodingManager:
     async def _process_job(self, orig_id: str, source_path: Path):
         """Executes encode and upload steps for a single file."""
         if not source_path.exists():
-            async with get_db() as db:
+            async with _safe_db_context() as db:
                 await db.execute("UPDATE files SET proxy_status = 'unavailable_no_source' WHERE id = ?", (orig_id,))
                 await db.commit()
             return
@@ -359,13 +563,13 @@ class TranscodingManager:
         source_meta = await probe_stream_metadata(source_path)
         if source_meta.get("has_audio") and not source_meta.get("has_video"):
             logger.info(f"Skipping proxy for {orig_id}: source file has audio but no video stream (audio-only).")
-            async with get_db() as db:
+            async with _safe_db_context() as db:
                 await db.execute("UPDATE files SET proxy_status = 'skipped_small' WHERE id = ?", (orig_id,))
                 await db.commit()
             return
 
         # 2. Check catalog for existing ready proxy of identical original SHA-256
-        async with get_db() as db:
+        async with _safe_db_context() as db:
             cur = await db.execute("SELECT sha256 FROM files WHERE id = ?", (orig_id,))
             orig_row = await cur.fetchone()
             orig_sha = orig_row[0] if orig_row else None
@@ -430,13 +634,13 @@ class TranscodingManager:
         disk_stats = shutil.disk_usage(settings.DATA_DIR)
         if disk_stats.free < 1024 * 1024 * 1024:
             logger.warning(f"Insufficient disk space (< 1 GB) for proxy generation of {orig_id}.")
-            async with get_db() as db:
+            async with _safe_db_context() as db:
                 await db.execute("UPDATE files SET proxy_status = 'failed' WHERE id = ?", (orig_id,))
                 await db.commit()
             return
 
         # Update parent status to 'encoding'
-        async with get_db() as db:
+        async with _safe_db_context() as db:
             await db.execute("UPDATE files SET proxy_status = 'encoding' WHERE id = ?", (orig_id,))
             await db.commit()
 
@@ -444,6 +648,8 @@ class TranscodingManager:
         temp_dir = settings.DATA_DIR / "proxies_tmp" / proxy_id
         temp_dir.mkdir(parents=True, exist_ok=True)
         proxy_file = temp_dir / f"preview_{PROXY_PROFILE}.mp4"
+        self._active_file_paths.add(proxy_file.resolve())
+        self._active_file_paths.add(temp_dir.resolve())
 
         try:
             # 1. Encode with CPU/GPU bounded concurrency
@@ -464,7 +670,7 @@ class TranscodingManager:
                     )
 
             # Update parent status to 'uploading'
-            async with get_db() as db:
+            async with _safe_db_context() as db:
                 await db.execute("UPDATE files SET proxy_status = 'uploading' WHERE id = ?", (orig_id,))
                 await db.commit()
 
@@ -514,7 +720,7 @@ class TranscodingManager:
                     })
 
             # 4. Commit child proxy and parts to SQLite
-            async with get_db() as db:
+            async with _safe_db_context() as db:
                 await db.execute(
                     """
                     INSERT INTO files (
@@ -561,11 +767,16 @@ class TranscodingManager:
 
         except Exception as e:
             logger.error(f"Error generating proxy for {orig_id}: {e}")
-            async with get_db() as db:
-                await db.execute("UPDATE files SET proxy_status = 'failed' WHERE id = ?", (orig_id,))
-                await db.commit()
+            try:
+                async with _safe_db_context() as db:
+                    await db.execute("UPDATE files SET proxy_status = 'failed' WHERE id = ?", (orig_id,))
+                    await db.commit()
+            except Exception:
+                pass
             raise
         finally:
+            self._active_file_paths.discard(proxy_file.resolve())
+            self._active_file_paths.discard(temp_dir.resolve())
             # Clean up local temporary proxy files
             try:
                 if temp_dir.exists():
@@ -576,5 +787,6 @@ class TranscodingManager:
                 pass
 
 
-# Global singleton manager
+# Global singleton manager and alias
+ProxyManager = TranscodingManager
 transcoding_manager = TranscodingManager()

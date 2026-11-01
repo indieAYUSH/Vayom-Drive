@@ -4,7 +4,7 @@ import logging
 import os
 import shutil
 from pathlib import Path
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Set
 
 logger = logging.getLogger("vayom.transcoding.encoder")
 
@@ -16,15 +16,48 @@ PROXY_MAX_FPS = 30.0
 PROXY_MAXRATE = "1200k"
 PROXY_BUFSIZE = "2400k"
 
+ACTIVE_FFMPEG_PROCESSES: Set[Any] = set()
+
+
+async def cancel_active_ffmpeg_processes():
+    """Cancels and awaits all active ffmpeg subprocesses so no zombies linger."""
+    for proc in list(ACTIVE_FFMPEG_PROCESSES):
+        try:
+            if getattr(proc, "returncode", None) is None:
+                try:
+                    proc.kill()
+                except ProcessLookupError:
+                    pass
+                wait_fn = getattr(proc, "wait", None)
+                if callable(wait_fn):
+                    res = wait_fn()
+                    if asyncio.iscoroutine(res):
+                        try:
+                            await asyncio.wait_for(res, timeout=5.0)
+                        except Exception:
+                            pass
+        except Exception:
+            pass
+    ACTIVE_FFMPEG_PROCESSES.clear()
+
 
 async def _communicate_with_timeout(proc, timeout: float):
-    """Waits for a subprocess, killing it on timeout so it cannot leak."""
+    """Waits for a subprocess, killing it on timeout or cancellation so it cannot leak."""
+    ACTIVE_FFMPEG_PROCESSES.add(proc)
     try:
         return await asyncio.wait_for(proc.communicate(), timeout=timeout)
-    except asyncio.TimeoutError:
-        proc.kill()
-        await proc.wait()
+    except (asyncio.TimeoutError, asyncio.CancelledError):
+        try:
+            proc.kill()
+        except ProcessLookupError:
+            pass
+        try:
+            await proc.wait()
+        except Exception:
+            pass
         raise
+    finally:
+        ACTIVE_FFMPEG_PROCESSES.discard(proc)
 
 CANDIDATE_ENCODERS = [
     "h264_nvenc",
@@ -81,12 +114,23 @@ async def probe_best_encoder() -> Optional[str]:
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE
                 )
+                ACTIVE_FFMPEG_PROCESSES.add(proc)
                 try:
                     _, stderr = await asyncio.wait_for(proc.communicate(), timeout=3.0)
-                except asyncio.TimeoutError:
-                    proc.kill()
-                    await proc.wait()
+                except (asyncio.TimeoutError, asyncio.CancelledError) as exc:
+                    try:
+                        proc.kill()
+                    except ProcessLookupError:
+                        pass
+                    try:
+                        await proc.wait()
+                    except Exception:
+                        pass
+                    if isinstance(exc, asyncio.CancelledError):
+                        raise
                     continue
+                finally:
+                    ACTIVE_FFMPEG_PROCESSES.discard(proc)
 
                 if proc.returncode == 0:
                     logger.info(f"Detected working H.264 encoder: {candidate}")
@@ -320,18 +364,27 @@ async def encode_stream_v2_480p(source_path: Path, target_path: Path) -> Dict[st
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE
     )
+    ACTIVE_FFMPEG_PROCESSES.add(proc)
 
     try:
         stdout, stderr = await proc.communicate()
     except asyncio.CancelledError:
         try:
             proc.kill()
+        except ProcessLookupError:
+            pass
+        try:
             await proc.wait()
         except Exception:
             pass
         if target_path.exists():
-            target_path.unlink()
+            try:
+                target_path.unlink()
+            except Exception:
+                pass
         raise
+    finally:
+        ACTIVE_FFMPEG_PROCESSES.discard(proc)
 
     if proc.returncode != 0:
         err_msg = stderr.decode("utf-8", errors="ignore") if stderr else "Unknown ffmpeg error"

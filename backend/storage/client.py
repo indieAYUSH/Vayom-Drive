@@ -57,9 +57,12 @@ def format_part_caption(
 
     if part_index == 0:
         safe_name = filename or "file"
-        if len(safe_name.encode("utf-8")) > 200:
-            ext = os.path.splitext(safe_name)[1]
-            safe_name = safe_name[:180] + ext
+        encoded_name = safe_name.encode("utf-8")
+        if len(encoded_name) > 150:
+            ext_bytes = os.path.splitext(safe_name)[1].encode("utf-8")[:30]
+            max_stem = max(10, 150 - len(ext_bytes))
+            stem_bytes = os.path.splitext(safe_name)[0].encode("utf-8")[:max_stem]
+            safe_name = stem_bytes.decode("utf-8", errors="ignore") + ext_bytes.decode("utf-8", errors="ignore")
         payload["name"] = safe_name
         payload["cat"] = category or "other"
         if nonce:
@@ -67,7 +70,7 @@ def format_part_caption(
         if encryption and encryption != "none":
             payload["enc"] = encryption
 
-        caption = f"VAYOM:v1:{json.dumps(payload, separators=(',', ':'))}"
+        caption = f"VAYOM:v1:{json.dumps(payload, ensure_ascii=False, separators=(',', ':'))}"
         caption_bytes = caption.encode("utf-8")
         assert len(caption_bytes) <= 950, f"Part 0 caption exceeded 950 bytes ({len(caption_bytes)} bytes)"
         return caption
@@ -375,13 +378,37 @@ class TelegramStorageClient:
 
                     # 512 KB chunk part size per update.md anti-ban specification
                     is_slice = hasattr(file_path, "read")
+                    f_size = getattr(file_path, "slice_size", getattr(file_path, "size", None))
+                    if f_size is None and not is_slice:
+                        try:
+                            f_size = os.path.getsize(file_path)
+                        except Exception:
+                            f_size = None
+
+                    # Zero-Byte Invariant: Telegram MTProto rejects 0-byte document uploads with
+                    # FilePartsInvalidError because chunks count cannot be 0.
+                    # Send a text message with the caption envelope instead so metadata and channel
+                    # rebuild remain 100% intact with zero MTProto error.
+                    if f_size == 0:
+                        message = await self.client.send_message(
+                            channel,
+                            message=caption
+                        )
+                        return {
+                            "message_id": message.id,
+                            "channel_id": str(channel),
+                            "file_id": None,
+                            "access_hash": None,
+                            "mock": False
+                        }
+
                     if is_slice:
                         if hasattr(file_path, "seek"):
                             file_path.seek(0)
                         file_handle = await self.client.upload_file(
                             file_path,
                             part_size_kb=512,
-                            file_size=getattr(file_path, "slice_size", getattr(file_path, "size", None)),
+                            file_size=f_size,
                             file_name=getattr(file_path, "name", "part.bin"),
                             progress_callback=progress_callback
                         )

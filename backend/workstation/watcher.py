@@ -319,7 +319,7 @@ class LocalFolderWatcher:
 
         folder_path = Path(folder_info["path"]).expanduser().resolve()
         if not folder_path.is_dir():
-            raise ValueError(f"Watch folder path does not exist: {folder_path}")
+            raise ValueError("Watch folder directory does not exist or is inaccessible.")
         validate_watch_folder_path(str(folder_path))
 
         # I-18: recursive tree walk runs in a worker thread so scanning huge

@@ -13,7 +13,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
 from .config import settings
-from .db.connection import init_db, get_db
+from .db.connection import init_db, get_db, checkpoint_wal, close_db_connections
 from .storage.client import storage_client
 from .api.routes import router as api_router, perform_rebuild_index, load_persistent_storage_configs
 from .api.auth import router as auth_router
@@ -127,66 +127,86 @@ async def heartbeat_loop():
 async def lifespan(app: FastAPI):
     # Startup:
     parent_watchdog_task = asyncio.create_task(parent_watchdog_loop())
-    logger.info("Initializing Vayom Drive Node...")
-    await init_db()
-    logger.info("Database initialized with WAL mode.")
-
-    # Load persistent S3 & Nextcloud configs if present
-    await load_persistent_storage_configs()
-
-    # Load persistent vault key if stored
-    from .crypto import vault_manager
-    if vault_manager.load_stored_key():
-        logger.info("Vault encryption unlocked automatically from stored workstation key.")
-
-    # Connect to Telegram MTProto
-    try:
-        await storage_client.connect()
-    except Exception as e:
-        logger.warning(f"Could not connect to Telegram MTProto on startup: {e}")
-
-    # Auto-rebuild SQLite index if catalog is empty and channel is connected
-    try:
-        async with get_db() as db:
-            cur = await db.execute("SELECT COUNT(*) FROM files")
-            count = (await cur.fetchone())[0]
-
-        if count == 0 and storage_client._is_connected and settings.TELEGRAM_CHANNEL_ID:
-            logger.info("SQLite catalog index is empty. Automatically rebuilding index from Telegram storage channel...")
-            restored = await perform_rebuild_index(limit=5000)
-            logger.info(f"Auto-index rebuild complete: restored {restored} envelope(s) from Telegram channel.")
-    except Exception as e:
-        logger.warning(f"Auto-rebuild on startup encountered: {e}")
-
-    # Launch background keep-alive heartbeat task (F-7: only when a ping target is configured)
     heartbeat_task = None
-    if settings.PING_URL:
-        heartbeat_task = asyncio.create_task(heartbeat_loop())
-    else:
-        logger.info("Heartbeat loop disabled (PING_URL not set).")
-
-    # Start Workstation Folder Watcher & Transcoding Manager
-    await workstation_watcher.start()
-    await transcoding_manager.start()
-
-    yield
-
-    # Shutdown:
-    logger.info("Shutting down Vayom Drive...")
-    parent_watchdog_task.cancel()
     try:
-        await parent_watchdog_task
-    except asyncio.CancelledError:
-        pass
-    await transcoding_manager.stop()
-    await workstation_watcher.stop()
-    if heartbeat_task:
-        heartbeat_task.cancel()
+        logger.info("Initializing Vayom Drive Node...")
+        await init_db()
+        logger.info("Database initialized with WAL mode.")
+
+        # Load persistent S3 & Nextcloud configs if present
+        await load_persistent_storage_configs()
+
+        # Load persistent vault key if stored
+        from .crypto import vault_manager
+        if vault_manager.load_stored_key():
+            logger.info("Vault encryption unlocked automatically from stored workstation key.")
+
+        # Connect to Telegram MTProto
         try:
-            await heartbeat_task
+            await storage_client.connect()
+        except Exception as e:
+            logger.warning(f"Could not connect to Telegram MTProto on startup: {e}")
+
+        # Auto-rebuild SQLite index if catalog is empty and channel is connected
+        try:
+            async with get_db() as db:
+                cur = await db.execute("SELECT COUNT(*) FROM files")
+                count = (await cur.fetchone())[0]
+
+            if count == 0 and storage_client._is_connected and settings.TELEGRAM_CHANNEL_ID:
+                logger.info("SQLite catalog index is empty. Automatically rebuilding index from Telegram storage channel...")
+                restored = await perform_rebuild_index(limit=5000)
+                logger.info(f"Auto-index rebuild complete: restored {restored} envelope(s) from Telegram channel.")
+        except Exception as e:
+            logger.warning(f"Auto-rebuild on startup encountered: {e}")
+
+        # Launch background keep-alive heartbeat task (F-7: only when a ping target is configured)
+        if settings.PING_URL:
+            heartbeat_task = asyncio.create_task(heartbeat_loop())
+        else:
+            logger.info("Heartbeat loop disabled (PING_URL not set).")
+
+        # Start Workstation Folder Watcher & Transcoding Manager
+        await workstation_watcher.start()
+        await transcoding_manager.start()
+
+        yield
+    finally:
+        # Shutdown:
+        logger.info("Shutting down Vayom Drive...")
+        parent_watchdog_task.cancel()
+        try:
+            await parent_watchdog_task
         except asyncio.CancelledError:
             pass
-    await storage_client.disconnect()
+        try:
+            await transcoding_manager.stop()
+        except Exception as e:
+            logger.debug(f"Error stopping transcoding manager: {e}")
+        try:
+            await workstation_watcher.stop()
+        except Exception as e:
+            logger.debug(f"Error stopping workstation watcher: {e}")
+        if heartbeat_task:
+            heartbeat_task.cancel()
+            try:
+                await heartbeat_task
+            except asyncio.CancelledError:
+                pass
+        try:
+            await storage_client.disconnect()
+        except Exception as e:
+            logger.debug(f"Error disconnecting storage client: {e}")
+
+        # Graceful SQLite WAL checkpoint and connection cleanup
+        try:
+            await checkpoint_wal()
+        except Exception as e:
+            logger.warning(f"Error during shutdown WAL checkpoint: {e}")
+        try:
+            await close_db_connections()
+        except Exception as e:
+            logger.warning(f"Error during shutdown DB connection cleanup: {e}")
 
 app = FastAPI(
     title="Vayom Drive",

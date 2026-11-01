@@ -72,10 +72,14 @@ scripts/issue_license.py
 *.license
 *license_key*
 *subscription*
+tests/test_multi_storage_phase4_license.py
 
-# Local-only desktop shell, tests, and private outreach data (not published)
-src-tauri/
-tests/
+# Tauri desktop build artifacts & binaries
+src-tauri/target/
+src-tauri/binaries/
+src-tauri/gen/schemas/
+
+# Private creator outreach data (not published)
 docs/creator-outreach-list.csv
 docs/creator-outreach-list.pdf
 

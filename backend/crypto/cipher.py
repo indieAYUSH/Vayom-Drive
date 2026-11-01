@@ -413,7 +413,10 @@ class VaultKeyManager:
                 clean_rk = recovery_key.strip()
                 if len(clean_rk) != 64:
                     raise ValueError("Recovery key must be 64 hexadecimal characters (32 bytes).")
-                candidate_key = bytes.fromhex(clean_rk)
+                try:
+                    candidate_key = bytes.fromhex(clean_rk)
+                except ValueError:
+                    raise ValueError("Recovery key must be 64 hexadecimal characters (32 bytes).")
             elif passphrase:
                 candidate_key = derive_key_pbkdf2(passphrase, salt)
             else:
@@ -434,7 +437,10 @@ class VaultKeyManager:
                 clean_rk = recovery_key.strip()
                 if len(clean_rk) != 64:
                     raise ValueError("Key must be 64 hexadecimal characters.")
-                self._active_key = bytes.fromhex(clean_rk)
+                try:
+                    self._active_key = bytes.fromhex(clean_rk)
+                except ValueError:
+                    raise ValueError("Key must be 64 hexadecimal characters.")
             elif passphrase:
                 salt = getattr(settings, "VAULT_SALT", b"vayom_vault_salt_default")
                 self._active_key = derive_key_pbkdf2(passphrase, salt)
@@ -482,11 +488,13 @@ class VaultKeyManager:
 
     def get_status(self) -> Dict[str, Any]:
         from ..config import settings
+        active_key = self.get_key()
         return {
             "is_initialized": self._config_path().exists(),
             "unlocked": self.is_unlocked(),
             "remember_device": self._key_path().exists(),
-            "encryption_enabled": getattr(settings, "ENCRYPTION_ENABLED", False)
+            "encryption_enabled": getattr(settings, "ENCRYPTION_ENABLED", False),
+            "recovery_key": active_key.hex() if active_key else None
         }
 
 

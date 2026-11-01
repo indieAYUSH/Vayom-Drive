@@ -189,6 +189,19 @@ def encrypt_file_ctr_to_path(
     return digest.hexdigest()
 
 
+def sanitize_filename(raw: Optional[str], fallback: str = "upload.bin") -> str:
+    """
+    Sanitizes filenames against path traversal (../ or ..\\), absolute root paths,
+    null bytes, and control characters across all operating systems.
+    """
+    if not raw or not raw.strip():
+        return fallback
+    cleaned = raw.replace("\x00", "").replace("\\", "/")
+    name = Path(cleaned).name.strip()
+    name = re.sub(r"^[./\\]+", "", name)
+    return name or fallback
+
+
 def format_content_disposition(filename: str, disposition_type: str = "inline") -> str:
     """
     Builds an RFC 6266 / RFC 5987 safe `Content-Disposition` header value.
@@ -782,6 +795,17 @@ async def health_check():
     """Heartbeat endpoint for Hugging Face Spaces and uptime monitors."""
     return {"status": "ok", "app": "Vayom Drive", "storage": "telegram"}
 
+@router.get("/system/version")
+async def get_system_version():
+    """Returns application version and update policy metadata."""
+    return {
+        "version": "1.0.0",
+        "app": "Vayom Drive",
+        "optional_update_available": False,
+        "force_upgrade": False,
+        "message": "All updates are optional. You have full lifetime access."
+    }
+
 @router.get("/system/metrics")
 async def get_metrics():
     """Returns storage metrics, channel stats, and online health."""
@@ -1036,7 +1060,7 @@ async def upload_file(
     nonce = None
     temp_dir = settings.UPLOAD_TEMP_DIR / file_id
     temp_dir.mkdir(parents=True, exist_ok=True)
-    safe_filename = Path(file.filename).name or f"{file_id}_upload"
+    safe_filename = sanitize_filename(file.filename, f"{file_id}_upload")
     target_path = temp_dir / safe_filename
     thumbnail_path = settings.THUMBNAIL_DIR / f"{file_id}.webp"
     has_thumb = False
@@ -1230,7 +1254,7 @@ async def upload_file(
                     byte_offset=part["byte_offset"],
                     part_size=part["part_size_bytes"],
                     part_sha256=upload_sha,
-                    filename=file.filename,
+                    filename=safe_filename,
                     category=category,
                     nonce=file_nonce,
                     encryption=encryption_mode,
@@ -1381,7 +1405,7 @@ async def upload_file(
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'original', 'none', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
-                    file_id, file.filename, mime_type, category, total_size, sha256,
+                    file_id, safe_filename, mime_type, category, total_size, sha256,
                     1 if len(parts) > 1 else 0, len(parts), "completed", file_nonce, encryption_mode,
                     1 if has_thumb else 0,
                     str(thumbnail_path) if has_thumb else None,
@@ -1480,7 +1504,7 @@ async def upload_file(
         return {
             "file_id": file_id,
             "id": file_id,
-            "filename": file.filename,
+            "filename": safe_filename,
             "size_bytes": total_size,
             "sha256": sha256,
             "total_parts": len(parts),
@@ -1516,7 +1540,16 @@ async def upload_file(
 
         # Failure cleanup 3: Update progress tracker to failed state and schedule TTL cleanup
         if effective_task_id:
-            err_msg = str(exc) if str(exc) else type(exc).__name__
+            if isinstance(exc, (OSError, IOError)):
+                err_msg = "Filesystem error during upload processing."
+            elif isinstance(exc, HTTPException):
+                err_msg = str(exc.detail)
+            else:
+                raw_err = str(exc)
+                if "/" in raw_err or "\\" in raw_err:
+                    err_msg = "Internal error during upload processing."
+                else:
+                    err_msg = raw_err if raw_err else type(exc).__name__
             upload_progress_tracker[effective_task_id] = {
                 "task_id": effective_task_id,
                 "file_id": file_id,
@@ -1603,14 +1636,28 @@ async def get_vault_encryption_status():
     return vault_manager.get_status()
 
 
+@router.get("/vault/recovery-key")
+async def get_vault_recovery_key():
+    """Returns the vault recovery key if the vault is currently unlocked."""
+    from ..crypto import vault_manager
+    k = vault_manager.get_key()
+    if not k:
+        return {"unlocked": False, "recovery_key": None}
+    return {"unlocked": True, "recovery_key": k.hex()}
+
+
 @router.post("/vault/setup")
 async def setup_vault(req: SetupVaultRequest):
     """Initializes vault with passphrase, generates 64-hex recovery key and saves 0600 key file."""
     if not req.passphrase or len(req.passphrase.strip()) < 4:
         raise HTTPException(status_code=400, detail="Passphrase must be at least 4 characters.")
     from ..crypto import vault_manager
-    res = vault_manager.init_vault(req.passphrase.strip(), remember_device=req.remember_device)
-    return res
+    try:
+        res = vault_manager.init_vault(req.passphrase.strip(), remember_device=req.remember_device)
+        return res
+    except Exception as e:
+        logger.error(f"Error initializing vault: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to initialize vault. Please try again.")
 
 
 @router.post("/vault/unlock")
@@ -1624,7 +1671,19 @@ async def unlock_vault(req: UnlockVaultRequest):
             remember_device=req.remember_device
         )
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        err_msg = str(e)
+        if "Incorrect" in err_msg:
+            detail = "Incorrect passphrase or recovery key. Please verify and try again."
+        elif "64" in err_msg or "hex" in err_msg.lower():
+            detail = "Invalid recovery key: expected 64 hexadecimal characters."
+        elif "either passphrase or recovery key" in err_msg.lower() or "must provide" in err_msg.lower():
+            detail = "Please provide either a master passphrase or recovery key."
+        else:
+            detail = "Failed to unlock vault. Please verify your credentials and try again."
+        raise HTTPException(status_code=400, detail=detail)
+    except Exception as e:
+        logger.error(f"Error unlocking vault: {e}", exc_info=True)
+        raise HTTPException(status_code=400, detail="Failed to unlock vault. Please verify your credentials and try again.")
 
     return {
         "unlocked": True,
@@ -1705,7 +1764,8 @@ async def import_vault_catalog(catalog_file: UploadFile = File(...)):
     try:
         data = json.loads(raw.decode("utf-8"))
     except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Invalid JSON format: {e}")
+        logger.warning(f"Error parsing catalog backup JSON: {e}")
+        raise HTTPException(status_code=400, detail="Invalid JSON format in catalog backup file.")
 
     files_list = data.get("files")
     if not isinstance(files_list, list):
@@ -1833,10 +1893,11 @@ async def init_upload(
 ):
     """Initializes a resumable chunked upload and returns continuous v_ file ID."""
     file_id = generate_file_id()
+    safe_filename = sanitize_filename(filename, f"{file_id}_upload")
     file_nonce = normalize_nonce(nonce)
     encryption = (encryption or "none").strip().lower()
-    guessed_mime = mimetypes.guess_type(filename)[0] or (mime_type if mime_type and mime_type != "application/octet-stream" else None) or "application/octet-stream"
-    category = detect_file_category(guessed_mime, filename)
+    guessed_mime = mimetypes.guess_type(safe_filename)[0] or (mime_type if mime_type and mime_type != "application/octet-stream" else None) or "application/octet-stream"
+    category = detect_file_category(guessed_mime, safe_filename)
 
     from ..crypto import vault_manager, EncryptedFileSlice, compute_slice_sha256
     # Targeted Client Encryption: never encrypt streamable video
@@ -1880,7 +1941,7 @@ async def init_upload(
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
-                file_id, filename, guessed_mime, category, total_size, "",
+                file_id, safe_filename, guessed_mime, category, total_size, "",
                 1 if total_parts > 1 else 0, total_parts, "uploading", file_nonce, encryption
             )
         )
@@ -1900,7 +1961,7 @@ async def init_upload(
 
     return {
         "file_id": file_id,
-        "filename": filename,
+        "filename": safe_filename,
         "nonce": file_nonce,
         "encryption": encryption,
         "total_parts": total_parts,

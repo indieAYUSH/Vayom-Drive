@@ -39,9 +39,9 @@ def validate_watch_folder_path(path_str: str) -> Path:
     resolved_path = Path(real_path_str)
 
     if not resolved_path.exists():
-        raise FileNotFoundError(f"Directory path does not exist: {path_str}")
+        raise FileNotFoundError("Directory path does not exist.")
     if not resolved_path.is_dir():
-        raise NotADirectoryError(f"Path is not a directory: {path_str}")
+        raise NotADirectoryError("Path is not a directory.")
 
     # 1. Rejection: filesystem root
     if real_path_str == "/" or (os.name == "nt" and resolved_path.parent == resolved_path):
@@ -112,7 +112,7 @@ def validate_watch_folder_path(path_str: str) -> Path:
             # Reject direct watching of system mount / temp roots
             if real_path_str in ("/media", "/run/media", "/mnt", "/Volumes", tempfile.gettempdir(), "/tmp", "/var/tmp"):
                 raise ValueError(
-                    f"System directory root ({real_path_str}) cannot be watched directly. "
+                    "System directory root cannot be watched directly. "
                     "Please specify a dedicated subfolder."
                 )
             is_allowed = True
@@ -125,7 +125,7 @@ def validate_watch_folder_path(path_str: str) -> Path:
             is_allowed = True
 
     if not is_allowed:
-        raise ValueError(f"Path is outside allowlisted watch roots: {path_str}")
+        raise ValueError("Path is outside allowlisted watch roots.")
 
     return resolved_path
 

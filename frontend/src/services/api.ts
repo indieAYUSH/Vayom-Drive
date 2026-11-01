@@ -384,13 +384,35 @@ export const api = {
     return res.json()
   },
 
-  async getVaultStatus(): Promise<{ unlocked: boolean; encryption_enabled: boolean }> {
+  async getVaultStatus(): Promise<{
+    unlocked: boolean
+    encryption_enabled: boolean
+    is_initialized?: boolean
+    remember_device?: boolean
+    recovery_key?: string | null
+  }> {
     const res = await authFetch(`${API_BASE}/vault/status`)
     if (!res.ok) throw await parseError(res, 'Failed to fetch vault status')
     return res.json()
   },
 
-  async unlockVault(payload: { passphrase?: string; key?: string }): Promise<{ unlocked: boolean; message: string }> {
+  async getRecoveryKey(): Promise<{ unlocked: boolean; recovery_key: string | null }> {
+    const res = await authFetch(`${API_BASE}/vault/recovery-key`)
+    if (!res.ok) throw await parseError(res, 'Failed to fetch recovery key')
+    return res.json()
+  },
+
+  async setupVault(payload: { passphrase: string; remember_device?: boolean }): Promise<{ unlocked: boolean; recovery_key: string; salt: string }> {
+    const res = await authFetch(`${API_BASE}/vault/setup`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    })
+    if (!res.ok) throw await parseError(res, 'Failed to setup vault encryption')
+    return res.json()
+  },
+
+  async unlockVault(payload: { passphrase?: string; key?: string; remember_device?: boolean }): Promise<{ unlocked: boolean; message: string }> {
     const res = await authFetch(`${API_BASE}/vault/unlock`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },

@@ -69,6 +69,9 @@ async def create_watch_folder(req: CreateWatchFolderRequest) -> Dict[str, Any]:
         resolved_path = validate_watch_folder_path(req.path)
     except (ValueError, FileNotFoundError, NotADirectoryError) as e:
         raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"Error creating watch folder: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to register watch folder. Please try again.")
 
     folder_id = f"wf_{uuid.uuid4().hex[:12]}"
     label = req.label.strip() if req.label and req.label.strip() else resolved_path.name or str(resolved_path)
@@ -181,7 +184,7 @@ async def scan_watch_folder(folder_id: str) -> Dict[str, Any]:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         logger.error(f"Error rescanning watch folder {folder_id}: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Failed to scan watch folder. Please try again.")
 
 
 @router.get("/events")
