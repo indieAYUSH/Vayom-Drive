@@ -29,11 +29,9 @@ def verify_loopback_security(request: Request, token: Optional[str] = None):
     # 1. Validate real socket client IP (request.client.host)
     if request.client and getattr(request.client, "host", None):
         client_host = request.client.host.strip().lower()
-        is_loopback_client = (
-            client_host in ("127.0.0.1", "::1", "localhost", "testclient", "testserver")
-            or client_host.startswith("127.")
-        )
-        if not is_loopback_client:
+        if client_host in ("127.0.0.1", "::1", "localhost", "testclient", "testserver"):
+            is_loopback_client = True
+        else:
             try:
                 ip = ipaddress.ip_address(client_host)
                 is_loopback_client = ip.is_loopback

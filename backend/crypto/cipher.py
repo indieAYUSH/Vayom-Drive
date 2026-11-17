@@ -228,14 +228,26 @@ class EncryptedFileSlice(io.IOBase):
                 self._file.seek(file_target)
         return self
 
+    @property
+    def source(self) -> Any:
+        return self._source
+
     def close(self):
-        if self._is_underlying_slice:
-            if hasattr(self._source, "close"):
-                self._source.close()
-        else:
-            if self._file and not self._file.closed:
-                self._file.close()
+        if hasattr(self, "_file") and self._file:
+            try:
+                if not self._file.closed:
+                    self._file.close()
+            finally:
                 self._file = None
+        src = getattr(self, "source", getattr(self, "_source", None))
+        if src is not None and hasattr(src, "close") and callable(src.close):
+            try:
+                src.close()
+            except Exception:
+                pass
+
+    def __del__(self):
+        self.close()
 
     def __enter__(self):
         return self.open()

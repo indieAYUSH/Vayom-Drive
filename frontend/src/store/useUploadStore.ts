@@ -249,6 +249,18 @@ export const useUploadStore = create<UploadState>((set, get) => ({
   },
 
   compressFolderToZipAndUpload: async (folderName: string, files: File[]) => {
+    const totalFolderSize = files.reduce((acc, f) => acc + (f.size || 0), 0)
+    const MAX_IN_MEMORY_ZIP_BYTES = 500 * 1024 * 1024 // 500 MB limit to prevent browser memory exhaustion
+
+    if (totalFolderSize > MAX_IN_MEMORY_ZIP_BYTES) {
+      console.warn(
+        `Folder "${folderName}" total size (${(totalFolderSize / (1024 * 1024)).toFixed(1)} MB) exceeds 500 MB limit for in-memory ZIP generation. Falling back to direct individual file upload.`
+      )
+      get().addFilesToUpload(files)
+      set({ folderPrompt: null })
+      return
+    }
+
     try {
       const JSZipModule = (await import('jszip')).default
       const zip = new JSZipModule()

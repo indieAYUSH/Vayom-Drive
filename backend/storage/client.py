@@ -91,6 +91,7 @@ class TelegramStorageClient:
         # so background upload limits never freeze active video streaming or in-memory playback.
         self._write_flood_wait_until: float = 0.0
         self._read_flood_wait_until: float = 0.0
+        self._flood_wait_until: float = 0.0
         # Anti-Ban Invariant 4: Limit upload concurrency to 3-4 parallel workers
         self._upload_semaphore = asyncio.Semaphore(3)
         self._catalog_lock = asyncio.Lock()
@@ -879,20 +880,23 @@ class TelegramStorageClient:
                 caption = f"VAYOM:CATALOG:v1:{json.dumps(summary)}"
 
                 # 1. Upload & Pin to Primary Channel
-                msg = await self.client.send_file(
-                    channel,
-                    str(temp_catalog),
-                    caption=caption,
-                    force_document=True
-                )
+                pinned_ok = False
+                async with self._upload_semaphore:
+                    msg = await self.client.send_file(
+                        channel,
+                        str(temp_catalog),
+                        caption=caption,
+                        force_document=True
+                    )
                 try:
                     await self.client.pin_message(channel, msg.id, notify=False)
+                    pinned_ok = True
                     logger.info(f"Pinned new master catalog message {msg.id} in primary channel.")
                 except Exception as pin_err:
                     logger.warning(f"Could not pin catalog in primary channel: {pin_err}")
 
-                # Clean up old pinned catalog message from primary channel
-                if target_old_pinned_id and target_old_pinned_id != msg.id:
+                # Clean up old pinned catalog message from primary channel only if pinning succeeded (BUG-07)
+                if pinned_ok and target_old_pinned_id and target_old_pinned_id != msg.id:
                     try:
                         await self.client.delete_messages(channel, [target_old_pinned_id])
                         logger.info(f"Deleted old pinned catalog message {target_old_pinned_id} from primary channel.")
@@ -906,19 +910,22 @@ class TelegramStorageClient:
                     try:
                         b_chan = int(settings.TELEGRAM_BACKUP_CHANNEL_ID)
                         target_old_b_id = self.last_backup_catalog_msg_id
-                        b_msg = await self.client.send_file(
-                            b_chan,
-                            str(temp_catalog),
-                            caption=f"VAYOM:CATALOG:MIRROR:v1:{json.dumps(summary)}",
-                            force_document=True
-                        )
+                        b_pinned_ok = False
+                        async with self._upload_semaphore:
+                            b_msg = await self.client.send_file(
+                                b_chan,
+                                str(temp_catalog),
+                                caption=f"VAYOM:CATALOG:MIRROR:v1:{json.dumps(summary)}",
+                                force_document=True
+                            )
                         try:
                             await self.client.pin_message(b_chan, b_msg.id, notify=False)
+                            b_pinned_ok = True
                             logger.info(f"Mirrored master catalog to backup channel {b_chan}")
                         except Exception as b_pin_err:
                             logger.warning(f"Could not pin catalog in backup channel: {b_pin_err}")
 
-                        if target_old_b_id and target_old_b_id != b_msg.id:
+                        if b_pinned_ok and target_old_b_id and target_old_b_id != b_msg.id:
                             try:
                                 await self.client.delete_messages(b_chan, [target_old_b_id])
                                 logger.info(f"Deleted old backup catalog message {target_old_b_id}")
@@ -932,12 +939,13 @@ class TelegramStorageClient:
                 if settings.AUTH_MODE in ("qr", "byok_qr") and settings.AUTO_MIRROR_SAVED_MESSAGES:
                     try:
                         target_old_s_id = self.last_saved_catalog_msg_id
-                        s_msg = await self.client.send_file(
-                            "me",
-                            str(temp_catalog),
-                            caption=f"VAYOM:CATALOG:MIRROR:v1:{json.dumps(summary)}",
-                            force_document=True
-                        )
+                        async with self._upload_semaphore:
+                            s_msg = await self.client.send_file(
+                                "me",
+                                str(temp_catalog),
+                                caption=f"VAYOM:CATALOG:MIRROR:v1:{json.dumps(summary)}",
+                                force_document=True
+                            )
                         logger.info("Mirrored master catalog to Telegram Saved Messages ('me').")
                         if target_old_s_id and target_old_s_id != s_msg.id:
                             try:

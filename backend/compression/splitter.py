@@ -44,9 +44,15 @@ class BoundedFileSlice(io.IOBase):
         return self
 
     def close(self):
-        if self._file and not self._file.closed:
-            self._file.close()
-            self._file = None
+        if self._file:
+            try:
+                if not self._file.closed:
+                    self._file.close()
+            finally:
+                self._file = None
+
+    def __del__(self):
+        self.close()
 
     def __enter__(self):
         return self.open()

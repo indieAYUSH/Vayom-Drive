@@ -465,6 +465,8 @@ class LocalFolderWatcher:
         self._syncing_paths.add(str_path)
         event_id = f"we_{uuid.uuid4().hex}"
         split_temp_dir: Optional[Path] = None
+        parts: List[Dict[str, Any]] = []
+        active_slices: List[Any] = []
 
         try:
             # 1. Stability check (I-21): quiet files (mtime older than 3 s) ingest directly;
@@ -602,6 +604,7 @@ class LocalFolderWatcher:
                         byte_offset=part["byte_offset"],
                         slice_size=part["part_size_bytes"]
                     )
+                    active_slices.append(enc_slice)
                     # Hashing CTR-encrypts the whole part; keep it off the loop (B10)
                     part_sha = await asyncio.to_thread(compute_slice_sha256, enc_slice)
                     upload_target = enc_slice
@@ -798,6 +801,20 @@ class LocalFolderWatcher:
                 )
                 await db.commit()
         finally:
+            # BUG-05: Ensure all file slices are safely closed
+            for sl in active_slices:
+                if hasattr(sl, "close"):
+                    try:
+                        sl.close()
+                    except Exception:
+                        pass
+            for part in parts:
+                sl = part.get("slice") if isinstance(part, dict) else None
+                if sl and hasattr(sl, "close"):
+                    try:
+                        sl.close()
+                    except Exception:
+                        pass
             # I-6: split temp dir is always removed — success or failure (no GB leaks on retry)
             if split_temp_dir is not None:
                 try:
