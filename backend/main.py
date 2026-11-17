@@ -30,6 +30,8 @@ logger = logging.getLogger("vayom.main")
 
 FRONTEND_DIST = settings.ROOT_DIR / "frontend" / "dist"
 
+_is_shutting_down = False
+
 
 def _process_is_alive(pid: int) -> bool:
     """Checks a PID without depending on psutil, treating zombies as dead."""
@@ -66,9 +68,12 @@ def _process_is_alive(pid: int) -> bool:
     # no longer a usable owner for this backend, so treat it as gone.
     try:
         with open(f"/proc/{pid}/stat", "r", encoding="utf-8") as stat_file:
-            fields = stat_file.read().split()
-            if len(fields) > 2 and fields[2] == "Z":
-                return False
+            content = stat_file.read()
+            rparen = content.rfind(")")
+            if rparen != -1 and len(content) > rparen + 2:
+                state = content[rparen + 2]
+                if state == "Z":
+                    return False
     except OSError:
         pass
     return True
@@ -97,6 +102,8 @@ async def parent_watchdog_loop():
         await asyncio.sleep(1.0)
         if not _process_is_alive(parent_pid):
             logger.info("Parent app exited; shutting down the backend server.")
+            global _is_shutting_down
+            _is_shutting_down = True
             try:
                 os.kill(os.getpid(), signal.SIGTERM)
             except Exception:
@@ -253,7 +260,7 @@ async def enforce_api_security(request: Request, call_next):
     3. Token Authentication: Supports per-install local API token validation (or strict mode if configured).
     """
     path = request.url.path
-    if path.startswith("/api/") and not path.startswith("/api/v1/s/"):
+    if (path.startswith("/api/") or path.startswith("/virtual-stream/")) and not path.startswith("/api/v1/s/"):
         origin = request.headers.get("origin")
         if origin:
             origin_clean = origin.rstrip("/").lower()
@@ -303,7 +310,7 @@ async def enforce_api_security(request: Request, call_next):
             # Loopback virtual-stream requests using valid STREAM_LOOPBACK_TOKEN are authenticated
             loopback_token = getattr(settings, "STREAM_LOOPBACK_TOKEN", "")
             query_token = request.query_params.get("token", "").strip()
-            if loopback_token and query_token == loopback_token and request.url.path.startswith("/api/v1/virtual-stream/"):
+            if loopback_token and query_token == loopback_token and (request.url.path.startswith("/api/v1/virtual-stream/") or request.url.path.startswith("/virtual-stream/")):
                 pass
             else:
                 auth_header = request.headers.get("authorization", "")
@@ -337,6 +344,40 @@ async def unhandled_exception_handler(request: Request, exc: Exception):
         status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
         content={"detail": "A server error occurred while processing your request. Please try again later."}
     )
+
+@app.get("/api/v1/health")
+async def health_check():
+    """Health check endpoint for desktop app, uptime monitors, and lifespan checks."""
+    if _is_shutting_down:
+        return {"status": "shutting_down", "app": "Vayom Drive", "storage": "telegram"}
+    return {"status": "ok", "app": "Vayom Drive", "storage": "telegram"}
+
+@app.post("/api/v1/system/shutdown")
+async def system_shutdown(request: Request):
+    """Gracefully shuts down the backend server (loopback only)."""
+    global _is_shutting_down
+    client_ip = request.client.host if request.client else ""
+    try:
+        is_loopback = ipaddress.ip_address(client_ip).is_loopback
+    except ValueError:
+        is_loopback = client_ip in ("127.0.0.1", "::1", "localhost", "testclient", "testserver")
+    if not is_loopback:
+        return JSONResponse(
+            status_code=status.HTTP_403_FORBIDDEN,
+            content={"detail": "Forbidden: Shutdown is only allowed from loopback."}
+        )
+
+    _is_shutting_down = True
+
+    async def _trigger_sigterm():
+        await asyncio.sleep(0.05)
+        try:
+            os.kill(os.getpid(), signal.SIGTERM)
+        except Exception:
+            os._exit(0)
+
+    asyncio.create_task(_trigger_sigterm())
+    return {"status": "shutting_down", "message": "Backend server is shutting down."}
 
 # Include REST API endpoints
 app.include_router(api_router)

@@ -15,6 +15,7 @@ const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 struct BackendProcess(Arc<Mutex<Option<Child>>>);
 
 const HEALTH_URL: &str = "http://127.0.0.1:8000/api/v1/health";
+const SHUTDOWN_URL: &str = "http://127.0.0.1:8000/api/v1/system/shutdown";
 
 /// Probes the local backend health endpoint.
 ///
@@ -26,7 +27,7 @@ fn backend_health_ok(timeout: Duration) -> bool {
     match ureq::get(HEALTH_URL).timeout(timeout).call() {
         Ok(resp) if resp.status() == 200 => resp
             .into_string()
-            .map(|body| body.contains("Vayom Drive"))
+            .map(|body| body.contains("Vayom Drive") && !body.contains("shutting_down"))
             .unwrap_or(false),
         _ => false,
     }
@@ -166,12 +167,49 @@ pub fn run() {
 
     app.run(move |_app_handle, event| {
         if let RunEvent::ExitRequested { .. } | RunEvent::Exit = event {
-            // Cleanly kill spawned backend process on desktop exit
+            // Attempt graceful shutdown via HTTP POST
+            let _ = ureq::post(SHUTDOWN_URL)
+                .timeout(Duration::from_millis(500))
+                .send_string("");
+
+            // Cleanly kill or wait for spawned backend process on desktop exit
             if let Some(state) = _app_handle.try_state::<BackendProcess>() {
                 if let Ok(mut lock) = state.0.lock() {
                     if let Some(mut child) = lock.take() {
                         println!("Shutting down Vayom Drive backend process...");
-                        let _ = child.kill();
+                        #[cfg(not(target_os = "windows"))]
+                        {
+                            let _ = Command::new("kill")
+                                .args(["-15", &child.id().to_string()])
+                                .status();
+                            let start = std::time::Instant::now();
+                            let mut exited = false;
+                            while start.elapsed() < Duration::from_secs(2) {
+                                if let Ok(Some(_)) = child.try_wait() {
+                                    exited = true;
+                                    break;
+                                }
+                                thread::sleep(Duration::from_millis(50));
+                            }
+                            if !exited {
+                                let _ = child.kill();
+                            }
+                        }
+                        #[cfg(target_os = "windows")]
+                        {
+                            let start = std::time::Instant::now();
+                            let mut exited = false;
+                            while start.elapsed() < Duration::from_secs(2) {
+                                if let Ok(Some(_)) = child.try_wait() {
+                                    exited = true;
+                                    break;
+                                }
+                                thread::sleep(Duration::from_millis(50));
+                            }
+                            if !exited {
+                                let _ = child.kill();
+                            }
+                        }
                     }
                 }
             }

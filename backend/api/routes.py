@@ -437,6 +437,8 @@ async def sync_master_catalog(delay_seconds: float = 0.0) -> Optional[int]:
         async with _catalog_sync_lock:
             return await _execute_sync_with_retry(max_retries=3)
 
+_rebuild_lock = asyncio.Lock()
+
 async def perform_rebuild_index(limit: int = 5000, force_full_scan: bool = False) -> int:
     """
     Sub-second library initialization:
@@ -448,6 +450,17 @@ async def perform_rebuild_index(limit: int = 5000, force_full_scan: bool = False
     can itself be incomplete (for example, if it was written before older vault
     messages were imported), so a manual rebuild must scan the channel history.
     """
+    async with _rebuild_lock:
+        if not force_full_scan:
+            async with get_db() as db:
+                cur = await db.execute("SELECT COUNT(*) FROM files")
+                row = await cur.fetchone()
+                if row and row[0] > 0:
+                    logger.info("Files already exist in catalog; skipping non-forced rebuild.")
+                    return 0
+        return await _perform_rebuild_index_locked(limit=limit, force_full_scan=force_full_scan)
+
+async def _perform_rebuild_index_locked(limit: int = 5000, force_full_scan: bool = False) -> int:
     restored_count = 0
 
     # Fast path: Check pinned master catalog index.json
@@ -556,6 +569,22 @@ async def perform_rebuild_index(limit: int = 5000, force_full_scan: bool = False
         # Delta Tail Sync: fetch any newer channel messages (min_id > max_message_id)
         # committed after the last index.json snapshot was pinned
         max_catalog_msg_id = pinned_catalog.get("max_message_id")
+        if (not max_catalog_msg_id or max_catalog_msg_id <= 0) and pinned_catalog.get("files"):
+            candidate_ids = []
+            for f in pinned_catalog["files"]:
+                for p in f.get("parts", []):
+                    tmid = p.get("telegram_message_id")
+                    if isinstance(tmid, int):
+                        candidate_ids.append(tmid)
+                proxy = f.get("proxy")
+                if isinstance(proxy, dict):
+                    for pp in proxy.get("parts", []):
+                        ptmid = pp.get("telegram_message_id")
+                        if isinstance(ptmid, int):
+                            candidate_ids.append(ptmid)
+            if candidate_ids:
+                max_catalog_msg_id = max(candidate_ids)
+
         if max_catalog_msg_id and isinstance(max_catalog_msg_id, int) and max_catalog_msg_id > 0:
             logger.info(f"Running Delta Tail Sync from Telegram WAL (min_id > {max_catalog_msg_id})...")
             try:
@@ -573,7 +602,11 @@ async def perform_rebuild_index(limit: int = 5000, force_full_scan: bool = False
 
                     async with get_db() as db:
                         for file_id, parts in tail_originals.items():
+                            parts.sort(key=lambda p: p.get("part", 0))
                             first = parts[0]
+                            total_expected = first.get("total", 1)
+                            is_interrupted = len(parts) < total_expected
+                            upload_status = "interrupted" if is_interrupted else "completed"
                             cur = await db.execute("SELECT id FROM files WHERE id = ?", (file_id,))
                             if not await cur.fetchone():
                                 await db.execute(
@@ -587,8 +620,8 @@ async def perform_rebuild_index(limit: int = 5000, force_full_scan: bool = False
                                         file_id, first.get("name", "recovered_tail_file"),
                                         first.get("mime", "application/octet-stream"),
                                         first.get("cat", "other"), first.get("size", 0),
-                                        first.get("sha256", ""), 1 if first.get("total", 1) > 1 else 0,
-                                        first.get("total", 1), "completed",
+                                        first.get("sha256", ""), 1 if total_expected > 1 else 0,
+                                        total_expected, upload_status,
                                         first.get("nonce"), first.get("enc", "none"),
                                         datetime.now(timezone.utc).isoformat()
                                     )
@@ -612,6 +645,7 @@ async def perform_rebuild_index(limit: int = 5000, force_full_scan: bool = False
                                 )
 
                         for proxy_id, parts in tail_proxies.items():
+                            parts.sort(key=lambda p: p.get("part", 0))
                             first = parts[0]
                             parent_id = first.get("of") or first.get("orig")
                             if not parent_id:
@@ -680,6 +714,7 @@ async def perform_rebuild_index(limit: int = 5000, force_full_scan: bool = False
     async with get_db() as db:
         # Pass 1: Insert all parent originals first (satisfies foreign key constraints)
         for file_id, parts in original_envelopes.items():
+            parts.sort(key=lambda p: p.get("part", 0))
             first = parts[0]
             total_expected = first.get("total", 1)
             parts_found = len(parts)
@@ -727,6 +762,7 @@ async def perform_rebuild_index(limit: int = 5000, force_full_scan: bool = False
 
         # Pass 2: Insert/link proxies whose parent originals exist; ignore and log orphaned proxies
         for proxy_id, parts in proxy_envelopes.items():
+            parts.sort(key=lambda p: p.get("part", 0))
             first = parts[0]
             orig_id = first.get("of")
             if not orig_id:
@@ -793,6 +829,10 @@ async def perform_rebuild_index(limit: int = 5000, force_full_scan: bool = False
 @router.get("/health")
 async def health_check():
     """Heartbeat endpoint for Hugging Face Spaces and uptime monitors."""
+    import sys
+    main_mod = sys.modules.get("backend.main")
+    if main_mod and getattr(main_mod, "_is_shutting_down", False):
+        return {"status": "shutting_down", "app": "Vayom Drive", "storage": "telegram"}
     return {"status": "ok", "app": "Vayom Drive", "storage": "telegram"}
 
 @router.get("/system/version")
@@ -1084,6 +1124,24 @@ async def upload_file(
                 "total_parts": 1,
                 "last_updated": time.time()
             }
+
+        # Check available disk space before writing upload (BUG-09)
+        upload_file_size = getattr(file, "size", None)
+        if upload_file_size is None or upload_file_size <= 0:
+            cl_header = request.headers.get("content-length")
+            if cl_header and cl_header.isdigit():
+                upload_file_size = int(cl_header)
+            else:
+                upload_file_size = 0
+
+        if upload_file_size > 0:
+            settings.UPLOAD_TEMP_DIR.mkdir(parents=True, exist_ok=True)
+            usage = shutil.disk_usage(settings.UPLOAD_TEMP_DIR)
+            if usage.free < upload_file_size * 1.05:
+                raise HTTPException(
+                    status_code=507,
+                    detail="Insufficient Storage: disk free space is below required threshold for this upload."
+                )
 
         # 1. Stream incoming upload to temporary disk
         async with aiofiles.open(target_path, "wb") as out_file:
@@ -1475,7 +1533,7 @@ async def upload_file(
                 try:
                     os.link(target_path, proxy_source_path)
                 except Exception:
-                    shutil.copy2(target_path, proxy_source_path)
+                    await asyncio.to_thread(shutil.copy2, target_path, proxy_source_path)
                 asyncio.create_task(transcoding_manager.enqueue_proxy(file_id, proxy_source_path))
             except Exception as e:
                 logger.warning(f"Could not stage proxy source for {file_id}: {e}")
@@ -1567,6 +1625,13 @@ async def upload_file(
 
         raise
     finally:
+        for part in parts:
+            sl = part.get("slice")
+            if sl and hasattr(sl, "close"):
+                try:
+                    sl.close()
+                except Exception:
+                    pass
         # Cleanup temporary upload directory and all sliced part files
         try:
             if temp_dir.exists():
@@ -2259,120 +2324,125 @@ async def upload_chunk(
         latitude = video_meta.get("latitude") if isinstance(video_meta, dict) else None
         longitude = video_meta.get("longitude") if isinstance(video_meta, dict) else None
 
-        async with get_db() as db:
-            # Check/ensure file record exists
-            cur = await db.execute("SELECT id FROM files WHERE id = ?", (file_id,))
-            if not await cur.fetchone():
+        try:
+            async with get_db() as db:
+                # Check/ensure file record exists
+                cur = await db.execute("SELECT id FROM files WHERE id = ?", (file_id,))
+                if not await cur.fetchone():
+                    await db.execute(
+                        """
+                        INSERT INTO files (
+                            id, filename, mime_type, file_category, size_bytes, sha256,
+                            is_split, total_parts, upload_status, nonce, encryption,
+                            has_thumbnail, thumbnail_path, exif_json,
+                            kind, proxy_status, width, height, video_bitrate_bps,
+                            codec, container, duration_s, taken_at, latitude, longitude
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'original', 'none', ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            file_id, filename, guessed_mime, category, total_size, "",
+                            1 if total_parts > 1 else 0, total_parts, "uploading", nonce, encryption,
+                            1 if thumb_path.exists() else 0,
+                            str(thumb_path) if thumb_path.exists() else None,
+                            json.dumps(video_meta) if video_meta else None,
+                            v_width, v_height, v_bitrate, v_codec, v_container, v_duration,
+                            taken_at, latitude, longitude
+                        )
+                    )
+
+                # B-5: re-uploaded parts must not orphan the previous Telegram message
+                old_cur = await db.execute(
+                    "SELECT telegram_message_id FROM file_parts WHERE file_id = ? AND part_index = ?",
+                    (file_id, part_index)
+                )
+                old_row = await old_cur.fetchone()
+                old_msg_id = old_row[0] if old_row else None
+                if old_msg_id and old_msg_id != msg_id:
+                    logger.warning(f"Retry of part {part_index} for {file_id}: purging orphaned Telegram message {old_msg_id}...")
+                    asyncio.create_task(storage_client.delete_messages([old_msg_id]))
+
+                # Commit part pointer
                 await db.execute(
                     """
-                    INSERT INTO files (
-                        id, filename, mime_type, file_category, size_bytes, sha256,
-                        is_split, total_parts, upload_status, nonce, encryption,
-                        has_thumbnail, thumbnail_path, exif_json,
-                        kind, proxy_status, width, height, video_bitrate_bps,
-                        codec, container, duration_s, taken_at, latitude, longitude
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'original', 'none', ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    INSERT OR REPLACE INTO file_parts (
+                        id, file_id, part_index, byte_offset, part_size_bytes,
+                        part_sha256, telegram_message_id, telegram_channel_id,
+                        telegram_file_id, telegram_access_hash
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
-                        file_id, filename, guessed_mime, category, total_size, "",
-                        1 if total_parts > 1 else 0, total_parts, "uploading", nonce, encryption,
-                        1 if thumb_path.exists() else 0,
-                        str(thumb_path) if thumb_path.exists() else None,
-                        json.dumps(video_meta) if video_meta else None,
-                        v_width, v_height, v_bitrate, v_codec, v_container, v_duration,
-                        taken_at, latitude, longitude
+                        part_id, file_id, part_index, byte_offset,
+                        chunk_size, upload_sha, msg_id, chan_id,
+                        tg_file_id, tg_access_hash
                     )
                 )
 
-            # B-5: re-uploaded parts must not orphan the previous Telegram message
-            old_cur = await db.execute(
-                "SELECT telegram_message_id FROM file_parts WHERE file_id = ? AND part_index = ?",
-                (file_id, part_index)
-            )
-            old_row = await old_cur.fetchone()
-            old_msg_id = old_row[0] if old_row else None
-            if old_msg_id and old_msg_id != msg_id:
-                logger.warning(f"Retry of part {part_index} for {file_id}: purging orphaned Telegram message {old_msg_id}...")
-                asyncio.create_task(storage_client.delete_messages([old_msg_id]))
+                # Check if all parts have been received
+                p_cur = await db.execute("SELECT COUNT(*) FROM file_parts WHERE file_id = ?", (file_id,))
+                uploaded_count = (await p_cur.fetchone())[0]
 
-            # Commit part pointer
-            await db.execute(
-                """
-                INSERT OR REPLACE INTO file_parts (
-                    id, file_id, part_index, byte_offset, part_size_bytes,
-                    part_sha256, telegram_message_id, telegram_channel_id,
-                    telegram_file_id, telegram_access_hash
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    part_id, file_id, part_index, byte_offset,
-                    chunk_size, upload_sha, msg_id, chan_id,
-                    tg_file_id, tg_access_hash
-                )
-            )
-
-            # Check if all parts have been received
-            p_cur = await db.execute("SELECT COUNT(*) FROM file_parts WHERE file_id = ?", (file_id,))
-            uploaded_count = (await p_cur.fetchone())[0]
-
-            is_done = uploaded_count >= total_parts
-            if is_done:
-                has_thumb = 1 if thumb_path.exists() else 0
-                await db.execute(
-                    """
-                    UPDATE files SET 
-                        upload_status = 'completed',
-                        mime_type = ?,
-                        nonce = ?,
-                        encryption = ?,
-                        has_thumbnail = CASE WHEN has_thumbnail = 1 THEN 1 ELSE ? END,
-                        thumbnail_path = COALESCE(thumbnail_path, ?),
-                        exif_json = COALESCE(exif_json, ?),
-                        width = COALESCE(width, ?),
-                        height = COALESCE(height, ?),
-                        video_bitrate_bps = COALESCE(video_bitrate_bps, ?),
-                        codec = COALESCE(codec, ?),
-                        container = COALESCE(container, ?),
-                        duration_s = COALESCE(duration_s, ?),
-                        taken_at = COALESCE(taken_at, ?),
-                        latitude = COALESCE(latitude, ?),
-                        longitude = COALESCE(longitude, ?)
-                    WHERE id = ?
-                    """,
-                    (
-                        guessed_mime,
-                        nonce,
-                        encryption,
-                        has_thumb,
-                        str(thumb_path) if has_thumb else None,
-                        json.dumps(video_meta) if video_meta else None,
-                        v_width,
-                        v_height,
-                        v_bitrate,
-                        v_codec,
-                        v_container,
-                        v_duration,
-                        taken_at,
-                        latitude,
-                        longitude,
-                        file_id
+                is_done = uploaded_count >= total_parts
+                if is_done:
+                    has_thumb = 1 if thumb_path.exists() else 0
+                    await db.execute(
+                        """
+                        UPDATE files SET 
+                            upload_status = 'completed',
+                            mime_type = ?,
+                            nonce = ?,
+                            encryption = ?,
+                            has_thumbnail = CASE WHEN has_thumbnail = 1 THEN 1 ELSE ? END,
+                            thumbnail_path = COALESCE(thumbnail_path, ?),
+                            exif_json = COALESCE(exif_json, ?),
+                            width = COALESCE(width, ?),
+                            height = COALESCE(height, ?),
+                            video_bitrate_bps = COALESCE(video_bitrate_bps, ?),
+                            codec = COALESCE(codec, ?),
+                            container = COALESCE(container, ?),
+                            duration_s = COALESCE(duration_s, ?),
+                            taken_at = COALESCE(taken_at, ?),
+                            latitude = COALESCE(latitude, ?),
+                            longitude = COALESCE(longitude, ?)
+                        WHERE id = ?
+                        """,
+                        (
+                            guessed_mime,
+                            nonce,
+                            encryption,
+                            has_thumb,
+                            str(thumb_path) if has_thumb else None,
+                            json.dumps(video_meta) if video_meta else None,
+                            v_width,
+                            v_height,
+                            v_bitrate,
+                            v_codec,
+                            v_container,
+                            v_duration,
+                            taken_at,
+                            latitude,
+                            longitude,
+                            file_id
+                        )
                     )
-                )
 
-                # Auto-associate extracted metadata tags
-                if video_meta and isinstance(video_meta, dict) and video_meta.get("tags"):
-                    for t_name in video_meta["tags"]:
-                        t_clean = str(t_name).strip().lower()
-                        if not t_clean:
-                            continue
-                        tag_id = f"tag_{uuid.uuid4().hex[:12]}"
-                        await db.execute("INSERT OR IGNORE INTO tags (id, name) VALUES (?, ?)", (tag_id, t_clean))
-                        cur_t = await db.execute("SELECT id FROM tags WHERE name = ?", (t_clean,))
-                        row_t = await cur_t.fetchone()
-                        if row_t:
-                            await db.execute("INSERT OR IGNORE INTO file_tags (file_id, tag_id) VALUES (?, ?)", (file_id, row_t[0]))
+                    # Auto-associate extracted metadata tags
+                    if video_meta and isinstance(video_meta, dict) and video_meta.get("tags"):
+                        for t_name in video_meta["tags"]:
+                            t_clean = str(t_name).strip().lower()
+                            if not t_clean:
+                                continue
+                            tag_id = f"tag_{uuid.uuid4().hex[:12]}"
+                            await db.execute("INSERT OR IGNORE INTO tags (id, name) VALUES (?, ?)", (tag_id, t_clean))
+                            cur_t = await db.execute("SELECT id FROM tags WHERE name = ?", (t_clean,))
+                            row_t = await cur_t.fetchone()
+                            if row_t:
+                                await db.execute("INSERT OR IGNORE INTO file_tags (file_id, tag_id) VALUES (?, ?)", (file_id, row_t[0]))
 
-            await db.commit()
+                await db.commit()
+        except Exception:
+            if msg_id:
+                asyncio.create_task(storage_client.delete_messages([msg_id], channel_id=chan_id))
+            raise
 
     finally:
         # B-5: the staging chunk never survives this request (success or failure)
