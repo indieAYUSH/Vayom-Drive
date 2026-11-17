@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import os
+import shutil
 import subprocess
 import tempfile
 from pathlib import Path
@@ -19,6 +20,8 @@ from backend.index.metadata import (
 @pytest.mark.asyncio
 async def test_extract_video_metadata_4k_h264():
     """Generates synthetic 4K H.264 video with DJI tag and verifies extraction."""
+    if not shutil.which("ffmpeg"):
+        pytest.skip("ffmpeg not available on system")
     with tempfile.TemporaryDirectory() as tmpdir:
         video_path = Path(tmpdir) / "dji_4k_test.mp4"
         cmd = [
@@ -50,6 +53,8 @@ async def test_extract_video_metadata_4k_h264():
 @pytest.mark.asyncio
 async def test_extract_video_metadata_1080p_hevc():
     """Generates synthetic 1080p HEVC video and verifies extraction."""
+    if not shutil.which("ffmpeg"):
+        pytest.skip("ffmpeg not available on system")
     with tempfile.TemporaryDirectory() as tmpdir:
         video_path = Path(tmpdir) / "sony_hevc_test.mp4"
         cmd = [
@@ -192,6 +197,8 @@ async def test_extract_video_metadata_hyphen_filename_after_separator(monkeypatc
 @pytest.mark.asyncio
 async def test_extract_video_metadata_hyphenated_real_file(monkeypatch):
     """I-10: a real ffprobe run succeeds for a relative path starting with '-sample.mp4'."""
+    if not shutil.which("ffmpeg"):
+        pytest.skip("ffmpeg not available on system")
     with tempfile.TemporaryDirectory() as tmpdir:
         plain_path = Path(tmpdir) / "sample.mp4"
         cmd = [

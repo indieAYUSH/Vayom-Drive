@@ -24,6 +24,8 @@ from backend.config import settings
 @pytest.mark.asyncio
 async def test_encoder_probe_and_caching():
     """Verifies that encoder probe identifies an encoder and caches the result."""
+    if not shutil.which("ffmpeg"):
+        pytest.skip("ffmpeg not available on system")
     encoder = await probe_best_encoder()
     # On this test environment, ffmpeg has libx264 or hardware encoders
     assert encoder is not None
