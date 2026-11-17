@@ -74,8 +74,17 @@ def _process_is_alive(pid: int) -> bool:
                 state = content[rparen + 2]
                 if state == "Z":
                     return False
-    except OSError:
-        pass
+    except (OSError, Exception):
+        try:
+            with open(f"/proc/{pid}/status", "r", encoding="utf-8") as status_file:
+                for line in status_file:
+                    if line.startswith("State:"):
+                        state_parts = line.split()
+                        if len(state_parts) > 1 and "Z" in state_parts[1]:
+                            return False
+                        break
+        except (OSError, Exception):
+            pass
     return True
 
 

@@ -768,6 +768,21 @@ class LocalFolderWatcher:
                 else:
                     asyncio.create_task(transcoding_manager.enqueue_proxy(file_id, file_path))
 
+            # Close slice file handles before local unlink on Windows
+            for sl in active_slices:
+                if hasattr(sl, "close"):
+                    try:
+                        sl.close()
+                    except Exception:
+                        pass
+            for part in parts:
+                sl = part.get("slice") if isinstance(part, dict) else None
+                if sl and hasattr(sl, "close"):
+                    try:
+                        sl.close()
+                    except Exception:
+                        pass
+
             if auto_delete_local:
                 if not uploaded_to_telegram:
                     # H-1: mock-mode upload — the bytes only exist locally.

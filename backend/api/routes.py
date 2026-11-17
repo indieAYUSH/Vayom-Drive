@@ -597,13 +597,14 @@ async def _perform_rebuild_index_locked(limit: int = 5000, force_full_scan: bool
                         if fid:
                             tail_file_envelopes.setdefault(fid, []).append(env)
 
-                    tail_originals = {fid: p for fid, p in tail_file_envelopes.items() if p[0].get("k") != "p"}
-                    tail_proxies = {fid: p for fid, p in tail_file_envelopes.items() if p[0].get("k") == "p"}
+                    tail_originals = {fid: p for fid, p in tail_file_envelopes.items() if not any(x.get("k") == "p" for x in p)}
+                    tail_proxies = {fid: p for fid, p in tail_file_envelopes.items() if any(x.get("k") == "p" for x in p)}
 
                     async with get_db() as db:
                         for file_id, parts in tail_originals.items():
                             parts.sort(key=lambda p: p.get("part", 0))
-                            first = parts[0]
+                            part_0 = next((p for p in parts if p.get("part") == 0), parts[0])
+                            first = part_0
                             total_expected = first.get("total", 1)
                             is_interrupted = len(parts) < total_expected
                             upload_status = "interrupted" if is_interrupted else "completed"
@@ -708,14 +709,15 @@ async def _perform_rebuild_index_locked(limit: int = 5000, force_full_scan: bool
             file_envelopes.setdefault(fid, []).append(env)
 
     # Constraint 1: Partition into originals and proxies for Two-Pass Reverse Scan
-    original_envelopes = {fid: parts for fid, parts in file_envelopes.items() if parts[0].get("k") != "p"}
-    proxy_envelopes = {fid: parts for fid, parts in file_envelopes.items() if parts[0].get("k") == "p"}
+    original_envelopes = {fid: parts for fid, parts in file_envelopes.items() if not any(x.get("k") == "p" for x in parts)}
+    proxy_envelopes = {fid: parts for fid, parts in file_envelopes.items() if any(x.get("k") == "p" for x in parts)}
 
     async with get_db() as db:
         # Pass 1: Insert all parent originals first (satisfies foreign key constraints)
         for file_id, parts in original_envelopes.items():
             parts.sort(key=lambda p: p.get("part", 0))
-            first = parts[0]
+            part_0 = next((p for p in parts if p.get("part") == 0), parts[0])
+            first = part_0
             total_expected = first.get("total", 1)
             parts_found = len(parts)
             is_interrupted = parts_found < total_expected
