@@ -28,6 +28,11 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r backend/requirements.txt
 
+      - name: Install system dependencies (ffmpeg)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+
       - name: Run backend test suite
         run: python -m pytest tests/ -q
 
@@ -120,14 +125,11 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          tagName: v__VERSION__
-          releaseName: 'Vayom Drive v__VERSION__'
-          releaseBody: 'Automated native desktop release for Linux and Windows.'
           releaseDraft: false
           prerelease: false
           args: ${{ matrix.args }}
 
-      - name: Upload Desktop Artifacts (Direct Download)
+      - name: Upload Desktop Artifacts
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact_name }}
@@ -178,17 +180,74 @@ jobs:
         working-directory: android
         run: ./gradlew assembleRelease --no-daemon
 
-      - name: Upload Android APK Artifact (Direct Download)
+      - name: Upload Android APK Artifact
         uses: actions/upload-artifact@v4
         with:
           name: vayom-drive-android-apk
           path: android/app/build/outputs/apk/release/*.apk
           if-no-files-found: error
 
-      - name: Upload APK to GitHub Release (Tag push only)
-        if: startsWith(github.ref, 'refs/tags/v')
+  publish-release:
+    needs: [build-desktop, build-android]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download Linux Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: vayom-drive-linux-x86_64
+          path: release-assets/linux
+
+      - name: Download Windows Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: vayom-drive-windows-x64
+          path: release-assets/windows
+
+      - name: Download Android Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: vayom-drive-android-apk
+          path: release-assets/android
+
+      - name: Consolidate Release Assets
+        run: |
+          mkdir -p dist-release
+          find release-assets/ -type f \( -name "*.AppImage" -o -name "*.deb" -o -name "*.msi" -o -name "*.exe" -o -name "*.apk" \) -exec cp {} dist-release/ \;
+          echo "=== Collected Release Binaries ==="
+          ls -la dist-release/
+
+      - name: Determine Tag and Release Name
+        id: release_info
+        run: |
+          if [[ "${{ github.ref }}" == refs/tags/v* ]]; then
+            TAG="${GITHUB_REF#refs/tags/}"
+            echo "tag=$TAG" >> $GITHUB_OUTPUT
+            echo "title=Vayom Drive $TAG" >> $GITHUB_OUTPUT
+          else
+            echo "tag=v1.0.0" >> $GITHUB_OUTPUT
+            echo "title=Vayom Drive v1.0.0" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Publish All 3 Platforms to GitHub Releases
         uses: softprops/action-gh-release@v2
         with:
-          files: android/app/build/outputs/apk/release/*.apk
+          tag_name: ${{ steps.release_info.outputs.tag }}
+          name: ${{ steps.release_info.outputs.title }}
+          body: |
+            ## 🚀 Vayom Drive — Sovereign Cloud Storage Release
+
+            ### 📦 Download Links for All 3 Platforms:
+            - 📱 **Android**: `app-release.apk` (Install directly on any Android device)
+            - 🐧 **Linux**: `.AppImage` (portable) and `.deb` (Debian/Ubuntu package)
+            - 🪟 **Windows**: `.msi` (installer) and `.exe` (setup executable)
+
+            ### ✨ Key Highlights:
+            - **1-Click Sovereign BYOK:** Automated in-app Telegram API key retrieval via `my.telegram.org`.
+            - **End-to-End Encrypted Vault:** Client-side AES-256-CTR encryption with local key derivation.
+            - **Multi-Part Resilient Streaming:** High-performance video/media streaming with prefetch and range seek support.
+            - **Zero Third-Party Cloud Leaks:** All data stored directly in your own private Telegram channel storage node.
+          files: dist-release/*
+          draft: false
+          prerelease: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
