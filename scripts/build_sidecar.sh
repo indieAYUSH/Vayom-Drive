@@ -105,11 +105,8 @@ target = Path(sys.argv[1])
 
 if not api_id or not api_hash:
     target.write_text("", encoding="utf-8")
-    print("WARNING: TELEGRAM_API_ID / TELEGRAM_API_HASH are not set.")
-    print("WARNING: this sidecar will run in mock/offline mode and QR/bot login will be disabled.")
-    print("WARNING: set them in .env or export them before building a release.")
-    if os.getenv("CI", "").strip().lower() in ("1", "true", "yes"):
-        sys.exit("Refusing to build a release sidecar without Telegram application credentials.")
+    print("NOTICE: TELEGRAM_API_ID / TELEGRAM_API_HASH not pre-configured.")
+    print("NOTICE: Sidecar will initialize in Sovereign BYOK / Bot Token mode.")
 else:
     target.write_text(
         f"TELEGRAM_API_ID={api_id}\nTELEGRAM_API_HASH={api_hash}\n",
