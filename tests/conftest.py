@@ -44,6 +44,8 @@ def isolate_test_db(monkeypatch, tmp_path):
     monkeypatch.setattr(settings, "TELEGRAM_CHANNEL_ID", "-100123456789")
     monkeypatch.setattr(settings, "TELEGRAM_BACKUP_CHANNEL_ID", "")
     monkeypatch.setattr(settings, "TELEGRAM_BOT_TOKEN", "mock_bot_token")
+    monkeypatch.setattr(settings, "TELEGRAM_API_ID", 123456)
+    monkeypatch.setattr(settings, "TELEGRAM_API_HASH", "mock_api_hash_for_testing")
 
     settings.ensure_directories()
     from backend.storage.client import storage_client
