@@ -41,6 +41,8 @@ interface AuthState {
 
   // Actions
   checkAuth: () => Promise<boolean>
+  requestByokCode: (phone: string) => Promise<string>
+  extractByokKeys: (phone: string, randomHash: string, code: string) => Promise<{ apiId: number; apiHash: string }>
   startQrSession: (creds?: { apiId?: number; apiHash?: string }) => Promise<void>
   pollQrSession: () => Promise<void>
   submit2FA: (password: string) => Promise<void>
@@ -133,6 +135,54 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     }
     set({ isAuthenticated: false, isInitializing: false, error: null })
     return false
+  },
+
+  requestByokCode: async (phone: string) => {
+    set({ isLoading: true, error: null })
+    try {
+      const res = await fetch(`${API_BASE}/auth/byok/request-code`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ phone }),
+      })
+      const data = await res.json()
+      if (!res.ok) {
+        throw new Error(data?.detail || 'Failed to request Telegram confirmation code')
+      }
+      return data.random_hash
+    } catch (err: any) {
+      set({ error: err.message })
+      throw err
+    } finally {
+      set({ isLoading: false })
+    }
+  },
+
+  extractByokKeys: async (phone: string, randomHash: string, code: string) => {
+    set({ isLoading: true, error: null })
+    try {
+      const res = await fetch(`${API_BASE}/auth/byok/extract-keys`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ phone, random_hash: randomHash, code }),
+      })
+      const data = await res.json()
+      if (!res.ok) {
+        throw new Error(data?.detail || 'Failed to extract Telegram API credentials')
+      }
+      const creds = { apiId: Number(data.api_id), apiHash: String(data.api_hash) }
+      try {
+        localStorage.setItem('vayom_byok_api_id', String(creds.apiId))
+        localStorage.setItem('vayom_byok_api_hash', creds.apiHash)
+      } catch {}
+      set({ byokCreds: creds })
+      return creds
+    } catch (err: any) {
+      set({ error: err.message })
+      throw err
+    } finally {
+      set({ isLoading: false })
+    }
   },
 
   startQrSession: async (creds?: { apiId?: number; apiHash?: string }) => {

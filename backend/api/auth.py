@@ -1,9 +1,12 @@
 import asyncio
 import datetime
 import logging
+import random
+import re
 import time
 import uuid
 from typing import Optional, List, Dict, Any
+import httpx
 from pydantic import BaseModel
 from fastapi import APIRouter, HTTPException
 from telethon import TelegramClient
@@ -100,6 +103,209 @@ class DeveloperLoginRequest(BaseModel):
     bot_token: str
     channel_id: str
     display_name: Optional[str] = "Developer Node"
+
+
+class ByokSendCodeRequest(BaseModel):
+    phone: str
+
+
+class ByokExtractKeysRequest(BaseModel):
+    phone: str
+    random_hash: str
+    code: str
+
+
+_MY_TELEGRAM_BASE = "https://my.telegram.org"
+_MY_TELEGRAM_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "X-Requested-With": "XMLHttpRequest",
+    "Origin": "https://my.telegram.org",
+    "Referer": "https://my.telegram.org/auth",
+}
+
+
+def _extract_credentials_from_apps_html(html: str) -> tuple[Optional[int], Optional[str]]:
+    api_id = None
+    api_hash = None
+
+    id_m = re.search(
+        r'(?:app_api_id|api_id)[^>]*?(?:value=["\'](\d+)["\']|><strong>(\d+)</strong>|>(\d+)<)',
+        html,
+        re.I,
+    )
+    if id_m:
+        val = next((g for g in id_m.groups() if g), None)
+        if val:
+            api_id = int(val)
+    if not api_id:
+        fb = re.search(r'App\s+api_id:.*?(?:<strong>|>)\s*(\d+)\s*(?:</strong>|<)', html, re.I | re.DOTALL)
+        if fb:
+            api_id = int(fb.group(1))
+
+    hash_m = re.search(
+        r'(?:app_api_hash|api_hash)[^>]*?(?:value=["\']([a-f0-9]{32})["\']|><strong>([a-f0-9]{32})</strong>|>([a-f0-9]{32})<)',
+        html,
+        re.I,
+    )
+    if hash_m:
+        val = next((g for g in hash_m.groups() if g), None)
+        if val:
+            api_hash = val.lower()
+    if not api_hash:
+        fb2 = re.search(r'App\s+api_hash:.*?(?:<strong>|>)\s*([a-f0-9]{32})\s*(?:</strong>|<)', html, re.I | re.DOTALL)
+        if fb2:
+            api_hash = fb2.group(1).lower()
+
+    return api_id, api_hash
+
+
+@router.post("/byok/request-code")
+async def byok_request_code(body: ByokSendCodeRequest):
+    """Requests a web confirmation login code from my.telegram.org for the user's phone number."""
+    raw_phone = body.phone.strip()
+    clean_phone = re.sub(r"[^\d+]", "", raw_phone)
+    if not clean_phone.startswith("+") and len(clean_phone) >= 10:
+        clean_phone = f"+{clean_phone}"
+
+    if len(clean_phone) < 7:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid phone number format. Please provide full international format with country code (e.g., +12025550123).",
+        )
+
+    try:
+        async with httpx.AsyncClient(timeout=15.0, headers=_MY_TELEGRAM_HEADERS) as client:
+            resp = await client.post(
+                f"{_MY_TELEGRAM_BASE}/auth/send_password",
+                data={"phone": clean_phone},
+            )
+            try:
+                data = resp.json()
+            except Exception:
+                logger.error(f"my.telegram.org/auth/send_password returned non-JSON: {resp.text[:200]}")
+                raise HTTPException(
+                    status_code=502,
+                    detail="Telegram web portal is temporarily unreachable or returned unexpected content.",
+                )
+
+            if isinstance(data, dict):
+                if data.get("random_hash"):
+                    return {
+                        "success": True,
+                        "phone": clean_phone,
+                        "random_hash": data["random_hash"],
+                        "message": "Confirmation code sent to your official Telegram app messages.",
+                    }
+                err_text = data.get("text") or "Telegram rejected the phone number."
+                raise HTTPException(status_code=400, detail=err_text)
+
+            raise HTTPException(status_code=502, detail="Unexpected response format from Telegram portal.")
+    except httpx.HTTPError as exc:
+        logger.warning(f"Network error contacting my.telegram.org: {exc}")
+        raise HTTPException(
+            status_code=503,
+            detail=f"Network error contacting my.telegram.org: {exc}. Please verify internet access or enter keys manually.",
+        )
+
+
+@router.post("/byok/extract-keys")
+async def byok_extract_keys(body: ByokExtractKeysRequest):
+    """Logs in to my.telegram.org with the user's confirmation code, extracts or creates their API application,
+    and returns their personal API ID and API Hash."""
+    clean_phone = body.phone.strip()
+    clean_hash = body.random_hash.strip()
+    clean_code = body.code.strip()
+
+    if not clean_phone or not clean_hash or not clean_code:
+        raise HTTPException(status_code=400, detail="Phone number, random hash, and confirmation code are required.")
+
+    try:
+        async with httpx.AsyncClient(timeout=25.0, follow_redirects=True, headers=_MY_TELEGRAM_HEADERS) as client:
+            # 1. Login to my.telegram.org
+            login_resp = await client.post(
+                f"{_MY_TELEGRAM_BASE}/auth/login",
+                data={
+                    "phone": clean_phone,
+                    "random_hash": clean_hash,
+                    "password": clean_code,
+                },
+            )
+
+            login_text = login_resp.text.strip()
+            if login_resp.status_code != 200 or login_text.lower() != "true":
+                err_msg = None
+                try:
+                    err_json = login_resp.json()
+                    err_msg = err_json.get("text")
+                except Exception:
+                    pass
+                if not err_msg:
+                    if "password" in login_text.lower() or "two-step" in login_text.lower():
+                        err_msg = "Telegram 2FA Cloud Password is enabled on your account. Please enter your API ID and Hash manually or temporarily disable web 2FA."
+                    elif "invalid" in login_text.lower():
+                        err_msg = "Invalid confirmation code. Please verify the code in your Telegram app messages."
+                    else:
+                        err_msg = login_text[:120] if login_text else "Telegram web authentication rejected. Please enter your API keys manually."
+                raise HTTPException(status_code=400, detail=err_msg)
+
+            # 2. Fetch the /apps management page
+            apps_resp = await client.get(f"{_MY_TELEGRAM_BASE}/apps")
+            if apps_resp.status_code != 200:
+                raise HTTPException(
+                    status_code=502,
+                    detail=f"Could not load Telegram applications page (HTTP {apps_resp.status_code}).",
+                )
+
+            apps_html = apps_resp.text
+            api_id, api_hash = _extract_credentials_from_apps_html(apps_html)
+
+            # 3. If no app has been created yet, create one automatically
+            if not api_id or not api_hash:
+                csrf_match = re.search(r'name=["\']hash["\']\s+value=["\']([a-zA-Z0-9_-]+)["\']', apps_html, re.I)
+                if not csrf_match:
+                    csrf_match = re.search(r'value=["\']([a-zA-Z0-9_-]+)["\']\s+name=["\']hash["\']', apps_html, re.I)
+
+                if csrf_match:
+                    csrf_hash = csrf_match.group(1)
+                    random_suffix = random.randint(100, 9999)
+                    create_resp = await client.post(
+                        f"{_MY_TELEGRAM_BASE}/apps/create",
+                        data={
+                            "hash": csrf_hash,
+                            "app_title": "Vayom Drive",
+                            "app_shortname": f"vayomdrive{random_suffix}",
+                            "app_url": "https://vayom.drive",
+                            "app_platform": "desktop",
+                            "app_desc": "Sovereign Personal Cloud Storage Node",
+                        },
+                    )
+                    if create_resp.status_code == 200:
+                        api_id, api_hash = _extract_credentials_from_apps_html(create_resp.text)
+
+            if not api_id or not api_hash:
+                raise HTTPException(
+                    status_code=422,
+                    detail=(
+                        "Successfully authenticated with Telegram, but could not automatically retrieve your API credentials. "
+                        "Please visit https://my.telegram.org in your browser and copy your API ID & Hash."
+                    ),
+                )
+
+            return {
+                "success": True,
+                "api_id": api_id,
+                "api_hash": api_hash,
+                "message": "Successfully extracted private Telegram API keys.",
+            }
+
+    except HTTPException:
+        raise
+    except httpx.HTTPError as exc:
+        logger.warning(f"Network error during key extraction: {exc}")
+        raise HTTPException(status_code=503, detail=f"Network error contacting my.telegram.org: {exc}")
+    except Exception as exc:
+        logger.error(f"Unexpected error in BYOK key extraction: {exc}")
+        raise HTTPException(status_code=500, detail=f"Unexpected error during key extraction: {exc}")
 
 
 @router.get("/status")
@@ -408,8 +614,8 @@ async def poll_qr_login(session_id: str):
     if not session:
         raise HTTPException(status_code=404, detail="QR session not found or expired")
 
-    # If past total session expiry and still waiting, mark expired
-    if session["status"] == "waiting" and time.time() >= session.get("session_expires_at", 0):
+    # If past total session expiry and still waiting or awaiting 2FA, mark expired
+    if session["status"] in ("waiting", "2fa_required") and time.time() >= session.get("session_expires_at", 0):
         session["status"] = "expired"
 
     if session["status"] == "expired":
@@ -426,7 +632,7 @@ async def poll_qr_login(session_id: str):
         return {
             "status": "expired",
             "url": None,
-            "expires_at": session.get("session_expires_at"),
+            "expires_at": int(session["session_expires_at"]) if session.get("session_expires_at") else None,
             "confirmed_at": None,
             "user": None,
             "channels": None,
@@ -436,7 +642,7 @@ async def poll_qr_login(session_id: str):
     return {
         "status": session["status"],
         "url": session.get("url"),
-        "expires_at": session.get("session_expires_at"),
+        "expires_at": int(session["session_expires_at"]) if session.get("session_expires_at") else None,
         "confirmed_at": session.get("confirmed_at"),
         "user": session.get("user"),
         "channels": session.get("channels"),
@@ -450,6 +656,20 @@ async def submit_qr_2fa(body: QR2FARequest):
     session = _active_qr_sessions.get(body.session_id)
     if not session:
         raise HTTPException(status_code=404, detail="QR session not found")
+
+    if time.time() >= session.get("session_expires_at", 0):
+        session["status"] = "expired"
+        client = session.get("client")
+        if client and hasattr(client, "is_connected") and client.is_connected():
+            try:
+                await client.disconnect()
+            except Exception:
+                pass
+        mon_task = session.get("monitor_task")
+        if mon_task and not mon_task.done():
+            mon_task.cancel()
+        _active_qr_sessions.pop(body.session_id, None)
+        raise HTTPException(status_code=400, detail="QR session has expired. Please initiate a new login.")
 
     client: TelegramClient = session["client"]
     try:

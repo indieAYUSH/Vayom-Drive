@@ -12,7 +12,9 @@ import {
   ArrowRight,
   CheckCircle2,
   AlertTriangle,
-  Edit3
+  Edit3,
+  Sparkles,
+  Phone
 } from 'lucide-react'
 import { Button } from '../components/common/Button'
 import { Badge } from '../components/common/Badge'
@@ -22,6 +24,8 @@ type TabType = 'byok_qr' | 'bot' | 'qr' | 'developer'
 export const LoginView: React.FC = () => {
   const {
     startQrSession,
+    requestByokCode,
+    extractByokKeys,
     qrUrl,
     qrStatus,
     qrExpiresAt,
@@ -56,6 +60,19 @@ export const LoginView: React.FC = () => {
     }
   })
   const [editingByokCreds, setEditingByokCreds] = useState<boolean>(false)
+
+  // 1-Click Automated BYOK extraction state
+  const [byokMode, setByokMode] = useState<'auto' | 'manual'>(() => {
+    try {
+      return (localStorage.getItem('vayom_byok_api_id') && localStorage.getItem('vayom_byok_api_hash')) ? 'manual' : 'auto'
+    } catch {
+      return 'auto'
+    }
+  })
+  const [autoPhone, setAutoPhone] = useState('')
+  const [autoCode, setAutoCode] = useState('')
+  const [autoRandomHash, setAutoRandomHash] = useState('')
+  const [autoStep, setAutoStep] = useState<'phone' | 'code'>('phone')
 
   // Form states for QR Finalize
   const [displayName, setDisplayName] = useState('')
@@ -127,6 +144,34 @@ export const LoginView: React.FC = () => {
       }
     }
   }, [scannedUser, defaultChannelId, availableChannels])
+
+  const handleRequestByokCode = async (e: React.FormEvent) => {
+    e.preventDefault()
+    if (!autoPhone.trim()) return
+    try {
+      clearError()
+      const hash = await requestByokCode(autoPhone.trim())
+      setAutoRandomHash(hash)
+      setAutoStep('code')
+    } catch {
+      // surfaced via error state
+    }
+  }
+
+  const handleExtractKeysAndStart = async (e: React.FormEvent) => {
+    e.preventDefault()
+    if (!autoCode.trim() || !autoRandomHash) return
+    try {
+      clearError()
+      const creds = await extractByokKeys(autoPhone.trim(), autoRandomHash, autoCode.trim())
+      setByokApiId(String(creds.apiId))
+      setByokApiHash(creds.apiHash)
+      setEditingByokCreds(false)
+      startQrSession(creds)
+    } catch {
+      // surfaced via error state
+    }
+  }
 
   const handleStartByokQr = (e?: React.FormEvent) => {
     if (e) e.preventDefault()
@@ -322,47 +367,158 @@ export const LoginView: React.FC = () => {
 
               {/* BYOK Input Form (Shown when no active QR session or when editing credentials) */}
               {(!qrUrl || editingByokCreds || qrStatus === 'idle') && qrStatus !== 'confirmed' && qrStatus !== '2fa_required' && (
-                <form onSubmit={handleStartByokQr} className="space-y-4">
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
-                    <div className="space-y-1">
-                      <label className="text-xs font-medium text-[#cccccc] block">
-                        Telegram API ID *
-                      </label>
-                      <input
-                        type="number"
-                        value={byokApiId}
-                        onChange={(e) => setByokApiId(e.target.value)}
-                        placeholder="e.g. 28471920"
-                        required
-                        className="w-full bg-[#111111] border border-[#333333] px-3 py-2 text-xs text-[#ffffff] focus:border-[#22c55e] outline-none font-mono"
-                      />
-                    </div>
-                    <div className="space-y-1">
-                      <label className="text-xs font-medium text-[#cccccc] block">
-                        Telegram API Hash *
-                      </label>
-                      <input
-                        type="text"
-                        value={byokApiHash}
-                        onChange={(e) => setByokApiHash(e.target.value)}
-                        placeholder="32-char hex string"
-                        required
-                        className="w-full bg-[#111111] border border-[#333333] px-3 py-2 text-xs text-[#ffffff] focus:border-[#22c55e] outline-none font-mono"
-                      />
-                    </div>
+                <div className="space-y-4">
+                  {/* Mode Selector: 1-Click Auto vs Manual */}
+                  <div className="flex items-center justify-between p-1 bg-[#111111] border border-[#222222] text-xs">
+                    <button
+                      type="button"
+                      onClick={() => setByokMode('auto')}
+                      className={`flex-1 py-1.5 px-3 flex items-center justify-center gap-1.5 transition-colors ${
+                        byokMode === 'auto'
+                          ? 'bg-[#1e1e1e] text-[#ffffff] font-medium border border-[#333333]'
+                          : 'text-[#888888] hover:text-[#cccccc]'
+                      }`}
+                    >
+                      <Sparkles size={13} className={byokMode === 'auto' ? 'text-[#22c55e]' : ''} />
+                      <span>1-Click Auto Fetch (Recommended)</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setByokMode('manual')}
+                      className={`flex-1 py-1.5 px-3 flex items-center justify-center gap-1.5 transition-colors ${
+                        byokMode === 'manual'
+                          ? 'bg-[#1e1e1e] text-[#ffffff] font-medium border border-[#333333]'
+                          : 'text-[#888888] hover:text-[#cccccc]'
+                      }`}
+                    >
+                      <Key size={13} className={byokMode === 'manual' ? 'text-[#ffffff]' : ''} />
+                      <span>Manual Keys</span>
+                    </button>
                   </div>
 
-                  <Button
-                    type="submit"
-                    variant="primary"
-                    size="md"
-                    className="w-full justify-center text-xs font-medium"
-                    disabled={isLoading}
-                    icon={<QrCode size={14} />}
-                  >
-                    {isLoading ? 'Initializing Node...' : 'Generate Sovereign QR Code'}
-                  </Button>
-                </form>
+                  {byokMode === 'auto' ? (
+                    <div className="space-y-4 p-4 bg-[#0c0c0c] border border-[#222222]">
+                      {autoStep === 'phone' ? (
+                        <form onSubmit={handleRequestByokCode} className="space-y-3">
+                          <div className="space-y-1 text-xs">
+                            <label className="text-xs font-medium text-[#cccccc] block flex items-center gap-1.5">
+                              <Phone size={13} className="text-[#22c55e]" />
+                              Your Telegram Phone Number *
+                            </label>
+                            <input
+                              type="tel"
+                              value={autoPhone}
+                              onChange={(e) => setAutoPhone(e.target.value)}
+                              placeholder="+12025550123 (with country code)"
+                              required
+                              className="w-full bg-[#111111] border border-[#333333] px-3 py-2 text-xs text-[#ffffff] focus:border-[#22c55e] outline-none font-mono"
+                            />
+                            <p className="text-[11px] text-[#777777]">
+                              Telegram will send an official web login code to your Telegram app.
+                            </p>
+                          </div>
+
+                          <Button
+                            type="submit"
+                            variant="primary"
+                            size="md"
+                            className="w-full justify-center text-xs font-medium"
+                            disabled={isLoading}
+                            icon={<ArrowRight size={14} />}
+                          >
+                            {isLoading ? 'Requesting Code from Telegram...' : 'Send Login Code to Telegram'}
+                          </Button>
+                        </form>
+                      ) : (
+                        <form onSubmit={handleExtractKeysAndStart} className="space-y-3">
+                          <div className="p-2.5 bg-[#0a1a0f] border border-[#14532d] text-xs text-[#86efac]">
+                            <span>Telegram sent a confirmation code to your Telegram app messages for <strong>{autoPhone}</strong>.</span>
+                          </div>
+
+                          <div className="space-y-1 text-xs">
+                            <label className="text-xs font-medium text-[#cccccc] block">
+                              Telegram Confirmation Code *
+                            </label>
+                            <input
+                              type="text"
+                              value={autoCode}
+                              onChange={(e) => setAutoCode(e.target.value)}
+                              placeholder="e.g. fH7xK92bA (letters and numbers)"
+                              required
+                              autoFocus
+                              className="w-full bg-[#111111] border border-[#333333] px-3 py-2 text-xs text-[#ffffff] focus:border-[#22c55e] outline-none font-mono tracking-wider"
+                            />
+                            <p className="text-[11px] text-[#777777]">
+                              Case-sensitive web login code sent by Telegram.
+                            </p>
+                          </div>
+
+                          <div className="flex gap-2">
+                            <button
+                              type="button"
+                              onClick={() => setAutoStep('phone')}
+                              className="px-3 py-2 bg-[#191919] hover:bg-[#252525] text-xs text-[#aaaaaa] hover:text-[#ffffff] border border-[#333333]"
+                            >
+                              Back
+                            </button>
+                            <Button
+                              type="submit"
+                              variant="primary"
+                              size="md"
+                              className="flex-1 justify-center text-xs font-medium"
+                              disabled={isLoading}
+                              icon={<Sparkles size={14} />}
+                            >
+                              {isLoading ? 'Extracting Keys & Starting Node...' : 'Extract Keys & Launch Sovereign QR'}
+                            </Button>
+                          </div>
+                        </form>
+                      )}
+                    </div>
+                  ) : (
+                    <form onSubmit={handleStartByokQr} className="space-y-4">
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
+                        <div className="space-y-1">
+                          <label className="text-xs font-medium text-[#cccccc] block">
+                            Telegram API ID *
+                          </label>
+                          <input
+                            type="number"
+                            value={byokApiId}
+                            onChange={(e) => setByokApiId(e.target.value)}
+                            placeholder="e.g. 28471920"
+                            required
+                            className="w-full bg-[#111111] border border-[#333333] px-3 py-2 text-xs text-[#ffffff] focus:border-[#22c55e] outline-none font-mono"
+                          />
+                        </div>
+                        <div className="space-y-1">
+                          <label className="text-xs font-medium text-[#cccccc] block">
+                            Telegram API Hash *
+                          </label>
+                          <input
+                            type="text"
+                            value={byokApiHash}
+                            onChange={(e) => setByokApiHash(e.target.value)}
+                            placeholder="32-char hex string"
+                            required
+                            className="w-full bg-[#111111] border border-[#333333] px-3 py-2 text-xs text-[#ffffff] focus:border-[#22c55e] outline-none font-mono"
+                          />
+                        </div>
+                      </div>
+
+                      <Button
+                        type="submit"
+                        variant="primary"
+                        size="md"
+                        className="w-full justify-center text-xs font-medium"
+                        disabled={isLoading}
+                        icon={<QrCode size={14} />}
+                      >
+                        {isLoading ? 'Initializing Node...' : 'Generate Sovereign QR Code'}
+                      </Button>
+                    </form>
+                  )}
+                </div>
               )}
 
               {/* Active QR Session Display (Waiting, Expired, Failed) */}
