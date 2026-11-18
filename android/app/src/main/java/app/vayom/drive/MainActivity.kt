@@ -66,6 +66,26 @@ class MainActivity : AppCompatActivity() {
         }
 
         webView.webViewClient = object : WebViewClient() {
+            override fun shouldOverrideUrlLoading(
+                view: WebView?,
+                request: WebResourceRequest?
+            ): Boolean {
+                val uri = request?.url ?: return false
+                val url = uri.toString()
+                if (url.startsWith("https://appassets.androidplatform.net") ||
+                    url.startsWith("http://127.0.0.1") ||
+                    url.startsWith("http://localhost")) {
+                    return false
+                }
+                return try {
+                    val intent = Intent(Intent.ACTION_VIEW, uri)
+                    view?.context?.startActivity(intent)
+                    true
+                } catch (e: Exception) {
+                    false
+                }
+            }
+
             override fun shouldInterceptRequest(
                 view: WebView?,
                 request: WebResourceRequest?

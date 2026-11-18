@@ -59,7 +59,15 @@ export const LoginView: React.FC = () => {
       return ''
     }
   })
-  const [editingByokCreds, setEditingByokCreds] = useState<boolean>(false)
+  const [editingByokCreds, setEditingByokCreds] = useState<boolean>(() => {
+    try {
+      const id = localStorage.getItem('vayom_byok_api_id')
+      const hash = localStorage.getItem('vayom_byok_api_hash')
+      return !(id && hash)
+    } catch {
+      return true
+    }
+  })
 
   // 1-Click Automated BYOK extraction state
   const [byokMode, setByokMode] = useState<'auto' | 'manual'>(() => {
@@ -272,7 +280,13 @@ export const LoginView: React.FC = () => {
           <div className="grid grid-cols-2 sm:grid-cols-4 border-b border-[#282828] text-xs font-medium">
             {/* TAB 1: BYOK + QR (PRIMARY / RECOMMENDED) */}
             <button
-              onClick={() => { setActiveTab('byok_qr'); clearError(); }}
+              onClick={() => {
+                setActiveTab('byok_qr')
+                clearError()
+                if (!byokApiId || !byokApiHash) {
+                  setEditingByokCreds(true)
+                }
+              }}
               className={`p-3 text-center border-r border-[#282828] transition-colors flex items-center justify-center gap-1.5 ${
                 activeTab === 'byok_qr'
                   ? 'bg-[#141414] text-[#ffffff] border-b-2 border-b-[#22c55e]'
@@ -358,15 +372,19 @@ export const LoginView: React.FC = () => {
                     href="https://my.telegram.org"
                     target="_blank"
                     rel="noreferrer"
+                    onClick={(e) => {
+                      e.preventDefault()
+                      window.open('https://my.telegram.org', '_blank', 'noopener,noreferrer')
+                    }}
                     className="inline-flex items-center gap-1 text-[11px] text-[#22c55e] hover:underline font-medium pt-0.5"
                   >
-                    Get free API ID & Hash in 30 seconds at my.telegram.org <ExternalLink size={10} />
+                    Or open my.telegram.org manually in browser <ExternalLink size={10} />
                   </a>
                 </div>
               </div>
 
-              {/* BYOK Input Form (Shown when no active QR session or when editing credentials) */}
-              {(!qrUrl || editingByokCreds || qrStatus === 'idle') && qrStatus !== 'confirmed' && qrStatus !== '2fa_required' && (
+              {/* BYOK Input Form (Shown when credentials not set, or editing credentials, or no QR active) */}
+              {(!byokApiId || !byokApiHash || editingByokCreds || !qrUrl || qrStatus === 'idle') && qrStatus !== 'confirmed' && qrStatus !== '2fa_required' && (
                 <div className="space-y-4">
                   {/* Mode Selector: 1-Click Auto vs Manual */}
                   <div className="flex items-center justify-between p-1 bg-[#111111] border border-[#222222] text-xs">
@@ -521,8 +539,8 @@ export const LoginView: React.FC = () => {
                 </div>
               )}
 
-              {/* Active QR Session Display (Waiting, Expired, Failed) */}
-              {!editingByokCreds && qrUrl && (qrStatus === 'waiting' || qrStatus === 'expired' || qrStatus === 'failed') && (
+              {/* Active QR Session Display (Waiting, Expired, Failed) - ONLY when byok credentials are configured */}
+              {!editingByokCreds && Boolean(byokApiId && byokApiHash) && qrUrl && (qrStatus === 'waiting' || qrStatus === 'expired' || qrStatus === 'failed') && (
                 <div className="space-y-4">
                   {/* Active Credentials Bar */}
                   <div className="flex items-center justify-between p-2 bg-[#111111] border border-[#222222] text-[11px]">
