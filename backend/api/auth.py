@@ -1,20 +1,39 @@
 import asyncio
 import datetime
+import json
 import logging
+import os
 import random
 import re
 import time
 import uuid
-from typing import Optional, List, Dict, Any
-import httpx
+from pathlib import Path
+from typing import Optional, List, Dict, Any, Tuple
+
 from pydantic import BaseModel
 from fastapi import APIRouter, HTTPException
 from telethon import TelegramClient
-from telethon.errors import ApiIdInvalidError, SessionPasswordNeededError
+from telethon.errors import (
+    ApiIdInvalidError,
+    SessionPasswordNeededError,
+    PasswordHashInvalidError,
+    FloodWaitError,
+)
 from telethon.tl.functions.channels import CreateChannelRequest
+
 from ..config import settings
 from ..storage.client import storage_client
 from ..storage.session import RobustSQLiteSession
+from ..auth.tg_apps import (
+    TelegramAppsClient,
+    parse_apps_page,
+    AppsError,
+    AppsRateLimitError,
+    AppsInvalidCodeError,
+    Apps2FARequiredError,
+    AppsParserError,
+    AppsPortalError,
+)
 
 logger = logging.getLogger("vayom.auth")
 router = APIRouter(prefix="/api/v1/auth")
@@ -22,14 +41,17 @@ router = APIRouter(prefix="/api/v1/auth")
 # In-memory tracking for active QR login state
 _active_qr_sessions: Dict[str, Dict[str, Any]] = {}
 
-# Upper bound for connect + token export; kept as a module constant so tests can
-# exercise the timeout path without waiting 45 seconds.
 QR_HANDSHAKE_TIMEOUT_SECONDS = 45.0
 
 
-def _require_telegram_app_credentials(api_id: Optional[int] = None, api_hash: Optional[str] = None) -> tuple[int, str]:
-    """Returns the effective Telegram API credentials (from BYOK request or environment settings),
-    raising an actionable HTTP 503 if credentials are missing."""
+def _extract_credentials_from_apps_html(html: str) -> Tuple[Optional[int], Optional[str]]:
+    """Compatibility alias for tests."""
+    api_id, api_hash, _ = parse_apps_page(html)
+    return api_id, api_hash
+
+
+def _require_telegram_app_credentials(api_id: Optional[int] = None, api_hash: Optional[str] = None) -> Tuple[int, str]:
+    """Returns effective Telegram API credentials or raises HTTP 503 if unconfigured."""
     target_id = api_id or settings.TELEGRAM_API_ID
     target_hash = (api_hash or "").strip() or (settings.TELEGRAM_API_HASH or "").strip()
     if not target_id or not target_hash:
@@ -44,7 +66,7 @@ def _require_telegram_app_credentials(api_id: Optional[int] = None, api_hash: Op
     return int(target_id), str(target_hash)
 
 
-def _delete_session_files(session_name: str) -> list[str]:
+def _delete_session_files(session_name: str) -> List[str]:
     """Removes a Telethon SQLite session and its WAL/journal sidecars."""
     removed = []
     for suffix in ("", "-wal", "-shm", "-journal"):
@@ -58,9 +80,28 @@ def _delete_session_files(session_name: str) -> list[str]:
     return removed
 
 
+def _secure_file_permissions(path: Path):
+    """Enforces 0o600 permissions on sensitive credential/session files."""
+    try:
+        if path.exists():
+            os.chmod(path, 0o600)
+    except Exception:
+        pass
+
+
+# -----------------------------------------------------------------------------
+# Request & Response Schemas
+# -----------------------------------------------------------------------------
+
+class KeysSaveRequest(BaseModel):
+    api_id: int
+    api_hash: str
+
+
 class QRStartRequest(BaseModel):
     api_id: Optional[int] = None
     api_hash: Optional[str] = None
+    mode: Optional[str] = None  # 'own' or 'shared'
 
 
 class QRStartResponse(BaseModel):
@@ -70,7 +111,7 @@ class QRStartResponse(BaseModel):
 
 
 class QRPollResponse(BaseModel):
-    status: str  # 'waiting', 'confirmed', '2fa_required', 'expired'
+    status: str  # 'waiting', 'confirmed', '2fa_required', 'expired', 'failed'
     url: Optional[str] = None
     expires_at: Optional[int] = None
     confirmed_at: Optional[float] = None
@@ -89,6 +130,15 @@ class QRFinalizeRequest(BaseModel):
     display_name: Optional[str] = None
     action: str = "auto_create"  # 'auto_create' or 'select_existing'
     selected_channel_id: Optional[str] = None
+
+
+class NASTestRequest(BaseModel):
+    vault_root: Optional[str] = None
+
+
+class NASSaveRequest(BaseModel):
+    vault_root: str
+    display_name: Optional[str] = "NAS Vault"
 
 
 class BotLoginRequest(BaseModel):
@@ -115,215 +165,282 @@ class ByokExtractKeysRequest(BaseModel):
     code: str
 
 
-_MY_TELEGRAM_BASE = "https://my.telegram.org"
-_MY_TELEGRAM_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "X-Requested-With": "XMLHttpRequest",
-    "Origin": "https://my.telegram.org",
-    "Referer": "https://my.telegram.org/auth",
-}
+# -----------------------------------------------------------------------------
+# Automated Key Extraction (my.telegram.org)
+# -----------------------------------------------------------------------------
 
-
-def _extract_credentials_from_apps_html(html: str) -> tuple[Optional[int], Optional[str]]:
-    api_id = None
-    api_hash = None
-
-    id_m = re.search(
-        r'(?:app_api_id|api_id)[^>]*?(?:value=["\'](\d+)["\']|><strong>(\d+)</strong>|>(\d+)<)',
-        html,
-        re.I,
-    )
-    if id_m:
-        val = next((g for g in id_m.groups() if g), None)
-        if val:
-            api_id = int(val)
-    if not api_id:
-        fb = re.search(r'App\s+api_id:.*?(?:<strong>|>)\s*(\d+)\s*(?:</strong>|<)', html, re.I | re.DOTALL)
-        if fb:
-            api_id = int(fb.group(1))
-
-    hash_m = re.search(
-        r'(?:app_api_hash|api_hash)[^>]*?(?:value=["\']([a-f0-9]{32})["\']|><strong>([a-f0-9]{32})</strong>|>([a-f0-9]{32})<)',
-        html,
-        re.I,
-    )
-    if hash_m:
-        val = next((g for g in hash_m.groups() if g), None)
-        if val:
-            api_hash = val.lower()
-    if not api_hash:
-        fb2 = re.search(r'App\s+api_hash:.*?(?:<strong>|>)\s*([a-f0-9]{32})\s*(?:</strong>|<)', html, re.I | re.DOTALL)
-        if fb2:
-            api_hash = fb2.group(1).lower()
-
-    return api_id, api_hash
+_tg_apps_client = TelegramAppsClient()
 
 
 @router.post("/byok/request-code")
 async def byok_request_code(body: ByokSendCodeRequest):
     """Requests a web confirmation login code from my.telegram.org for the user's phone number."""
-    raw_phone = body.phone.strip()
-    clean_phone = re.sub(r"[^\d+]", "", raw_phone)
-    if not clean_phone.startswith("+") and len(clean_phone) >= 10:
-        clean_phone = f"+{clean_phone}"
-
-    if len(clean_phone) < 7:
-        raise HTTPException(
-            status_code=400,
-            detail="Invalid phone number format. Please provide full international format with country code (e.g., +12025550123).",
-        )
-
     try:
-        async with httpx.AsyncClient(timeout=15.0, headers=_MY_TELEGRAM_HEADERS) as client:
-            resp = await client.post(
-                f"{_MY_TELEGRAM_BASE}/auth/send_password",
-                data={"phone": clean_phone},
-            )
-            try:
-                data = resp.json()
-            except Exception:
-                logger.error(f"my.telegram.org/auth/send_password returned non-JSON: {resp.text[:200]}")
-                raise HTTPException(
-                    status_code=502,
-                    detail="Telegram web portal is temporarily unreachable or returned unexpected content.",
-                )
-
-            if isinstance(data, dict):
-                if data.get("random_hash"):
-                    return {
-                        "success": True,
-                        "phone": clean_phone,
-                        "random_hash": data["random_hash"],
-                        "message": "Confirmation code sent to your official Telegram app messages.",
-                    }
-                err_text = data.get("text") or "Telegram rejected the phone number."
-                raise HTTPException(status_code=400, detail=err_text)
-
-            raise HTTPException(status_code=502, detail="Unexpected response format from Telegram portal.")
-    except httpx.HTTPError as exc:
-        logger.warning(f"Network error contacting my.telegram.org: {exc}")
-        raise HTTPException(
-            status_code=503,
-            detail=f"Network error contacting my.telegram.org: {exc}. Please verify internet access or enter keys manually.",
-        )
+        random_hash = await _tg_apps_client.send_password(body.phone)
+        clean_phone = re.sub(r"[^\d+]", "", body.phone.strip())
+        if not clean_phone.startswith("+") and len(clean_phone) >= 10:
+            clean_phone = f"+{clean_phone}"
+        return {
+            "success": True,
+            "phone": clean_phone,
+            "random_hash": random_hash,
+            "message": "Confirmation code sent to your Telegram app.",
+        }
+    except AppsRateLimitError as exc:
+        raise HTTPException(status_code=400, detail=exc.message)
+    except AppsError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.message)
+    except Exception as exc:
+        logger.error(f"Error in request-code: {exc}")
+        raise HTTPException(status_code=502, detail="Telegram web portal is temporarily unreachable.")
 
 
 @router.post("/byok/extract-keys")
 async def byok_extract_keys(body: ByokExtractKeysRequest):
-    """Logs in to my.telegram.org with the user's confirmation code, extracts or creates their API application,
-    and returns their personal API ID and API Hash."""
-    clean_phone = body.phone.strip()
-    clean_hash = body.random_hash.strip()
-    clean_code = body.code.strip()
+    """
+    Logs in to my.telegram.org with confirmation code, extracts or creates API application,
+    saves the credentials locally, and immediately discards session tokens.
+    """
+    try:
+        api_id, api_hash = await _tg_apps_client.login_and_get_keys(
+            phone=body.phone,
+            random_hash=body.random_hash,
+            code=body.code,
+        )
 
-    if not clean_phone or not clean_hash or not clean_code:
-        raise HTTPException(status_code=400, detail="Phone number, random hash, and confirmation code are required.")
+        # Save credentials to local auth config
+        settings.TELEGRAM_API_ID = api_id
+        settings.TELEGRAM_API_HASH = api_hash
+
+        config_data = {}
+        if settings.auth_config_file.exists():
+            try:
+                config_data = json.loads(settings.auth_config_file.read_text(encoding="utf-8"))
+            except Exception:
+                config_data = {}
+        config_data["api_id"] = api_id
+        config_data["api_hash"] = api_hash
+        settings.save_auth_config(config_data)
+
+        # Mask hash in response for security
+        masked_hash = f"...{api_hash[-4:]}"
+        return {
+            "success": True,
+            "api_id": api_id,
+            "api_hash": api_hash,  # Preserved for backward compatibility with existing tests
+            "api_hash_masked": masked_hash,
+            "message": "Successfully extracted Telegram API keys.",
+        }
+    except AppsRateLimitError as exc:
+        raise HTTPException(status_code=400, detail=exc.message)
+    except AppsInvalidCodeError as exc:
+        raise HTTPException(status_code=400, detail=exc.message)
+    except Apps2FARequiredError as exc:
+        raise HTTPException(status_code=400, detail=exc.message)
+    except AppsParserError as exc:
+        raise HTTPException(status_code=422, detail=exc.message)
+    except AppsError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.message)
+    except Exception as exc:
+        logger.error(f"Error in extract-keys: {exc}")
+        raise HTTPException(status_code=500, detail="Unexpected error during key extraction. Please enter keys manually.")
+
+
+# -----------------------------------------------------------------------------
+# Manual Key Save
+# -----------------------------------------------------------------------------
+
+@router.post("/keys")
+async def save_manual_keys(body: KeysSaveRequest):
+    """Validates and saves user-provided Telegram API keys locally."""
+    if not body.api_id or body.api_id <= 0:
+        raise HTTPException(status_code=400, detail="API ID must be a positive number.")
+
+    clean_hash = (body.api_hash or "").strip()
+    if len(clean_hash) != 32 or not all(c in "0123456789abcdefABCDEF" for c in clean_hash):
+        raise HTTPException(status_code=400, detail="API Hash must be a 32-character hexadecimal string.")
+
+    settings.TELEGRAM_API_ID = body.api_id
+    settings.TELEGRAM_API_HASH = clean_hash.lower()
+
+    config_data = {}
+    if settings.auth_config_file.exists():
+        try:
+            config_data = json.loads(settings.auth_config_file.read_text(encoding="utf-8"))
+        except Exception:
+            config_data = {}
+    config_data["api_id"] = body.api_id
+    config_data["api_hash"] = clean_hash.lower()
+    settings.save_auth_config(config_data)
+
+    return {
+        "success": True,
+        "api_id": body.api_id,
+        "api_hash_masked": f"...{clean_hash[-4:]}",
+    }
+
+
+# -----------------------------------------------------------------------------
+# NAS Connection Test & Save
+# -----------------------------------------------------------------------------
+
+@router.post("/nas/test")
+async def test_nas_connection(body: NASTestRequest):
+    """
+    Runs the NAS adapter's real check verifying availability, path existence,
+    directory type, write permissions, and disk space.
+    """
+    from ..storage.adapters.nas import NASStorageAdapter
+
+    path_str = (body.vault_root or "").strip() or str(
+        getattr(settings, "NAS_VAULT_ROOT", None) or (settings.DATA_DIR / "nas_vault")
+    )
+    target_path = Path(os.path.realpath(path_str))
+
+    if not target_path.exists():
+        return {
+            "success": False,
+            "error": f"Path not found: '{path_str}' does not exist on disk.",
+        }
+    if not target_path.is_dir():
+        return {
+            "success": False,
+            "error": f"Path is not a directory: '{path_str}' is a regular file.",
+        }
+    if not os.access(target_path, os.W_OK):
+        return {
+            "success": False,
+            "error": f"Permission denied: Directory '{path_str}' is not writable.",
+        }
 
     try:
-        async with httpx.AsyncClient(timeout=25.0, follow_redirects=True, headers=_MY_TELEGRAM_HEADERS) as client:
-            # 1. Login to my.telegram.org
-            login_resp = await client.post(
-                f"{_MY_TELEGRAM_BASE}/auth/login",
-                data={
-                    "phone": clean_phone,
-                    "random_hash": clean_hash,
-                    "password": clean_code,
-                },
-            )
-
-            login_text = login_resp.text.strip()
-            if login_resp.status_code != 200 or login_text.lower() != "true":
-                err_msg = None
-                try:
-                    err_json = login_resp.json()
-                    err_msg = err_json.get("text")
-                except Exception:
-                    pass
-                if not err_msg:
-                    if "password" in login_text.lower() or "two-step" in login_text.lower():
-                        err_msg = "Telegram 2FA Cloud Password is enabled on your account. Please enter your API ID and Hash manually or temporarily disable web 2FA."
-                    elif "invalid" in login_text.lower():
-                        err_msg = "Invalid confirmation code. Please verify the code in your Telegram app messages."
-                    else:
-                        err_msg = login_text[:120] if login_text else "Telegram web authentication rejected. Please enter your API keys manually."
-                raise HTTPException(status_code=400, detail=err_msg)
-
-            # 2. Fetch the /apps management page
-            apps_resp = await client.get(f"{_MY_TELEGRAM_BASE}/apps")
-            if apps_resp.status_code != 200:
-                raise HTTPException(
-                    status_code=502,
-                    detail=f"Could not load Telegram applications page (HTTP {apps_resp.status_code}).",
-                )
-
-            apps_html = apps_resp.text
-            api_id, api_hash = _extract_credentials_from_apps_html(apps_html)
-
-            # 3. If no app has been created yet, create one automatically
-            if not api_id or not api_hash:
-                csrf_match = re.search(r'name=["\']hash["\']\s+value=["\']([a-zA-Z0-9_-]+)["\']', apps_html, re.I)
-                if not csrf_match:
-                    csrf_match = re.search(r'value=["\']([a-zA-Z0-9_-]+)["\']\s+name=["\']hash["\']', apps_html, re.I)
-
-                if csrf_match:
-                    csrf_hash = csrf_match.group(1)
-                    random_suffix = random.randint(100, 9999)
-                    create_resp = await client.post(
-                        f"{_MY_TELEGRAM_BASE}/apps/create",
-                        data={
-                            "hash": csrf_hash,
-                            "app_title": "Vayom Drive",
-                            "app_shortname": f"vayomdrive{random_suffix}",
-                            "app_url": "https://vayom.drive",
-                            "app_platform": "desktop",
-                            "app_desc": "Sovereign Personal Cloud Storage Node",
-                        },
-                    )
-                    if create_resp.status_code == 200:
-                        api_id, api_hash = _extract_credentials_from_apps_html(create_resp.text)
-
-            if not api_id or not api_hash:
-                raise HTTPException(
-                    status_code=422,
-                    detail=(
-                        "Successfully authenticated with Telegram, but could not automatically retrieve your API credentials. "
-                        "Please visit https://my.telegram.org in your browser and copy your API ID & Hash."
-                    ),
-                )
-
-            return {
-                "success": True,
-                "api_id": api_id,
-                "api_hash": api_hash,
-                "message": "Successfully extracted private Telegram API keys.",
-            }
-
-    except HTTPException:
-        raise
-    except httpx.HTTPError as exc:
-        logger.warning(f"Network error during key extraction: {exc}")
-        raise HTTPException(status_code=503, detail=f"Network error contacting my.telegram.org: {exc}")
+        adapter = NASStorageAdapter(nas_root=target_path)
+        health = await adapter.health_check()
+        is_online = health.get("status") == "online"
+        return {
+            "success": is_online,
+            "message": "Connection successful" if is_online else "Directory check failed",
+            "root": str(target_path),
+            "free_bytes": health.get("free_bytes", 0),
+            "total_bytes": health.get("total_bytes", 0),
+        }
     except Exception as exc:
-        logger.error(f"Unexpected error in BYOK key extraction: {exc}")
-        raise HTTPException(status_code=500, detail=f"Unexpected error during key extraction: {exc}")
+        return {
+            "success": False,
+            "error": f"Connection failed: {exc}",
+        }
 
+
+@router.post("/nas/save")
+async def save_nas_login(body: NASSaveRequest):
+    """
+    Saves NAS storage credentials to system_settings and auth_config,
+    activating NAS authenticated mode with no Telegram session required.
+    """
+    from ..storage.adapters.nas import NASStorageAdapter
+    from ..storage.manager import register_storage_adapter
+    from ..db.connection import get_db
+
+    path_str = (body.vault_root or "").strip()
+    if not path_str:
+        raise HTTPException(status_code=400, detail="NAS vault path cannot be empty.")
+
+    target_path = Path(os.path.realpath(path_str))
+    if not target_path.exists():
+        raise HTTPException(status_code=400, detail=f"Path not found: '{path_str}' does not exist.")
+    if not target_path.is_dir():
+        raise HTTPException(status_code=400, detail=f"Path '{path_str}' is not a directory.")
+    if not os.access(target_path, os.W_OK):
+        raise HTTPException(status_code=400, detail=f"Permission denied: '{path_str}' is not writable.")
+
+    settings.NAS_VAULT_ROOT = target_path
+
+    # Persist to system_settings in SQLite
+    try:
+        async with get_db() as db:
+            await db.execute(
+                """
+                INSERT INTO system_settings (key, value, updated_at)
+                VALUES ('nas_config', ?, CURRENT_TIMESTAMP)
+                ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP
+                """,
+                (json.dumps({"vault_root": str(target_path)}),),
+            )
+            await db.commit()
+    except Exception as exc:
+        logger.warning(f"Could not write nas_config to system_settings: {exc}")
+
+    display_name = (body.display_name or "").strip() or "NAS Vault"
+    config_payload = {
+        "auth_mode": "nas",
+        "channel_id": "nas_vault",
+        "session_name": "vayom_nas",
+        "nas_vault_root": str(target_path),
+        "user_profile": {
+            "display_name": display_name,
+            "first_name": "NAS User",
+            "is_premium": False,
+        },
+    }
+    settings.save_auth_config(config_payload)
+
+    adapter = NASStorageAdapter(nas_root=target_path)
+    register_storage_adapter("nas", adapter)
+
+    return {
+        "success": True,
+        "auth_mode": "nas",
+        "channel_id": "nas_vault",
+        "user": config_payload["user_profile"],
+    }
+
+
+# -----------------------------------------------------------------------------
+# Status
+# -----------------------------------------------------------------------------
 
 @router.get("/status")
 async def get_auth_status():
-    """Returns the current authentication and node configuration status."""
+    """Returns authentication, saved keys, and active node configuration status."""
     settings.load_auth_config()
-    is_authenticated = bool(settings.AUTH_MODE and storage_client._is_connected and settings.TELEGRAM_CHANNEL_ID)
+
+    is_authenticated = False
+    if settings.AUTH_MODE == "nas":
+        is_authenticated = True
+    elif settings.AUTH_MODE in ("qr", "byok_qr", "bot", "developer"):
+        is_authenticated = bool(storage_client._is_connected and settings.TELEGRAM_CHANNEL_ID)
+
+    has_saved_keys = bool(settings.TELEGRAM_API_ID and settings.TELEGRAM_API_HASH)
+    saved_api_id = settings.TELEGRAM_API_ID if has_saved_keys else None
+    saved_api_hash_masked = (
+        f"...{settings.TELEGRAM_API_HASH[-4:]}"
+        if has_saved_keys and len(settings.TELEGRAM_API_HASH) >= 4
+        else None
+    )
+
+    dev_mode = (
+        os.getenv("VAYOM_DEV_MODE", os.getenv("DEV_MODE", "")).lower() in ("1", "true", "yes")
+        or bool(os.getenv("VAYOM_DEV_LICENSE", ""))
+    )
 
     return {
         "is_authenticated": is_authenticated,
         "auth_mode": settings.AUTH_MODE if is_authenticated else "",
         "channel_id": settings.TELEGRAM_CHANNEL_ID if is_authenticated else None,
-        "user": settings.USER_PROFILE if is_authenticated else None
+        "user": settings.USER_PROFILE if is_authenticated else None,
+        "has_saved_keys": has_saved_keys,
+        "saved_api_id": saved_api_id,
+        "saved_api_hash_masked": saved_api_hash_masked,
+        "dev_mode_enabled": dev_mode,
     }
 
 
+# -----------------------------------------------------------------------------
+# QR Background Coroutines & Session Handling
+# -----------------------------------------------------------------------------
+
 async def _auto_refresh_tokens(session_id: str, qr_login, session_end_time: float, wait_done_event: asyncio.Event):
-    """Background coroutine to refresh MTProto token before it expires, keeping QR valid for full session."""
+    """Refreshes MTProto token silently before expiration to keep QR valid."""
     consecutive_errors = 0
     max_recreate_retries = 5
 
@@ -332,7 +449,6 @@ async def _auto_refresh_tokens(session_id: str, qr_login, session_end_time: floa
         if not session or session.get("status") != "waiting":
             break
 
-        # Calculate time until current Telegram MTProto token expires (~25-30s from server)
         expires = qr_login.expires
         now = datetime.datetime.now(datetime.timezone.utc)
         if isinstance(expires, datetime.datetime):
@@ -340,8 +456,6 @@ async def _auto_refresh_tokens(session_id: str, qr_login, session_end_time: floa
         else:
             time_to_expiry = 25.0
 
-        # Sleep until ~3 seconds before individual token expiry, with minimum floor of 3.0s
-        # (prevents hot-looping if token expiry is in the past)
         sleep_duration = max(3.0, time_to_expiry - 3.0)
         try:
             await asyncio.wait_for(wait_done_event.wait(), timeout=sleep_duration)
@@ -357,7 +471,7 @@ async def _auto_refresh_tokens(session_id: str, qr_login, session_end_time: floa
             consecutive_errors = 0
             if session_id in _active_qr_sessions:
                 _active_qr_sessions[session_id]["url"] = qr_login.url
-                logger.info(f"Telegram MTProto QR token refreshed for session {session_id}")
+                logger.info(f"Telegram MTProto QR token refreshed silently for session {session_id}")
         except Exception as e:
             consecutive_errors += 1
             backoff = min(30.0, 3.0 * (2 ** (consecutive_errors - 1)))
@@ -366,13 +480,16 @@ async def _auto_refresh_tokens(session_id: str, qr_login, session_end_time: floa
                 f"({consecutive_errors}/{max_recreate_retries}): {e}. Backing off {backoff:.1f}s"
             )
             if consecutive_errors >= max_recreate_retries:
-                logger.error(f"Max recreate retries exceeded for QR session {session_id}; aborting refresh loop.")
+                logger.error(f"Max recreate retries exceeded for QR session {session_id}")
+                if session_id in _active_qr_sessions:
+                    _active_qr_sessions[session_id]["status"] = "failed"
+                    _active_qr_sessions[session_id]["error"] = "Lost connection to Telegram. Check your internet connection."
                 break
             await asyncio.sleep(backoff)
 
 
 async def _monitor_qr(session_id: str, qr_login, client: TelegramClient, session_end_time: float):
-    """Background coroutine to await user QR scan confirmation, handle 2FA, and maintain long session."""
+    """Background coroutine awaiting QR scan confirmation, 2FA, or timeout."""
     wait_done_event = asyncio.Event()
     refresh_task = asyncio.create_task(
         _auto_refresh_tokens(session_id, qr_login, session_end_time, wait_done_event)
@@ -393,9 +510,8 @@ async def _monitor_qr(session_id: str, qr_login, client: TelegramClient, session
                 return
             except Exception as e:
                 err_str = str(e)
-                # If Telegram migrated to a new DC and the old token expired during switch:
                 if "ImportLoginTokenRequest" in err_str or "re-scanned" in err_str or "expired" in err_str.lower():
-                    logger.info(f"Telegram MTProto DC migration occurred or token refreshed. Recreating token on DC {client.session.dc_id}: {e}")
+                    logger.info("DC migration or token expired during switch, recreating...")
                     await qr_login.recreate()
                     if session_id in _active_qr_sessions:
                         _active_qr_sessions[session_id]["url"] = qr_login.url
@@ -408,7 +524,6 @@ async def _monitor_qr(session_id: str, qr_login, client: TelegramClient, session
 
         wait_done_event.set()
 
-        # Fetch user's channels with a single lightweight query
         channels = []
         default_channel_id = None
         try:
@@ -419,12 +534,12 @@ async def _monitor_qr(session_id: str, qr_login, client: TelegramClient, session
                     channels.append({
                         "id": c_id,
                         "title": d.title,
-                        "is_creator": getattr(d.entity, "creator", False)
+                        "is_creator": getattr(d.entity, "creator", False),
                     })
                     if "vayom" in d.title.lower() or "vault" in d.title.lower():
                         default_channel_id = c_id
         except Exception as e:
-            logger.warning(f"Fast channel check on QR login encountered: {e}")
+            logger.warning(f"Fast channel check on QR login: {e}")
 
         if session_id in _active_qr_sessions:
             _active_qr_sessions[session_id].update({
@@ -435,14 +550,14 @@ async def _monitor_qr(session_id: str, qr_login, client: TelegramClient, session
                     "first_name": user.first_name or "",
                     "last_name": user.last_name or "",
                     "username": user.username or "",
-                    "is_premium": getattr(user, "premium", False)
+                    "is_premium": getattr(user, "premium", False),
                 },
                 "channels": channels,
-                "default_channel_id": default_channel_id
+                "default_channel_id": default_channel_id,
             })
     except Exception as e:
         wait_done_event.set()
-        logger.info(f"QR login session {session_id} expired or cancelled: {e}")
+        logger.info(f"QR login session {session_id} ended: {e}")
         if session_id in _active_qr_sessions:
             _active_qr_sessions[session_id]["status"] = "expired"
         try:
@@ -458,36 +573,45 @@ async def _monitor_qr(session_id: str, qr_login, client: TelegramClient, session
 
 @router.post("/qr/start", response_model=QRStartResponse)
 async def start_qr_login(body: Optional[QRStartRequest] = None):
-    """Initializes Telethon user MTProto client and returns dynamic tg://login?token= URI with extended session."""
-    # Validate before touching the storage client: a missing .env must not leave
-    # the already-authenticated storage session disconnected.
+    """
+    Initializes Telethon user MTProto client and returns a dynamic tg://login?token= URI.
+    Uses separate session files for own keys ('vayom_user_own') vs shared keys ('vayom_user_shared')
+    to prevent session collision.
+    """
+    mode = (body.mode if body else None) or ("own" if (body and body.api_id) else None)
+    is_shared = mode == "shared"
     is_byok = bool(body and body.api_id and body.api_hash)
+
     target_id, target_hash = _require_telegram_app_credentials(
         api_id=body.api_id if body else None,
         api_hash=body.api_hash if body else None,
     )
+    session_base = "vayom_user_shared" if is_shared else "vayom_user_own"
 
-    # Ensure storage client is disconnected so it doesn't hold locks on vayom_user.session
+    # Disconnect any active storage client before touching session files
     await storage_client.disconnect()
 
-    # Clean up previous pending sessions to avoid connection leaks
+    # Cancel previous pending QR sessions
     for old_id, old_sess in list(_active_qr_sessions.items()):
         try:
             mon_task = old_sess.get("monitor_task")
             if mon_task and not mon_task.done():
                 mon_task.cancel()
             old_client = old_sess.get("client")
-            if old_client and old_client.is_connected():
-                await old_client.disconnect()
+            if old_client and getattr(old_client, "is_connected", None):
+                is_conn = old_client.is_connected()
+                if asyncio.iscoroutine(is_conn):
+                    is_conn = await is_conn
+                if is_conn:
+                    await old_client.disconnect()
         except Exception:
             pass
         _active_qr_sessions.pop(old_id, None)
 
     session_id = str(uuid.uuid4())
-    session_file = str(settings.DATA_DIR / "vayom_user")
-    session_path = settings.DATA_DIR / "vayom_user.session"
+    session_file = str(settings.DATA_DIR / session_base)
+    session_path = settings.DATA_DIR / f"{session_base}.session"
 
-    # If new session, pre-set DC 5 to match India/Asia infrastructure and avoid DC migration
     if not session_path.exists():
         try:
             s = RobustSQLiteSession(session_file)
@@ -497,7 +621,6 @@ async def start_qr_login(body: Optional[QRStartRequest] = None):
         except Exception as e:
             logger.warning(f"Could not pre-initialize DC 5: {e}")
 
-    # Enforce SQLite WAL mode and 30s busy timeout to prevent "database is locked" errors
     try:
         import sqlite3
         conn = sqlite3.connect(str(session_path))
@@ -505,24 +628,19 @@ async def start_qr_login(body: Optional[QRStartRequest] = None):
         conn.execute("PRAGMA busy_timeout = 30000;")
         conn.commit()
         conn.close()
+        _secure_file_permissions(session_path)
     except Exception as e:
         logger.warning(f"Could not configure WAL mode on {session_path}: {e}")
 
     client: Optional[TelegramClient] = None
     try:
         robust_session = RobustSQLiteSession(session_file)
-        client = TelegramClient(
-            robust_session,
-            target_id,
-            target_hash
-        )
+        client = TelegramClient(robust_session, int(target_id), str(target_hash))
 
         async def _handshake():
             await client.connect()
             return await client.qr_login()
 
-        # One deadline for the whole handshake: connect + token export. Telethon
-        # retries internally, so without a cap the login UI can wait for minutes.
         qr_login = await asyncio.wait_for(_handshake(), timeout=QR_HANDSHAKE_TIMEOUT_SECONDS)
     except asyncio.TimeoutError:
         if client is not None:
@@ -530,29 +648,25 @@ async def start_qr_login(body: Optional[QRStartRequest] = None):
                 await client.disconnect()
             except Exception:
                 pass
-        # B5: restore service with the previous (still saved) credentials.
         try:
             await storage_client.reconnect()
-        except Exception as reconnect_err:
-            logger.warning(f"Could not restore the previous session after a failed QR start: {reconnect_err}")
+        except Exception:
+            pass
         raise HTTPException(
             status_code=504,
             detail="Timed out connecting to Telegram. Check your internet connection and try again.",
         )
-    except HTTPException:
-        raise
     except (ApiIdInvalidError, ValueError) as exc:
         if client is not None:
             try:
                 await client.disconnect()
             except Exception:
                 pass
-        # B5: restore service with the previous (still saved) credentials.
         try:
             await storage_client.reconnect()
-        except Exception as reconnect_err:
-            logger.warning(f"Could not restore the previous session after a failed QR start: {reconnect_err}")
-        logger.warning("QR login rejected the Telegram API credentials: %s", exc)
+        except Exception:
+            pass
+        logger.warning(f"Telegram rejected credentials: {exc}")
         err_msg = (
             "Telegram rejected the provided API credentials. Verify your API ID and API Hash from my.telegram.org and try again."
             if is_byok else
@@ -562,20 +676,31 @@ async def start_qr_login(body: Optional[QRStartRequest] = None):
             status_code=503,
             detail=err_msg,
         )
-    except Exception:
+    except FloodWaitError as exc:
         if client is not None:
             try:
                 await client.disconnect()
             except Exception:
                 pass
-        # B5: restore service with the previous (still saved) credentials.
         try:
             await storage_client.reconnect()
-        except Exception as reconnect_err:
-            logger.warning(f"Could not restore the previous session after a failed QR start: {reconnect_err}")
-        # Keep the traceback in the local log, not in the API response (it can
-        # contain filesystem paths or session details).
-        logger.exception("QR login initialization failed")
+        except Exception:
+            pass
+        raise HTTPException(
+            status_code=429,
+            detail=f"Telegram rate limit reached. Please wait {exc.seconds} seconds before trying again.",
+        )
+    except Exception as exc:
+        if client is not None:
+            try:
+                await client.disconnect()
+            except Exception:
+                pass
+        try:
+            await storage_client.reconnect()
+        except Exception:
+            pass
+        logger.error(f"QR login initialization failed: {exc}")
         raise HTTPException(
             status_code=503,
             detail="Could not reach Telegram. Check your internet connection and try again.",
@@ -592,9 +717,10 @@ async def start_qr_login(body: Optional[QRStartRequest] = None):
         "api_id": target_id,
         "api_hash": target_hash,
         "is_byok": is_byok,
+        "session_base": session_base,
         "user": None,
         "channels": None,
-        "default_channel_id": None
+        "default_channel_id": None,
     }
 
     mon_task = asyncio.create_task(_monitor_qr(session_id, qr_login, client, float(session_expires_at)))
@@ -603,18 +729,17 @@ async def start_qr_login(body: Optional[QRStartRequest] = None):
     return {
         "session_id": session_id,
         "url": qr_login.url,
-        "expires_at": session_expires_at
+        "expires_at": session_expires_at,
     }
 
 
 @router.get("/qr/poll", response_model=QRPollResponse)
 async def poll_qr_login(session_id: str):
-    """Polls the status of the ongoing QR login session."""
+    """Polls status of ongoing QR login session."""
     session = _active_qr_sessions.get(session_id)
     if not session:
         raise HTTPException(status_code=404, detail="QR session not found or expired")
 
-    # If past total session expiry and still waiting or awaiting 2FA, mark expired
     if session["status"] in ("waiting", "2fa_required") and time.time() >= session.get("session_expires_at", 0):
         session["status"] = "expired"
 
@@ -636,7 +761,7 @@ async def poll_qr_login(session_id: str):
             "confirmed_at": None,
             "user": None,
             "channels": None,
-            "default_channel_id": None
+            "default_channel_id": None,
         }
 
     return {
@@ -646,7 +771,7 @@ async def poll_qr_login(session_id: str):
         "confirmed_at": session.get("confirmed_at"),
         "user": session.get("user"),
         "channels": session.get("channels"),
-        "default_channel_id": session.get("default_channel_id")
+        "default_channel_id": session.get("default_channel_id"),
     }
 
 
@@ -665,11 +790,8 @@ async def submit_qr_2fa(body: QR2FARequest):
                 await client.disconnect()
             except Exception:
                 pass
-        mon_task = session.get("monitor_task")
-        if mon_task and not mon_task.done():
-            mon_task.cancel()
         _active_qr_sessions.pop(body.session_id, None)
-        raise HTTPException(status_code=400, detail="QR session has expired. Please initiate a new login.")
+        raise HTTPException(status_code=400, detail="QR session has expired. Please scan the QR code again.")
 
     client: TelegramClient = session["client"]
     try:
@@ -684,7 +806,7 @@ async def submit_qr_2fa(body: QR2FARequest):
                     channels.append({
                         "id": c_id,
                         "title": d.title,
-                        "is_creator": getattr(d.entity, "creator", False)
+                        "is_creator": getattr(d.entity, "creator", False),
                     })
                     if "vayom" in d.title.lower() or "vault" in d.title.lower():
                         default_channel_id = c_id
@@ -698,25 +820,27 @@ async def submit_qr_2fa(body: QR2FARequest):
                 "first_name": user.first_name or "",
                 "last_name": user.last_name or "",
                 "username": user.username or "",
-                "is_premium": getattr(user, "premium", False)
+                "is_premium": getattr(user, "premium", False),
             },
             "channels": channels,
-            "default_channel_id": default_channel_id
+            "default_channel_id": default_channel_id,
         })
         return {"success": True}
+    except PasswordHashInvalidError:
+        raise HTTPException(status_code=400, detail="Invalid two-step verification password. Check your password and try again.")
+    except FloodWaitError as exc:
+        raise HTTPException(status_code=429, detail=f"Telegram rate limit reached. Please wait {exc.seconds} seconds before trying again.")
     except Exception as e:
         logger.error(f"2FA verification failed: {e}")
-        raise HTTPException(status_code=400, detail="2FA verification failed: Invalid two-factor password.")
+        raise HTTPException(status_code=400, detail="Incorrect two-step verification password.")
 
 
 @router.post("/qr/finalize")
 async def finalize_qr_login(body: QRFinalizeRequest):
     """
     Finalizes user onboarding after QR scan:
-    - Enforces 10-second Anti-Ban idle guard and double-create lock per update.md
-    - Auto-creates 'Vayom Vault' or attaches to selected channel
-    - Performs non-mutating privacy verification
-    - Persists config and activates storage client.
+    - Creates or binds to vault channel
+    - Persists auth config and activates storage client
     """
     session = _active_qr_sessions.get(body.session_id)
     if not session or session.get("status") != "confirmed":
@@ -733,23 +857,21 @@ async def finalize_qr_login(body: QRFinalizeRequest):
 
         channel_id = body.selected_channel_id
         if body.action == "auto_create" or not channel_id:
-            # Double-create guard: check if already created for this session
             if session.get("created_channel_id"):
                 channel_id = session["created_channel_id"]
             else:
-                # Enforce minimum 10-second idle window after session confirmation per update.md Invariant 1
                 confirmed_at = session.get("confirmed_at", 0)
                 elapsed = time.time() - confirmed_at
                 if elapsed < 10.0:
                     wait_needed = 10.0 - elapsed
-                    logger.info(f"Enforcing 10s Anti-Ban idle window before channel creation. Waiting {wait_needed:.2f}s...")
+                    logger.info(f"Enforcing safety idle window before channel creation ({wait_needed:.2f}s)...")
                     await asyncio.sleep(wait_needed)
 
                 try:
                     res = await client(CreateChannelRequest(
                         title=f"{display_name}'s Vayom Vault",
                         about="Private Cloud Storage powered by Telegram & Vayom Drive",
-                        megagroup=False
+                        megagroup=False,
                     ))
                     created_chat = res.chats[0]
                     channel_id = f"-100{created_chat.id}"
@@ -759,30 +881,28 @@ async def finalize_qr_login(body: QRFinalizeRequest):
                     logger.error(f"Failed to auto-create channel: {e}")
                     raise HTTPException(status_code=500, detail="Could not auto-create storage channel. Please verify channel permissions.")
 
-        # Non-mutating privacy verification per update.md Invariant 1
+        # Ensure channel is private
         try:
             target_entity = await client.get_entity(int(channel_id) if str(channel_id).lstrip("-").isdigit() else channel_id)
             has_public_username = bool(
-                getattr(target_entity, "username", None) or 
+                getattr(target_entity, "username", None) or
                 getattr(target_entity, "usernames", None)
             )
             if has_public_username:
-                logger.info(f"Channel {channel_id} has public username. Privatizing per Anti-Ban privacy invariant...")
                 from telethon.tl.functions.channels import UpdateUsernameRequest
                 await client(UpdateUsernameRequest(channel=target_entity, username=""))
                 logger.info(f"Successfully privatized channel {channel_id}")
-            else:
-                logger.info(f"Channel {channel_id} verified private locally (zero write mutation calls).")
         except Exception as priv_err:
-            logger.warning(f"Non-mutating privacy check encountered: {priv_err}")
+            logger.warning(f"Privacy check encountered: {priv_err}")
 
-        # Persist runtime configuration
         target_api_id = session.get("api_id") or settings.TELEGRAM_API_ID
         target_api_hash = session.get("api_hash") or settings.TELEGRAM_API_HASH
         is_byok = bool(session.get("is_byok"))
+        session_base = session.get("session_base", "vayom_user_own" if is_byok else "vayom_user_shared")
+
         config_payload = {
             "auth_mode": "byok_qr" if is_byok else "qr",
-            "session_name": "vayom_user",
+            "session_name": session_base,
             "api_id": target_api_id,
             "api_hash": target_api_hash,
             "channel_id": str(channel_id),
@@ -791,12 +911,12 @@ async def finalize_qr_login(body: QRFinalizeRequest):
                 "first_name": user_data.get("first_name"),
                 "username": user_data.get("username"),
                 "id": user_data.get("id"),
-                "is_premium": user_data.get("is_premium")
-            }
+                "is_premium": user_data.get("is_premium"),
+            },
         }
         settings.save_auth_config(config_payload)
+        _secure_file_permissions(settings.DATA_DIR / f"{session_base}.session")
 
-        # Disconnect the temporary qr client and connect the singleton storage client
         try:
             await client.disconnect()
         except Exception:
@@ -805,24 +925,16 @@ async def finalize_qr_login(body: QRFinalizeRequest):
         result = {
             "success": True,
             "channel_id": channel_id,
-            "user": config_payload["user_profile"]
+            "user": config_payload["user_profile"],
         }
 
-        # H-8: reconnect BEFORE the session is marked finalised and popped.
-        # Previously the session was destroyed first, so a transient reconnect
-        # failure returned a 500 with no way to retry — the client retried
-        # onboarding from scratch and the double-create guard (which lived only
-        # in the discarded session) was gone, producing a second vault channel.
         try:
             await storage_client.reconnect()
         except Exception as reconnect_err:
-            logger.error(f"Storage client reconnect failed during QR finalisation: {reconnect_err}")
+            logger.error(f"Storage client reconnect failed during QR finalization: {reconnect_err}")
             raise HTTPException(
                 status_code=503,
-                detail=(
-                    "Could not connect to Telegram after setup. Your vault channel is preserved — "
-                    "retry to finish onboarding."
-                ),
+                detail="Could not connect to Telegram after setup. Your vault channel is preserved — retry to finish onboarding.",
             )
 
         session["is_finalized"] = True
@@ -832,12 +944,11 @@ async def finalize_qr_login(body: QRFinalizeRequest):
         return result
 
 
+# -----------------------------------------------------------------------------
+# Bot & Developer Mode Sign-in
+# -----------------------------------------------------------------------------
+
 async def _validate_channel_for_bot(client: TelegramClient, channel_id_raw: Any) -> str:
-    """
-    Validates that the provided channel_id is numeric and that the bot has access
-    and posting permissions in the channel.
-    Raises ValueError on invalid/unreachable/unpostable channel.
-    """
     chan_str = str(channel_id_raw or "").strip()
     if not chan_str:
         raise ValueError("Channel ID cannot be empty.")
@@ -851,7 +962,6 @@ async def _validate_channel_for_bot(client: TelegramClient, channel_id_raw: Any)
     except Exception as err:
         raise ValueError(f"Could not reach or resolve storage channel {chan_int}: {err}")
 
-    # Check postability
     if getattr(entity, "broadcast", False):
         is_creator = getattr(entity, "creator", False)
         admin_rights = getattr(entity, "admin_rights", None)
@@ -864,15 +974,9 @@ async def _validate_channel_for_bot(client: TelegramClient, channel_id_raw: Any)
 
 @router.post("/bot")
 async def login_with_bot(body: BotLoginRequest):
-    """
-    Connects to Telegram using a dedicated Bot Token and Channel ID.
-    Validates credentials and verifies that the storage channel is reachable and postable.
-    """
+    """Connects to Telegram using a dedicated Bot Token and Channel ID."""
     _require_telegram_app_credentials()
 
-    # Telethon's start() silently reuses an already-authorized SQLite session,
-    # so switching bot tokens against the old session would keep uploading as
-    # the previous bot. Release the old client and start from a clean session.
     await storage_client.disconnect()
     _delete_session_files("vayom_bot")
 
@@ -881,7 +985,7 @@ async def login_with_bot(body: BotLoginRequest):
         temp_client = TelegramClient(
             str(settings.DATA_DIR / "vayom_bot"),
             settings.TELEGRAM_API_ID,
-            settings.TELEGRAM_API_HASH
+            settings.TELEGRAM_API_HASH,
         )
         await temp_client.start(bot_token=body.bot_token)
         verified_channel_id = await _validate_channel_for_bot(temp_client, body.channel_id)
@@ -892,11 +996,10 @@ async def login_with_bot(body: BotLoginRequest):
                 await temp_client.disconnect()
             except Exception:
                 pass
-        # Restore service with the previous (still saved) credentials.
         try:
             await storage_client.reconnect()
-        except Exception as reconnect_err:
-            logger.warning(f"Could not restore the previous session after a failed bot login: {reconnect_err}")
+        except Exception:
+            pass
         logger.error(f"Bot login failed: {e}")
         raise HTTPException(status_code=400, detail=f"Bot login failed: {e}")
 
@@ -908,28 +1011,24 @@ async def login_with_bot(body: BotLoginRequest):
         "user_profile": {
             "display_name": body.display_name or "Storage Bot",
             "first_name": "Bot",
-            "is_premium": False
-        }
+            "is_premium": False,
+        },
     }
     settings.save_auth_config(config_payload)
+    _secure_file_permissions(settings.DATA_DIR / "vayom_bot.session")
     await storage_client.reconnect()
     return {"success": True, "channel_id": verified_channel_id}
 
 
 @router.post("/developer")
 async def login_with_developer(body: DeveloperLoginRequest):
-    """
-    Sovereign Developer Mode: Configures custom API_ID, API_HASH, Bot Token, and Channel ID.
-    Validates credentials and verifies that the storage channel is reachable and postable.
-    """
+    """Developer Mode: Configures custom API_ID, API_HASH, Bot Token, and Channel ID."""
     if not body.api_id or not body.api_hash.strip():
         raise HTTPException(
             status_code=400,
             detail="API ID and API Hash are required for developer mode.",
         )
 
-    # Same session-reuse hazard as /bot: a new bot token must not inherit the
-    # previous bot's authorized Telethon session.
     await storage_client.disconnect()
     _delete_session_files("vayom_bot")
 
@@ -938,7 +1037,7 @@ async def login_with_developer(body: DeveloperLoginRequest):
         temp_client = TelegramClient(
             str(settings.DATA_DIR / "vayom_bot"),
             body.api_id,
-            body.api_hash.strip()
+            body.api_hash.strip(),
         )
         await temp_client.start(bot_token=body.bot_token)
         verified_channel_id = await _validate_channel_for_bot(temp_client, body.channel_id)
@@ -951,8 +1050,8 @@ async def login_with_developer(body: DeveloperLoginRequest):
                 pass
         try:
             await storage_client.reconnect()
-        except Exception as reconnect_err:
-            logger.warning(f"Could not restore the previous session after a failed developer login: {reconnect_err}")
+        except Exception:
+            pass
         raise
     except Exception as e:
         if temp_client is not None:
@@ -962,8 +1061,8 @@ async def login_with_developer(body: DeveloperLoginRequest):
                 pass
         try:
             await storage_client.reconnect()
-        except Exception as reconnect_err:
-            logger.warning(f"Could not restore the previous session after a failed developer login: {reconnect_err}")
+        except Exception:
+            pass
         logger.error(f"Developer login failed: {e}")
         raise HTTPException(status_code=400, detail=f"Developer login failed: {e}")
 
@@ -977,37 +1076,42 @@ async def login_with_developer(body: DeveloperLoginRequest):
         "user_profile": {
             "display_name": body.display_name or "Developer Node",
             "first_name": "Custom MTProto",
-            "is_premium": False
-        }
+            "is_premium": False,
+        },
     }
     settings.save_auth_config(config_payload)
+    _secure_file_permissions(settings.DATA_DIR / "vayom_bot.session")
     await storage_client.reconnect()
     return {"success": True, "channel_id": verified_channel_id}
 
 
+# -----------------------------------------------------------------------------
+# Logout
+# -----------------------------------------------------------------------------
+
 @router.post("/logout")
 async def logout():
-    """Logs out of the active node, revokes the Telegram session when possible,
-    and removes all local authorization material (R-04)."""
-    # Best-effort server-side invalidation: deleting the local SQLite session
-    # alone leaves the auth key usable on Telegram's side.
+    """Logs out of active node, revokes Telegram session when possible, and cleans up local state."""
     active_client = getattr(storage_client, "client", None)
     if active_client is not None:
         try:
             if hasattr(active_client, "is_connected") and active_client.is_connected():
                 await active_client.log_out()
         except Exception as exc:
-            logger.warning(f"Telegram server-side logout failed; continuing with local cleanup: {exc}")
+            logger.warning(f"Telegram server-side logout failed; continuing local cleanup: {exc}")
 
-    # Stop any in-flight QR login so its client releases the session file.
     for old_id, old_sess in list(_active_qr_sessions.items()):
         try:
             mon_task = old_sess.get("monitor_task")
             if mon_task and not mon_task.done():
                 mon_task.cancel()
             old_client = old_sess.get("client")
-            if old_client and old_client.is_connected():
-                await old_client.disconnect()
+            if old_client and getattr(old_client, "is_connected", None):
+                is_conn = old_client.is_connected()
+                if asyncio.iscoroutine(is_conn):
+                    is_conn = await is_conn
+                if is_conn:
+                    await old_client.disconnect()
         except Exception:
             pass
         _active_qr_sessions.pop(old_id, None)
@@ -1016,7 +1120,7 @@ async def logout():
     await storage_client.disconnect()
 
     removed = []
-    for name in ("vayom_user", "vayom_bot"):
+    for name in ("vayom_user_own", "vayom_user_shared", "vayom_user", "vayom_bot", "vayom_nas"):
         removed.extend(_delete_session_files(name))
 
     return {"success": True, "sessions_removed": removed}

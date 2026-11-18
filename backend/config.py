@@ -315,6 +315,8 @@ class Settings:
                     import secrets
                     self.LOCAL_API_TOKEN = secrets.token_hex(24)
                 self.USER_PROFILE = data.get("user_profile") or {}
+                if data.get("nas_vault_root"):
+                    self.NAS_VAULT_ROOT = Path(data["nas_vault_root"])
                 self.SESSION_NAME = data.get("session_name") or ("vayom_user" if self.AUTH_MODE in ("qr", "byok_qr") else "vayom_bot")
                 # F-2: premium upgrades slicing to 4 GB, but the limit must fall back
                 # to the standard 1.9 GB whenever premium is absent or has expired.

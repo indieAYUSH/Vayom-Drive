@@ -16,13 +16,35 @@ export interface ChannelOption {
   is_creator: boolean
 }
 
+export type AuthStep =
+  | 'choosing'
+  | 'needs_keys'
+  | 'auto_phone'
+  | 'auto_code'
+  | 'qr_waiting'
+  | 'needs_2fa'
+  | 'nas_form'
+  | 'bot_form'
+  | 'dev_form'
+  | 'connected'
+
+export type QrMode = 'own' | 'shared'
+
 interface AuthState {
   isAuthenticated: boolean
   isInitializing: boolean
   isLoading: boolean
-  authMode: 'qr' | 'byok_qr' | 'bot' | 'developer' | ''
+  authMode: 'qr' | 'byok_qr' | 'bot' | 'developer' | 'nas' | ''
+  authStep: AuthStep
+  qrMode: QrMode
   user: UserProfile | null
   channelId: string | null
+
+  // Saved credentials info (server-side, masked)
+  hasSavedKeys: boolean
+  savedApiId: number | null
+  savedApiHashMasked: string | null
+  devModeEnabled: boolean
 
   // QR Session State
   qrSessionId: string | null
@@ -39,14 +61,22 @@ interface AuthState {
   sessionExpired: boolean
   handleSessionExpired: () => void
 
+  // Navigation & Form State Actions
+  setAuthStep: (step: AuthStep) => void
+  setQrMode: (mode: QrMode) => void
+  clearSensitiveFormState: () => void
+
   // Actions
   checkAuth: () => Promise<boolean>
+  saveManualKeys: (apiId: number, apiHash: string) => Promise<void>
   requestByokCode: (phone: string) => Promise<string>
-  extractByokKeys: (phone: string, randomHash: string, code: string) => Promise<{ apiId: number; apiHash: string }>
-  startQrSession: (creds?: { apiId?: number; apiHash?: string }) => Promise<void>
+  extractByokKeys: (phone: string, randomHash: string, code: string) => Promise<{ apiId: number; apiHash?: string }>
+  startQrSession: (options?: { mode?: QrMode; apiId?: number; apiHash?: string }) => Promise<void>
   pollQrSession: () => Promise<void>
   submit2FA: (password: string) => Promise<void>
   finalizeQr: (displayName: string, action: 'auto_create' | 'select_existing', channelId?: string) => Promise<void>
+  testNasConnection: (vaultRoot?: string) => Promise<{ success: boolean; error?: string; message?: string; free_bytes?: number; total_bytes?: number }>
+  saveNasConfig: (vaultRoot: string, displayName?: string) => Promise<void>
   loginWithBot: (botToken: string, channelId: string, displayName?: string) => Promise<void>
   loginWithDeveloper: (apiId: number, apiHash: string, botToken: string, channelId: string, displayName?: string) => Promise<void>
   logout: () => Promise<void>
@@ -58,15 +88,9 @@ let currentQrRequestId = 0
 let qrAbortController: AbortController | null = null
 let qrPollFailures = 0
 
-// A dead backend must not leave the login screen waiting forever.
-const QR_START_TIMEOUT_MS = 60_000
-const QR_POLL_FAILURE_LIMIT = 12 // 12 x 2.5s = 30s of consecutive failures
+const QR_START_TIMEOUT_MS = 45_000
+const QR_POLL_FAILURE_LIMIT = 12
 
-// C-3: the packaged desktop app creates the webview before the PyInstaller
-// sidecar has finished extracting and binding 127.0.0.1:8000, so the very
-// first /auth/status request can fail with a connection error. Probe with a
-// bounded retry so a slow cold start shows the "Verifying node gateway..."
-// splash instead of a misleading "Connection Failed" login screen.
 const AUTH_PROBE_MAX_ATTEMPTS = 24
 const AUTH_PROBE_DELAY_MS = 500
 
@@ -88,8 +112,15 @@ export const useAuthStore = create<AuthState>((set, get) => ({
   isInitializing: true,
   isLoading: false,
   authMode: '',
+  authStep: 'choosing',
+  qrMode: 'own',
   user: null,
   channelId: null,
+
+  hasSavedKeys: false,
+  savedApiId: null,
+  savedApiHashMasked: null,
+  devModeEnabled: false,
 
   qrSessionId: null,
   qrUrl: null,
@@ -102,39 +133,84 @@ export const useAuthStore = create<AuthState>((set, get) => ({
   error: null,
   sessionExpired: false,
 
+  setAuthStep: (step: AuthStep) => set({ authStep: step, error: null }),
+  setQrMode: (mode: QrMode) => set({ qrMode: mode }),
+
+  clearSensitiveFormState: () => {
+    set({
+      byokCreds: null,
+      error: null,
+    })
+  },
+
   checkAuth: async () => {
     for (let attempt = 1; attempt <= AUTH_PROBE_MAX_ATTEMPTS; attempt++) {
       try {
         const res = await fetch(`${API_BASE}/auth/status`)
-
-        // The backend answered, so it is up. A non-OK status is a real answer
-        // (e.g. a foreign service on port 8000) and must not be retried.
         if (!res.ok) {
-          set({ isAuthenticated: false, isInitializing: false, error: null })
+          set({ isAuthenticated: false, isInitializing: false, error: null, authStep: 'choosing' })
           return false
         }
 
         const data = await res.json()
+        const isAuth = Boolean(data.is_authenticated)
+        const hasSaved = Boolean(data.has_saved_keys)
+
         set({
-          isAuthenticated: data.is_authenticated,
+          isAuthenticated: isAuth,
           authMode: data.auth_mode || '',
           user: data.user,
           channelId: data.channel_id,
+          hasSavedKeys: hasSaved,
+          savedApiId: data.saved_api_id || null,
+          savedApiHashMasked: data.saved_api_hash_masked || null,
+          devModeEnabled: Boolean(data.dev_mode_enabled),
           isInitializing: false,
+          authStep: isAuth ? 'connected' : hasSaved ? 'qr_waiting' : 'choosing',
+          qrMode: 'own',
         })
-        return data.is_authenticated
+
+        // Returning user with saved keys but no session: go straight to qr_waiting
+        if (!isAuth && hasSaved) {
+          get().startQrSession({ mode: 'own' })
+        }
+
+        return isAuth
       } catch (err: any) {
-        // Network-level failure: the backend is not listening yet (or died).
-        // Keep waiting while the splash stays up, then give up cleanly.
         if (attempt >= AUTH_PROBE_MAX_ATTEMPTS) {
-          set({ isAuthenticated: false, isInitializing: false, error: null })
+          set({ isAuthenticated: false, isInitializing: false, error: null, authStep: 'choosing' })
           return false
         }
         await sleep(AUTH_PROBE_DELAY_MS)
       }
     }
-    set({ isAuthenticated: false, isInitializing: false, error: null })
+    set({ isAuthenticated: false, isInitializing: false, error: null, authStep: 'choosing' })
     return false
+  },
+
+  saveManualKeys: async (apiId: number, apiHash: string) => {
+    set({ isLoading: true, error: null })
+    try {
+      const res = await fetch(`${API_BASE}/auth/keys`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ api_id: apiId, api_hash: apiHash.trim() }),
+      })
+      const data = await res.json()
+      if (!res.ok) {
+        throw new Error(data?.detail || 'Failed to save Telegram API keys')
+      }
+      set({
+        hasSavedKeys: true,
+        savedApiId: data.api_id,
+        savedApiHashMasked: data.api_hash_masked,
+        qrMode: 'own',
+        isLoading: false,
+      })
+    } catch (err: any) {
+      set({ isLoading: false, error: err.message })
+      throw err
+    }
   },
 
   requestByokCode: async (phone: string) => {
@@ -170,13 +246,13 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       if (!res.ok) {
         throw new Error(data?.detail || 'Failed to extract Telegram API credentials')
       }
-      const creds = { apiId: Number(data.api_id), apiHash: String(data.api_hash) }
-      try {
-        localStorage.setItem('vayom_byok_api_id', String(creds.apiId))
-        localStorage.setItem('vayom_byok_api_hash', creds.apiHash)
-      } catch {}
-      set({ byokCreds: creds })
-      return creds
+      set({
+        hasSavedKeys: true,
+        savedApiId: Number(data.api_id),
+        savedApiHashMasked: data.api_hash_masked || (data.api_hash ? `...${data.api_hash.slice(-4)}` : null),
+        qrMode: 'own',
+      })
+      return { apiId: Number(data.api_id), apiHash: data.api_hash }
     } catch (err: any) {
       set({ error: err.message })
       throw err
@@ -185,8 +261,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     }
   },
 
-  startQrSession: async (creds?: { apiId?: number; apiHash?: string }) => {
-    // H-4: Abort any in-flight start request and clear active intervals
+  startQrSession: async (options) => {
     stopQrPolling()
 
     const requestId = ++currentQrRequestId
@@ -194,14 +269,9 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     qrAbortController = controller
     qrPollFailures = 0
 
-    if (creds !== undefined) {
-      set({ byokCreds: creds })
-    }
-    const activeCreds = creds !== undefined ? creds : get().byokCreds
-
-    // Clear the previous session's identifiers/expiry: keeping them while the
-    // new start is in flight made LoginView render a false "Session Expired".
+    const targetMode: QrMode = options?.mode || get().qrMode || 'own'
     set({
+      qrMode: targetMode,
       qrStatus: 'waiting',
       error: null,
       scannedUser: null,
@@ -209,33 +279,42 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       qrSessionId: null,
       qrUrl: null,
       qrExpiresAt: null,
+      authStep: 'qr_waiting',
     })
+
     const timeoutId = setTimeout(() => controller.abort(), QR_START_TIMEOUT_MS)
     try {
-      const hasCreds = Boolean(activeCreds?.apiId && activeCreds?.apiHash)
+      const payload: any = { mode: targetMode }
+      if (targetMode === 'own') {
+        if (options?.apiId && options?.apiHash) {
+          payload.api_id = options.apiId
+          payload.api_hash = options.apiHash
+        } else if (get().savedApiId) {
+          payload.api_id = get().savedApiId
+        }
+      }
+
       const res = await fetch(`${API_BASE}/auth/qr/start`, {
         method: 'POST',
-        headers: hasCreds ? { 'Content-Type': 'application/json' } : undefined,
-        body: hasCreds ? JSON.stringify({ api_id: activeCreds!.apiId, api_hash: activeCreds!.apiHash }) : undefined,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
         signal: controller.signal,
       })
+
       if (requestId !== currentQrRequestId) return
+
       if (!res.ok) {
-        // Surface actionable backend errors (missing app credentials, Telegram
-        // unreachable, etc.) instead of a single generic message.
         let message = 'Could not initialize Telegram QR session'
         try {
           const body = await res.json()
           if (typeof body?.detail === 'string' && body.detail.trim()) {
             message = body.detail
           }
-        } catch {
-          // Non-JSON error body: keep the generic fallback.
-        }
+        } catch {}
         throw new Error(message)
       }
-      const data = await res.json()
 
+      const data = await res.json()
       if (requestId !== currentQrRequestId) return
 
       set({
@@ -245,7 +324,6 @@ export const useAuthStore = create<AuthState>((set, get) => ({
         qrStatus: 'waiting',
       })
 
-      // H-4: Clean any existing interval right before starting the new one
       if (pollInterval) {
         clearInterval(pollInterval)
         pollInterval = null
@@ -254,12 +332,11 @@ export const useAuthStore = create<AuthState>((set, get) => ({
         get().pollQrSession()
       }, 2500)
     } catch (err: any) {
-      // A newer start (or a manual cancel) superseded this request.
       if (requestId !== currentQrRequestId) return
       if (err.name === 'AbortError') {
         set({
           qrStatus: 'failed',
-          error: 'Starting the QR session timed out. Check that the local backend is running and try again.',
+          error: 'Starting the QR session timed out. Check your internet connection and try again.',
         })
         return
       }
@@ -282,7 +359,6 @@ export const useAuthStore = create<AuthState>((set, get) => ({
 
     try {
       const res = await fetch(`${API_BASE}/auth/qr/poll?session_id=${sessionId}`)
-      // A newer session replaced this one while the request was in flight.
       if (get().qrSessionId !== sessionId) return
 
       if (!res.ok) {
@@ -305,6 +381,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       const data = await res.json()
       if (get().qrSessionId !== sessionId) return
       qrPollFailures = 0
+
       if (data.status === 'confirmed') {
         stopQrPolling()
         set({
@@ -315,12 +392,12 @@ export const useAuthStore = create<AuthState>((set, get) => ({
         })
       } else if (data.status === '2fa_required') {
         stopQrPolling()
-        set({ qrStatus: '2fa_required' })
+        set({ qrStatus: '2fa_required', authStep: 'needs_2fa' })
       } else if (data.status === 'expired') {
         stopQrPolling()
         set({ qrStatus: 'expired' })
       } else if (data.status === 'waiting') {
-        // Token seamlessly auto-refreshed by backend
+        // Silent token refresh
         const updates: any = {}
         if (data.url && data.url !== get().qrUrl) {
           updates.qrUrl = data.url
@@ -332,10 +409,9 @@ export const useAuthStore = create<AuthState>((set, get) => ({
           set(updates)
         }
       }
-    } catch (err) {
+    } catch {
       if (get().qrSessionId !== sessionId) return
       qrPollFailures += 1
-      // Transient hiccups are fine; a permanently dead backend is not.
       if (qrPollFailures >= QR_POLL_FAILURE_LIMIT && get().qrStatus === 'waiting') {
         stopQrPolling()
         set({
@@ -358,13 +434,13 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       })
       if (!res.ok) {
         const errData = await res.json().catch(() => ({}))
-        throw new Error(errData.detail || 'Incorrect 2FA password')
+        throw new Error(errData.detail || 'Invalid two-step verification password.')
       }
       // Re-poll to fetch user and channels
       await get().pollQrSession()
       set({ isLoading: false })
     } catch (err: any) {
-      set({ isLoading: false, error: err.message || 'Failed 2FA verification' })
+      set({ isLoading: false, error: err.message || 'Failed two-step verification' })
       throw err
     }
   },
@@ -392,12 +468,60 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       stopQrPolling()
       set({
         isAuthenticated: true,
-        authMode: (data.auth_mode as any) || (get().byokCreds?.apiId ? 'byok_qr' : 'qr'),
+        authMode: get().qrMode === 'own' ? 'byok_qr' : 'qr',
         channelId: data.channel_id,
         user: data.user,
         isLoading: false,
         qrSessionId: null,
         qrUrl: null,
+        authStep: 'connected',
+      })
+    } catch (err: any) {
+      set({ isLoading: false, error: err.message })
+      throw err
+    }
+  },
+
+  testNasConnection: async (vaultRoot?: string) => {
+    set({ isLoading: true, error: null })
+    try {
+      const res = await fetch(`${API_BASE}/auth/nas/test`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ vault_root: vaultRoot?.trim() || undefined }),
+      })
+      const data = await res.json()
+      return data
+    } catch (err: any) {
+      return { success: false, error: err.message || 'Connection test failed' }
+    } finally {
+      set({ isLoading: false })
+    }
+  },
+
+  saveNasConfig: async (vaultRoot: string, displayName?: string) => {
+    set({ isLoading: true, error: null })
+    try {
+      const res = await fetch(`${API_BASE}/auth/nas/save`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          vault_root: vaultRoot.trim(),
+          display_name: displayName?.trim() || 'NAS Vault',
+        }),
+      })
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}))
+        throw new Error(errData.detail || 'Failed to save NAS configuration')
+      }
+      const data = await res.json()
+      set({
+        isAuthenticated: true,
+        authMode: 'nas',
+        channelId: 'nas_vault',
+        user: data.user,
+        isLoading: false,
+        authStep: 'connected',
       })
     } catch (err: any) {
       set({ isLoading: false, error: err.message })
@@ -406,7 +530,6 @@ export const useAuthStore = create<AuthState>((set, get) => ({
   },
 
   loginWithBot: async (botToken, channelId, displayName) => {
-    // H-3: Stop any active QR polling interval when logging in via Bot token
     stopQrPolling()
     set({ isLoading: true, error: null })
     try {
@@ -434,6 +557,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
         qrSessionId: null,
         qrUrl: null,
         qrStatus: 'idle',
+        authStep: 'connected',
       })
     } catch (err: any) {
       set({ isLoading: false, error: err.message })
@@ -442,7 +566,6 @@ export const useAuthStore = create<AuthState>((set, get) => ({
   },
 
   loginWithDeveloper: async (apiId, apiHash, botToken, channelId, displayName) => {
-    // H-3: Stop any active QR polling interval when logging in via Developer mode
     stopQrPolling()
     set({ isLoading: true, error: null })
     try {
@@ -472,6 +595,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
         qrSessionId: null,
         qrUrl: null,
         qrStatus: 'idle',
+        authStep: 'connected',
       })
     } catch (err: any) {
       set({ isLoading: false, error: err.message })
@@ -484,12 +608,12 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     set({ isLoading: true })
     try {
       await fetch(`${API_BASE}/auth/logout`, { method: 'POST' })
-    } catch (e) {
-      // ignore
-    }
+    } catch {}
     set({
       isAuthenticated: false,
       authMode: '',
+      authStep: 'choosing',
+      qrMode: 'own',
       user: null,
       channelId: null,
       qrSessionId: null,
@@ -510,6 +634,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     set({
       isAuthenticated: false,
       authMode: '',
+      authStep: 'choosing',
       user: null,
       channelId: null,
       qrSessionId: null,
