@@ -1,6 +1,6 @@
 # 🌌 Vayom Drive
 
-> **Turn Telegram into an infinite, zero-cost, zero-knowledge personal cloud storage with the sleek duality of Google Photos & Google Drive.**
+> **Turn Telegram into a free personal cloud with a Google Photos-style timeline, Google Drive-style folders, and smooth 4K video streaming.**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Python: 3.11+](https://img.shields.io/badge/Python-3.11+-3776AB.svg?logo=python&logoColor=white)](https://python.org)
@@ -11,58 +11,38 @@
 
 ## 💡 What is Vayom Drive?
 
-Every major cloud provider charges you recurring monthly fees to store your own files, while scanning your photos and locking your data behind walled gardens.
+Your private cloud, powered by Telegram, your NAS, and S3.
 
-**Vayom Drive transforms Telegram's free, distributed cloud infrastructure into your own private, unlimited personal drive.** 
+Stop paying monthly fees to store your own files. Vayom Drive brings Telegram's free storage, your home NAS (Synology, TrueNAS, Unraid), and S3, Cloudflare R2, or MinIO buckets into **one dashboard**. No bots, no scrolling through chats.
 
-Instead of dealing with clunky Telegram bots or scrolling through endless chat channels to find your media, Vayom Drive wraps Telegram’s bottomless storage in a polished **Google Photos-style media timeline** and a **Google Drive-style folder hierarchy**. 
+## ✨ Features
 
-Your files are encrypted on your device before they touch the internet. And for power users, Vayom Drive bridges seamlessly with your **home NAS (Synology, TrueNAS, Unraid)** and **S3 / Cloudflare R2 / MinIO** buckets under one unified dashboard.
+### 🎬 Video Streaming
+- **4K streaming:** play and seek 4K video instantly, without downloading the whole file first
+- **Fast start, smooth seeking:** built to match or beat other Telegram storage apps
+- **Range-request based:** works on supported browsers, formats, and storage backends
 
----
-✨ Features
+### 🎞️ Browsing
+- **Photos mode:** browse media by capture date, with EXIF camera metadata where available
+- **Drive mode:** navigate folders and run bulk file operations
+- **Audio player:** plays FLAC, MP3, and WAV in a floating player while you keep browsing
 
-☁️ Storage Without the Storage Bill
+### ☁️ Storage
+- **Multiple backends:** Telegram, local disks, NAS, S3-compatible storage (AWS S3, Cloudflare R2, MinIO), and Nextcloud
+- **Large-file support:** files are split into parts automatically and reassembled when needed (subject to backend limits)
+- **Watch folders:** changes in supported local folders are cataloged automatically
 
-Telegram-backed storage: Store files remotely using Telegram as a backend, without a recurring storage subscription from Vayom Drive itself.
+### 🚀 Transfers
+- **Anti-flood protection:** upload queues, rate limiting, and automatic pauses help you stay within Telegram API limits
+- **Folder drag and drop:** import entire directory trees at once
+- **ZIP packaging:** bundle folders into `.zip` archives inside the app
 
-Multiple storage adapters: Bring together Telegram, local disks, NAS, S3-compatible storage (including Cloudflare R2 and AWS S3), and Nextcloud.
+### 🔐 Privacy
+- **Client-side encryption:** files other than videos are encrypted with AES-256-CTR, using keys derived from your master passphrase, before upload
+- **Not encrypted:** videos and file metadata are stored unencrypted
+- **No photo scanning**
 
-Large-file support: Automatically split files into manageable parts and reconstruct them when needed, subject to backend limits. Because files don't get smaller just because a platform says so.
-
-Watch-folder cataloging: Automatically catalog changes in supported local folders without manually importing every file.
-
-🛡️ Smarter Transfers, Fewer Headaches
-
-Adaptive anti-flood protection: Upload queues, rate limiting, and automatic pauses help Vayom Drive respect Telegram API limits and reduce flood-limit errors. No magic ban-proof button exists, unfortunately.
-
-Folder drag and drop: Import complete directory trees instead of uploading files one lonely document at a time.
-
-Built-in ZIP packaging: Package folders into .zip archives directly in the app when a single archive makes more sense.
-
-🔐 Privacy Is Not an Afterthought
-
-Client-side encryption: Encrypt files using AES-256-CTR with keys derived from your master passphrase before uploading them.
-
-Private file contents: Properly implemented client-side encryption keeps the storage provider from reading the plaintext contents of encrypted files without the relevant key.
-
-Security depends on correct key derivation, IV/nonce management, and implementation. AES-CTR alone does not provide tamper detection.
-
-🎞️ One Library, Two Ways to Browse
-
-Photos Mode: Browse media chronologically with capture dates and available EXIF camera metadata. Find that picture from three years ago without scrolling through a thousand filenames.
-
-Drive Mode: Navigate folders, manage directories, and perform bulk file operations through a familiar file-tree interface.
-
-Video streaming and seeking: Use HTTP Range requests for supported media and storage backends to seek through videos without downloading the entire file first. Playback quality and responsiveness depend on the browser, format, network, and backend.
-
-Media organization: Keep photos, videos, documents, and other files accessible from one interface rather than scattering them across unrelated tools.
-
-🎧 A Little More Than File Storage
-
-Audio player: Play FLAC, MP3, and WAV files through a floating player while continuing to browse your library.
-
-PDF viewer: Open multi-page PDF documents in-app, with presentation zoom for more comfortable reading.
+> **Security note:** AES-CTR does not detect tampering. Overall security depends on correct key derivation and IV/nonce management.
 ## 📖 User Guide
 
 ### 1. Connecting Your Telegram Account
