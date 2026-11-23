@@ -190,6 +190,8 @@ jobs:
   publish-release:
     needs: [build-desktop, build-android]
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - name: Download Linux Artifacts
         uses: actions/download-artifact@v4
@@ -213,6 +215,15 @@ jobs:
         run: |
           mkdir -p dist-release
           find release-assets/ -type f \( -name "*.AppImage" -o -name "*.deb" -o -name "*.msi" -o -name "*.exe" -o -name "*.apk" \) -exec cp {} dist-release/ \;
+          # Also provide clean dot-delimited versions and named APK if spaces/names exist
+          cd dist-release
+          if [ -f "app-release.apk" ] && [ ! -f "Vayom-Drive-1.0.0.apk" ]; then
+            cp app-release.apk Vayom-Drive-1.0.0.apk
+          fi
+          for f in *\ *; do
+            [ -f "$f" ] && cp "$f" "${f// /.}"
+          done
+          cd ..
           echo "=== Collected Release Binaries ==="
           ls -la dist-release/
 
@@ -229,25 +240,32 @@ jobs:
           fi
 
       - name: Publish All 3 Platforms to GitHub Releases
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ steps.release_info.outputs.tag }}
-          name: ${{ steps.release_info.outputs.title }}
-          body: |
-            ## 🚀 Vayom Drive — Sovereign Cloud Storage Release
-
-            ### 📦 Download Links for All 3 Platforms:
-            - 📱 **Android**: `app-release.apk` (Install directly on any Android device)
-            - 🐧 **Linux**: `.AppImage` (portable) and `.deb` (Debian/Ubuntu package)
-            - 🪟 **Windows**: `.msi` (installer) and `.exe` (setup executable)
-
-            ### ✨ Key Highlights:
-            - **1-Click Sovereign BYOK:** Automated in-app Telegram API key retrieval via `my.telegram.org`.
-            - **End-to-End Encrypted Vault:** Client-side AES-256-CTR encryption with local key derivation.
-            - **Multi-Part Resilient Streaming:** High-performance video/media streaming with prefetch and range seek support.
-            - **Zero Third-Party Cloud Leaks:** All data stored directly in your own private Telegram channel storage node.
-          files: dist-release/*
-          draft: false
-          prerelease: false
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG_NAME: ${{ steps.release_info.outputs.tag }}
+          RELEASE_TITLE: ${{ steps.release_info.outputs.title }}
+        run: |
+          cat << 'EOF' > release_notes.md
+          ## 🚀 Vayom Drive — Sovereign Cloud Storage Release
+
+          ### 📦 Download Links for All 3 Platforms:
+          - 📱 **Android**: `app-release.apk` (Install directly on any Android device)
+          - 🐧 **Linux**: `.AppImage` (portable) and `.deb` (Debian/Ubuntu package)
+          - 🪟 **Windows**: `.msi` (installer) and `.exe` (setup executable)
+
+          ### ✨ Key Highlights:
+          - **1-Click Sovereign BYOK:** Automated in-app Telegram API key retrieval via `my.telegram.org`.
+          - **End-to-End Encrypted Vault:** Client-side AES-256-CTR encryption with local key derivation.
+          - **Multi-Part Resilient Streaming:** High-performance video/media streaming with prefetch and range seek support.
+          - **Zero Third-Party Cloud Leaks:** All data stored directly in your own private Telegram channel storage node.
+          EOF
+
+          if gh release view "$TAG_NAME" >/dev/null 2>&1; then
+            echo "Release $TAG_NAME exists. Uploading and updating assets..."
+            gh release upload "$TAG_NAME" dist-release/* --clobber
+          else
+            echo "Creating new release $TAG_NAME..."
+            gh release create "$TAG_NAME" dist-release/* \
+              --title "$RELEASE_TITLE" \
+              --notes-file release_notes.md
+          fi
