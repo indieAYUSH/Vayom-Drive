@@ -193,6 +193,9 @@ jobs:
     permissions:
       contents: write
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
       - name: Download Linux Artifacts
         uses: actions/download-artifact@v4
         with:
@@ -242,6 +245,7 @@ jobs:
       - name: Publish All 3 Platforms to GitHub Releases
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
           TAG_NAME: ${{ steps.release_info.outputs.tag }}
           RELEASE_TITLE: ${{ steps.release_info.outputs.title }}
         run: |
